@@ -39,6 +39,7 @@ const allowedOrigins = [
   'https://www.triven.in',
   'https://triven.in',
   'https://your-hostinger-domain.com',
+  'https://support.trivenayurveda.in',
 ];
 app.use(
   cors({
