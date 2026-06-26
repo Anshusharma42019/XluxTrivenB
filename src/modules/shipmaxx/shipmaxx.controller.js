@@ -139,6 +139,100 @@ export const createOrder = catchAsync(async (req, res) => {
   res.json(new ApiResponse(200, { ...data, extracted_order_id: oid }, 'Order created'));
 });
 
+export const createOrderAndShipment = catchAsync(async (req, res) => {
+  const { pickup_address_id, channel_id, payment_method, order_number, customer, products, package: pkg, billing_address, other_charges, total_discount, warehouse_id, carrier_variant_id } = req.body;
+
+  const required = ['pickup_address_id', 'channel_id', 'payment_method', 'order_number', 'customer', 'products', 'package'];
+  const missing = required.filter((k) => !req.body[k]);
+  if (missing.length) return res.json(new ApiResponse(400, null, `Missing: ${missing.join(', ')}`));
+
+  const customerRequired = ['phone', 'name', 'address', 'pincode', 'city', 'state'];
+  const missingCustomer = customerRequired.filter((k) => !customer[k]);
+  if (missingCustomer.length) return res.json(new ApiResponse(400, null, `Missing customer fields: ${missingCustomer.join(', ')}`));
+
+  const fresh_order_id = await getNextOrderId();
+
+  const payload = {
+    pickup_address_id: Number(pickup_address_id),
+    channel_id: Number(channel_id),
+    payment_method,
+    order_number: fresh_order_id,
+    customer,
+    products: (products || []).map(p => ({
+      sku: String(p.sku || ''),
+      name: String(p.name || ''),
+      price: Number(p.price) || 0,
+      quantity: Number(p.quantity) || 1,
+    })),
+    package: {
+      weight: Number(pkg.weight) || 0.5,
+      length: Number(pkg.length) || 10,
+      width: Number(pkg.width) || 10,
+      height: Number(pkg.height) || 10,
+    },
+    ...(billing_address && { billing_address }),
+    ...(other_charges !== undefined && { other_charges: Number(other_charges) || 0 }),
+    ...(total_discount !== undefined && { total_discount: Number(total_discount) || 0 }),
+  };
+
+  const data = await smx.createOrder(payload);
+  const smxRes = data?.data || data || {};
+  const oid = smxRes.order_id || smxRes.id || order_number;
+
+  // Log in CRM Order database
+  try {
+    const subTotal = (products || []).reduce((sum, p) => sum + (Number(p.price) * (Number(p.quantity) || 1)), 0) + (Number(other_charges) || 0) - (Number(total_discount) || 0);
+    await Order.create({
+      order_id: String(oid),
+      status: 'NEW',
+      billing_customer_name: customer.name,
+      billing_phone: customer.phone,
+      billing_address: customer.address,
+      billing_city: customer.city,
+      billing_state: customer.state,
+      billing_pincode: customer.pincode,
+      billing_email: customer.email || '',
+      payment_method: payment_method,
+      sub_total: subTotal,
+      order_items: (products || []).map(p => ({ name: p.name, sku: p.sku, units: p.quantity, selling_price: p.price })),
+      platform: 'shipmaxx',
+      created_by: req.user?._id,
+      raw_response: smxRes,
+    });
+  } catch (err) {
+    console.error('[ShipMaxx Create Order Log Error]', err.message);
+  }
+
+  // Step 2: Create Shipment
+  let shipmentData = null;
+  let awb = null;
+  try {
+    const shipmentPayload = {
+      order_id: String(oid),
+      ...(warehouse_id && { warehouse_id: Number(warehouse_id) }),
+      ...(carrier_variant_id && { carrier_variant_id: Number(carrier_variant_id) }),
+    };
+    shipmentData = await smx.createShipment(shipmentPayload);
+    const shipRes = shipmentData?.data || shipmentData || {};
+    awb = shipRes.awb || shipRes.awb_number;
+
+    if (awb) {
+      await Order.findOneAndUpdate(
+        { order_id: String(oid), platform: 'shipmaxx' },
+        { $set: { awb_code: awb, status: 'SHIPPED', status_updated_at: new Date() } }
+      );
+    }
+  } catch (err) {
+    console.error('[ShipMaxx Create Shipment Log Error]', err.message);
+  }
+
+  res.json(new ApiResponse(200, {
+    order: { ...data, extracted_order_id: oid },
+    shipment: shipmentData,
+    awb_code: awb
+  }, awb ? 'Order and Shipment created successfully' : 'Order created, but Shipment failed'));
+});
+
 export const updateOrder = catchAsync(async (req, res) => {
   const { order_id } = req.params;
   if (!order_id) return res.json(new ApiResponse(400, null, 'order_id is required'));
@@ -229,67 +323,56 @@ export const getShipmentById = catchAsync(async (req, res) => {
   res.json(new ApiResponse(200, data, 'Shipment fetched'));
 });
 
-export const generateLabel = async (req, res, next) => {
-  try {
-    const awb = req.params.awb || req.query.awb;
-    if (!awb) return res.json(new ApiResponse(400, null, 'awb is required'));
+export const generateLabel = catchAsync(async (req, res) => {
+  const awb = req.params.awb || req.query.awb;
+  if (!awb) return res.json(new ApiResponse(400, null, 'awb is required'));
+  
+  const buffer = await smx.downloadLabelPdf(awb);
+  
+  if (!buffer || buffer.length === 0) {
+    return res.status(400).json(new ApiResponse(400, null, 'Label not available yet (empty response)'));
+  }
 
-    const dbOrder = await Order.findOne({
-      platform: 'shipmaxx',
-      $or: [{ awb_code: awb }, { order_id: awb }]
-    }).select('label_url order_id awb_code raw_response').lean();
-
-    if (dbOrder?.label_url)
-      return res.json(new ApiResponse(200, { label_url: dbOrder.label_url }, 'Label URL from cache'));
-
-    const rawLabelUrl = dbOrder?.raw_response?.label_url || dbOrder?.raw_response?.data?.label_url;
-    if (rawLabelUrl)
-      return res.json(new ApiResponse(200, { label_url: rawLabelUrl }, 'Label URL from order data'));
-
-    const orderId = dbOrder?.order_id || awb;
+  const startStr = buffer.toString('utf8', 0, 20);
+  if (!startStr.trim().startsWith('%PDF-')) {
+    const fullText = buffer.toString('utf8');
     try {
-      const data = await smx.generateLabel(awb, orderId);
-      const labelUrl = data?.label_url || data?.data?.label_url || data?.url;
-      if (labelUrl && dbOrder)
-        await Order.findOneAndUpdate({ _id: dbOrder._id }, { $set: { label_url: labelUrl } });
-      return res.json(new ApiResponse(200, data, 'Label fetched'));
-    } catch {
-      return res.json(new ApiResponse(200, {
-        label_url: null,
-        dashboard_url: 'https://appapi.losung360.com',
-        message: 'Label not available via API. Please download from ShipMaxx dashboard.',
-      }, 'Label not available via API'));
+      const json = JSON.parse(fullText);
+      return res.status(400).json(new ApiResponse(400, null, json.message || 'Label not available yet'));
+    } catch (e) {
+      return res.status(400).json(new ApiResponse(400, null, 'Label not available yet (invalid format from ShipMaxx)'));
     }
-  } catch (err) { next(err); }
-};
+  }
 
-export const getManifest = async (req, res, next) => {
-  try {
-    const { awb } = req.params;
-    if (!awb) return res.json(new ApiResponse(400, null, 'awb is required'));
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="label-${awb}.pdf"`);
+  res.send(buffer);
+});
 
-    const dbOrder = await Order.findOne({
-      platform: 'shipmaxx',
-      $or: [{ awb_code: awb }, { order_id: awb }]
-    }).select('order_id raw_response').lean();
+export const getManifest = catchAsync(async (req, res) => {
+  const awb = req.params.awb || req.query.awb;
+  if (!awb) return res.json(new ApiResponse(400, null, 'awb is required'));
 
-    const rawManifestUrl = dbOrder?.raw_response?.manifest_url;
-    if (rawManifestUrl)
-      return res.json(new ApiResponse(200, { manifest_url: rawManifestUrl }, 'Manifest from order data'));
-
-    const orderId = dbOrder?.order_id || awb;
+  const buffer = await smx.downloadManifestHtml(awb);
+  if (!buffer || buffer.length === 0) {
+    return res.status(400).json(new ApiResponse(400, null, 'Manifest not available yet (empty response)'));
+  }
+  
+  const startStr = buffer.toString('utf8', 0, 20);
+  if (!startStr.trim().startsWith('%PDF-')) {
+    const fullText = buffer.toString('utf8');
     try {
-      const data = await smx.getManifest(awb, orderId);
-      return res.json(new ApiResponse(200, data, 'Manifest fetched'));
-    } catch {
-      return res.json(new ApiResponse(200, {
-        manifest_url: null,
-        dashboard_url: 'https://appapi.losung360.com',
-        message: 'Manifest not available via API. Please download from ShipMaxx dashboard.',
-      }, 'Manifest not available via API'));
+      const json = JSON.parse(fullText);
+      return res.status(400).json(new ApiResponse(400, null, json.message || 'Manifest not available yet'));
+    } catch (e) {
+      return res.status(400).json(new ApiResponse(400, null, 'Manifest not available yet (invalid format from ShipMaxx)'));
     }
-  } catch (err) { next(err); }
-};
+  }
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="manifest-${awb}.pdf"`);
+  res.send(buffer);
+});
 
 // ── Warehouses ────────────────────────────────────────────────────────────────
 export const getWarehouses = catchAsync(async (req, res) => {
@@ -309,8 +392,26 @@ export const createWarehouse = catchAsync(async (req, res) => {
 export const getInvoice = catchAsync(async (req, res) => {
   const { order_id } = req.params;
   if (!order_id) return res.json(new ApiResponse(400, null, 'order_id is required'));
-  const data = await smx.getInvoice(order_id);
-  res.json(new ApiResponse(200, data, 'Invoice fetched'));
+  const buffer = await smx.getInvoice(order_id);
+  
+  if (!buffer || buffer.length === 0) {
+    return res.status(400).json(new ApiResponse(400, null, 'Invoice not available yet (empty response)'));
+  }
+
+  const startStr = buffer.toString('utf8', 0, 20);
+  if (!startStr.trim().startsWith('%PDF-')) {
+    const fullText = buffer.toString('utf8');
+    try {
+      const json = JSON.parse(fullText);
+      return res.status(400).json(new ApiResponse(400, null, json.message || 'Invoice not available yet'));
+    } catch (e) {
+      return res.status(400).json(new ApiResponse(400, null, 'Invoice not available yet (invalid format from ShipMaxx)'));
+    }
+  }
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="invoice-${order_id}.pdf"`);
+  res.send(buffer);
 });
 
 // ── NDR Notes (ShipMaxx) ──────────────────────────────────────────────────────

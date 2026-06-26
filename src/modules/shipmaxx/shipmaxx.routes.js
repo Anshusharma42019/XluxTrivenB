@@ -45,6 +45,7 @@ router.get('/orders/with-followups', auth(), c.getOrdersWithFollowUps);
 router.get('/orders/completed-followups', auth(), c.getCompletedFollowUps);
 router.get('/orders/search-by-phone', auth(), c.searchOrderByPhone);
 router.post('/orders/create', auth(), c.createOrder);
+router.post('/orders/create-full', auth(), c.createOrderAndShipment);
 router.post('/orders/sync', auth(), c.syncShipmaxx);
 router.post('/orders/import', auth(), c.importOrders);
 router.post('/orders/import-by-ids', auth(), c.importByIds);

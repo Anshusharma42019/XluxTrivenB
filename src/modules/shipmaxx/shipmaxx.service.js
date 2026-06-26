@@ -32,7 +32,7 @@ const getAuthHeader = () => {
 // Returns true if token is missing or about to expire (within 5 min buffer)
 const isTokenExpired = () => !_apiKey || Date.now() >= (_tokenExpiresAt - 5 * 60 * 1000);
 
-const call = async (method, url, options = {}) => {
+const call = async (method, url, options = {}, isRetry = false) => {
   if (isTokenExpired()) {
     // Deduplicate: if a login is already in-flight, wait for it
     if (!_loginPromise) {
@@ -51,8 +51,21 @@ const call = async (method, url, options = {}) => {
   } catch (err) {
     const msg = err.response?.data?.detail || err.response?.data?.message || err.message;
     const statusCode = err.response?.status || 500;
+    
     // If token was rejected by ShipMaxx, clear it so next call re-logs in
-    if (statusCode === 401) { _apiKey = null; _tokenExpiresAt = 0; }
+    if (statusCode === 401) { 
+      _apiKey = null; 
+      _tokenExpiresAt = 0; 
+      
+      // Auto-retry once
+      if (!isRetry) {
+        return call(method, url, options, true);
+      }
+      
+      // Map ShipMaxx 401 to 502 to avoid triggering the CRM frontend token refresh interceptor
+      throw new ApiError(502, `ShipMaxx Auth Failed: ${msg}`);
+    }
+    
     throw new ApiError(statusCode, msg);
   }
 };
@@ -144,6 +157,9 @@ export const getManifest = async (awbOrOrderId) => {
   }
 };
 
+export const downloadLabelPdf = (awb) => call('GET', '/shipping/download-label', { params: { awb }, responseType: 'arraybuffer' });
+export const downloadManifestHtml = (awb) => call('GET', `/shipping/manifest/${awb}`, { responseType: 'arraybuffer' });
+
 // ── Warehouses ────────────────────────────────────────────────────────────────
 export const getWarehouses = (params) => get('/warehouses', params);
 export const createWarehouse = (body) => post('/warehouses/create', body);
@@ -154,7 +170,7 @@ export const ndrAction = (ndr_id, body) => post(`/ndr/${ndr_id}/action`, body);
 export const ndrBulkAction = (body) => post('/ndr/bulk-action', body);
 
 // ── Invoice ───────────────────────────────────────────────────────────────────
-export const getInvoice = (order_id) => get(`/invoice/order/${order_id}`);
+export const getInvoice = (order_id) => call('GET', `/invoice/order/${order_id}`, { responseType: 'arraybuffer' });
 
 export default {
   login, setCredentials, setApiKey, setAuthUrl,
@@ -163,5 +179,5 @@ export default {
   cancelShipment, checkServiceability, getShipments, getShipmentById,
   getWarehouses, createWarehouse,
   getNdrList, ndrAction, ndrBulkAction,
-  getInvoice,
+  getInvoice, downloadLabelPdf, downloadManifestHtml
 };
