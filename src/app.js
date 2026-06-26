@@ -61,6 +61,12 @@ app.use(
 // Health check — keeps server warm, prevents cold start
 app.get("/ping", (req, res) => res.json({ ok: true }));
 
+// Root route - prevents 404 when visiting the base URL
+app.get("/", (req, res) => res.json({ 
+  status: "success", 
+  message: "Welcome to the API! The server is running smoothly." 
+}));
+
 // Shiprocket webhook (no auth — Shiprocket calls this directly)
 app.post("/webhook/shiprocket", webhook);
 
