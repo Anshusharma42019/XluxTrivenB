@@ -80,7 +80,7 @@ const detectDepartmentFromProblem = (problem) => {
 export const getNextSalesUser = async (department = null) => {
   const query = { role: 'sales', isDeleted: false };
   if (department) {
-    query.departments = department;
+    query.departments = { $in: [department] };
   }
   const salesUsers = await User.find(query).sort({ createdAt: 1 });
   if (!salesUsers.length) return null;

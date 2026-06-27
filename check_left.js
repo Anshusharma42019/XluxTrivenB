@@ -1,0 +1,1 @@
+import dotenv from 'dotenv'; dotenv.config({ path: '.env' }); import mongoose from 'mongoose'; import { ShipmaxxOrder } from './src/modules/shipmaxx/models/shipmaxxOrder.model.js'; mongoose.connect(process.env.MONGODB_URL).then(async () => { const count = await ShipmaxxOrder.countDocuments(); console.log('Total ShipMaxx orders:', count); process.exit(0); });

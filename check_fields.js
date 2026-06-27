@@ -1,0 +1,1 @@
+import dotenv from 'dotenv'; dotenv.config({ path: '.env' }); import smx from './src/modules/shipmaxx/shipmaxx.service.js'; smx.getShipments({ limit: 1 }).then(res => { const arr = res.data?.data || res.data || res; console.log(JSON.stringify(arr[0], null, 2)); }).catch(e => console.error(e.message));

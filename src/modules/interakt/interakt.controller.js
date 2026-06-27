@@ -54,7 +54,34 @@ const handleWebhook = catchAsync(async (req, res) => {
         const migraineNumbers = (process.env.INTERAKT_MIGRAINE_NUMBERS || fallbackMigraine).split(",");
         const haircareNumbers = (process.env.INTERAKT_HAIRCARE_NUMBERS || "").split(",");
         
-        if (businessPhone && migraineNumbers.some(num => num.trim() !== "" && businessPhone.includes(num.trim()))) {
+        // 1. Keyword based routing (Highest Priority)
+        const textToCheck = messageText.toLowerCase();
+        
+        const pilesKeywords = [
+            "khoon ata hai", "fissure hai", "masse hai ander", "bhagandar hai", "fistula hai", 
+            "pus ata hai", "gas hai pet me", "bhar masse hai", "khujli hoti hai", "pet saf nhi hota hai", 
+            "bawasir ki dawa", "bawasir ka ilaj", "khuni bawasir ki dawa", "khuni bawasir ka ilaj", 
+            "masse ki dawa", "masse ka ilaj", "piles ki dawa", "piles ka ilaj", "hemorrhoids treatment", 
+            "hemorrhoids medicine", "fissure ki dawa", "fissure ka ilaj", "guda me dard ki dawa", 
+            "guda se khoon aana ilaj", "potty ke time khoon aana", "potty ke time dard", "guda me sujan", 
+            "guda me jalan", "guda me khujli", "external piles treatment", "external hemorrhoids treatment",
+            "piles", "bawasir", "bawaseer", "fissure", "hemorrhoid", "fistula"
+        ];
+
+        const migraineKeywords = [
+            "migraine ka ilaj", "migraine ki dawa", "aadhe sir dard ka ilaj", "aadhe sir dard ki dawa", 
+            "sir dard ki dawa", "migraine treatment", "migraine medicine", "migraine pain relief", 
+            "migraine attack treatment", "migraine ayurvedic treatment",
+            "migraine", "headache", "sir dard", "sirdard", "sir me dard"
+        ];
+
+        if (pilesKeywords.some(keyword => textToCheck.includes(keyword))) {
+            targetDepartment = 'piles';
+        } else if (migraineKeywords.some(keyword => textToCheck.includes(keyword))) {
+            targetDepartment = 'migraine';
+        }
+        // 2. Business Phone Number based routing (Fallback)
+        else if (businessPhone && migraineNumbers.some(num => num.trim() !== "" && businessPhone.includes(num.trim()))) {
             targetDepartment = 'migraine';
         } else if (businessPhone && haircareNumbers.some(num => num.trim() !== "" && businessPhone.includes(num.trim()))) {
             targetDepartment = 'haircare';

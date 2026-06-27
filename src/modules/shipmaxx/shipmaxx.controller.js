@@ -17,6 +17,39 @@ import { getNextOrderId } from '../shiprocket/counter/counter.model.js';
 const DEFAULT_FOLLOWUP_TOTAL = 5;
 const DEFAULT_FOLLOWUP_GAP_DAYS = 6;
 
+// ── Shared ShipMaxx status normalization ─────────────────────────────────────
+// ShipMaxx API returns short codes (DEL, INT, UND, etc.) — always normalize
+// to full standard status names before storing in the database.
+const SMX_STATUS_MAP = {
+  DEL: 'DELIVERED',
+  INT: 'IN_TRANSIT',
+  UND: 'UNDELIVERED',
+  RTO: 'RTO_DELIVERED',
+  OFD: 'OUT_FOR_DELIVERY',
+  DEX: 'UNDELIVERED_ATTEMPT_FAILURE',
+  SC:  'SHIPPED',
+  PCN: 'CANCELED',
+  RRA: 'RTO_INITIATED',
+  SPD: 'PICKUP_SCHEDULED',
+  SPB: 'NEW',
+  NFI: 'NEW',
+  RTO_INT: 'RTO_IN_TRANSIT',
+  RTO_OFD: 'RTO_OFD',
+  RAD: 'REACHED_AT_DESTINATION_HUB',
+  RBS: 'REACHED_BACK_AT_SELLER_CITY',
+  MIS: 'MISROUTED',
+  RTO_INTRANSIT: 'RTO_IN_TRANSIT',
+  SHIPMENT_CANCELLED: 'CANCELED',
+  DELIVERY_EXCEPTION: 'UNDELIVERED_ATTEMPT_FAILURE',
+  SHIPMENT_BOOKED: 'NEW',
+};
+
+const normalizeShipmaxxStatus = (rawStatus) => {
+  if (!rawStatus) return 'NEW';
+  const s = String(rawStatus).trim().toUpperCase().replace(/[\s-]+/g, '_');
+  return SMX_STATUS_MAP[s] || s;
+};
+
 const setAutoFollowUps = async (orderId, deliveredAt) => {
   const total = DEFAULT_FOLLOWUP_TOTAL;
   const gap   = DEFAULT_FOLLOWUP_GAP_DAYS;
@@ -493,11 +526,10 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
   const match = { platform: 'shipmaxx' };
   
   if (from && to) {
-    const dateFilter = {
+    match.createdAt = {
       $gte: new Date(from + 'T00:00:00.000+05:30'),
       $lte: new Date(to + 'T23:59:59.999+05:30'),
     };
-    match.status_updated_at = dateFilter;
   }
 
   const [deliveredCountResult, statusBreakdown, revenueAggregation] = await Promise.all([
@@ -513,15 +545,21 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
     ])
   ]);
 
-  const breakdown = statusBreakdown.map(item => ({
-    _id: item._id || 'UNKNOWN',
-    count: item.count,
-    revenue: item.revenue || 0,
-  }));
+  // Post-process: merge any remaining short-code groups into their full-name equivalents
+  const mergedMap = {};
+  for (const item of statusBreakdown) {
+    const normalizedId = normalizeShipmaxxStatus(item._id);
+    if (!mergedMap[normalizedId]) {
+      mergedMap[normalizedId] = { _id: normalizedId, count: 0, revenue: 0 };
+    }
+    mergedMap[normalizedId].count += item.count;
+    mergedMap[normalizedId].revenue += (item.revenue || 0);
+  }
+  const breakdown = Object.values(mergedMap).sort((a, b) => b.count - a.count);
 
   const delIdx = breakdown.findIndex(b => /^delivered$/i.test(b._id));
   if (delIdx === -1) {
-    breakdown.unshift({ _id: 'DELIVERED', count: deliveredCountResult });
+    breakdown.unshift({ _id: 'DELIVERED', count: deliveredCountResult, revenue: 0 });
   } else {
     breakdown[delIdx].count = deliveredCountResult;
   }
@@ -536,36 +574,26 @@ export const getStatusOrders = catchAsync(async (req, res) => {
   if (!status) return res.status(400).json(new ApiResponse(400, null, 'Status is required'));
 
   const match = { platform: 'shipmaxx' };
-  const statusVariant = status.replace(/[-_]/g, '[-_ ]');
-  
-  const SMX_REVERSE_MAP = {
-    DELIVERED: ['DEL', 'DELIVERED'],
-    IN_TRANSIT: ['INT', 'IN_TRANSIT'],
-    UNDELIVERED: ['UND', 'UNDELIVERED'],
-    RTO_DELIVERED: ['RTO', 'RTO_DELIVERED'],
-    OUT_FOR_DELIVERY: ['OFD', 'OUT_FOR_DELIVERY'],
-    UNDELIVERED_ATTEMPT_FAILURE: ['DEX', 'UNDELIVERED_ATTEMPT_FAILURE'],
-    SHIPPED: ['SC', 'SHIPPED'],
-    CANCELED: ['PCN', 'CANCELED'],
-    REACHED_AT_DESTINATION_HUB: ['RRA', 'REACHED_AT_DESTINATION_HUB'],
-    PICKUP_SCHEDULED: ['SPD', 'PICKUP_SCHEDULED'],
-    NEW: ['SPB', 'NEW']
-  };
 
-  if (SMX_REVERSE_MAP[status]) {
-    match.status = { $in: SMX_REVERSE_MAP[status].map(s => new RegExp(`^${s.replace(/[-_]/g, '[-_ ]')}$`, 'i')) };
-  } else if (/^undelivered$/i.test(status)) {
+  // Build a list of all possible values for the requested status:
+  // the full name itself, plus any short codes that map to it
+  const reverseShortCodes = Object.entries(SMX_STATUS_MAP)
+    .filter(([, fullName]) => fullName === status)
+    .map(([shortCode]) => shortCode);
+  const allVariants = [status, ...reverseShortCodes];
+
+  if (/^undelivered$/i.test(status)) {
+    // Match all UNDELIVERED variants (1ST, 2ND, 3RD, ATTEMPT_FAILURE, plain)
     match.status = { $regex: /^undelivered/i };
   } else {
-    match.status = new RegExp(`^${statusVariant}$`, 'i');
+    match.status = { $in: allVariants.map(s => new RegExp(`^${s.replace(/[-_]/g, '[-_ ]')}$`, 'i')) };
   }
 
   if (from && to) {
-    const dateFilter = {
+    match.createdAt = {
       $gte: new Date(from + 'T00:00:00.000+05:30'),
       $lte: new Date(to + 'T23:59:59.999+05:30'),
     };
-    match.status_updated_at = dateFilter;
   }
 
   const orders = await Order.find(match)
@@ -718,6 +746,14 @@ export const importByIds = catchAsync(async (req, res) => {
 
 export const syncShipmaxx = catchAsync(async (req, res) => {
   let updatedCount = 0;
+
+  // 0. Fix existing orders with short-code statuses (one-time migration)
+  for (const [shortCode, fullStatus] of Object.entries(SMX_STATUS_MAP)) {
+    await Order.updateMany(
+      { platform: 'shipmaxx', status: new RegExp(`^${shortCode}$`, 'i') },
+      { $set: { status: fullStatus } }
+    ).catch(() => {});
+  }
   
   // 1. Sync ALL recent shipments from ShipMaxx to catch historical or externally created orders
   try {
@@ -729,18 +765,33 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
 
       for (const s of shipments) {
         if (!s.awb && !s.order_id) continue;
+        
         const query = { platform: 'shipmaxx' };
         if (s.order_id) query.order_id = String(s.order_id);
         else query.awb_code = String(s.awb);
 
+        const newStatus = normalizeShipmaxxStatus(s.status);
+        const existing = await Order.findOne(query).select('status status_updated_at').lean();
+        
+        let statusUpdatedAt = s.date_added ? new Date(s.date_added) : new Date();
+        if (existing) {
+          if (existing.status === newStatus && existing.status_updated_at) {
+             statusUpdatedAt = existing.status_updated_at;
+          } else if (existing.status !== newStatus) {
+             statusUpdatedAt = new Date(); // It changed just now!
+          }
+        }
+
         const updateData = {
           order_id: String(s.order_id || s.awb),
           awb_code: String(s.awb || ''),
-          status: s.status ? String(s.status).toUpperCase().replace(/[\s-]+/g, '_') : 'NEW',
+          status: newStatus,
           platform: 'shipmaxx',
           payment_method: s.payment_method || '',
-          status_updated_at: s.created_at ? new Date(s.created_at) : new Date(),
+          status_updated_at: statusUpdatedAt,
         };
+        if (s.created_at) updateData.createdAt = new Date(s.created_at);
+        else if (s.date_added) updateData.createdAt = new Date(s.date_added);
         
         if (s.products && Array.isArray(s.products)) {
           updateData.order_items = s.products.map(p => ({
@@ -753,7 +804,7 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
         updatedCount++;
       }
       
-      if (shipments.length < 15) break;
+      await new Promise(r => setTimeout(r, 1000));
       page++;
       if (page > 50) break; // safety limit
     }
@@ -780,6 +831,7 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
           billing_pincode: o.billing_zip || o.shipping_zip || '',
           sub_total: Number(o.total_price) || 0,
         };
+        if (o.created_at) updateData.createdAt = new Date(o.created_at);
         
         if (o.awb) updateData.awb_code = String(o.awb);
         
@@ -790,7 +842,7 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
         ).catch(() => {});
       }
       
-      if (orders.length < 15) break;
+      await new Promise(r => setTimeout(r, 1000));
       orderPage++;
       if (orderPage > 50) break; // safety limit
     }
@@ -801,7 +853,7 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
   // 2. Sync recent NDR list from ShipMaxx to ensure we catch precise NDR failure reasons
   try {
     const ndrRes = await smx.getNdrList({ limit: 1000, per_page: 1000, page: 1 });
-    const ndrs = ndrRes?.shipments || [];
+    const ndrs = ndrRes?.data?.shipments || ndrRes?.shipments || [];
     for (const ndr of ndrs) {
       if (!ndr.orderId && !ndr.awb) continue;
       
@@ -810,6 +862,12 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
       let mappedStatus = attemptNumber === 1 ? 'UNDELIVERED_1ST_ATTEMPT' :
                          attemptNumber === 2 ? 'UNDELIVERED_2ND_ATTEMPT' :
                          attemptNumber === 3 ? 'UNDELIVERED_3RD_ATTEMPT' : 'UNDELIVERED';
+                         
+      if (ndr.status && ndr.status.toLowerCase() === 'delivered') {
+         mappedStatus = 'DELIVERED';
+      } else if (ndr.status && ndr.status.toLowerCase().includes('rto delivered')) {
+         mappedStatus = 'RTO_DELIVERED';
+      }
       
       const query = { platform: 'shipmaxx' };
       if (ndr.orderId) query.order_id = String(ndr.orderId);
@@ -818,11 +876,16 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
       const updateData = {
         order_id: String(ndr.orderId || ndr.awb),
         awb_code: String(ndr.awb || ''),
-        status: mappedStatus,
         delivery_attempt: attemptNumber,
         status_updated_at: ndr.attemptDate ? parseShipMaxxDate(`${ndr.attemptDate} ${ndr.attemptTime || '00:00:00'}`) : new Date(),
         platform: 'shipmaxx',
       };
+      
+      // Only overwrite status if we have a valid mapping or if it's not already delivered in db
+      const existingOrder = await Order.findOne(query);
+      if (!existingOrder || (existingOrder.status !== 'DELIVERED' && existingOrder.status !== 'RTO_DELIVERED')) {
+         updateData.status = mappedStatus;
+      }
       
       if (ndr.customer) {
         if (ndr.customer.name) updateData.billing_customer_name = ndr.customer.name;
@@ -849,24 +912,7 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
       const tracking = trackRes?.data?.data || trackRes?.data || trackRes || {};
       const rawStatus = tracking.current_status || tracking.status || tracking.shipment_status || tracking.delivery_status;
       if (rawStatus) {
-        let status = rawStatus.toUpperCase();
-        
-        const smxStatusMap = {
-          DEL: 'DELIVERED',
-          INT: 'IN_TRANSIT',
-          UND: 'UNDELIVERED',
-          RTO: 'RTO_DELIVERED',
-          OFD: 'OUT_FOR_DELIVERY',
-          DEX: 'UNDELIVERED_ATTEMPT_FAILURE',
-          SC:  'SHIPPED',
-          PCN: 'CANCELED',
-          RRA: 'RTO_INITIATED',
-          SPD: 'PICKUP_SCHEDULED',
-          SPB: 'NEW'
-        };
-        if (smxStatusMap[status]) {
-          status = smxStatusMap[status];
-        }
+        let status = normalizeShipmaxxStatus(rawStatus);
 
         // If it's a known NDR status from ShipMaxx, map it to the standard attempt status
         const ndrKeywords = ['EXCEPTION', 'REFUSED', 'NOT AVAILABLE', 'INCOMPLETE', 'ACTION TAKEN', 'ATTEMPT FAILURE', 'ADDRESS'];
@@ -1443,4 +1489,28 @@ export const createManualFollowup = catchAsync(async (req, res) => {
   await Followup.insertMany(followups);
 
   res.json(new ApiResponse(200, newOrder, 'Manual followup added successfully'));
+});
+
+// Temporarily adding a cleanup endpoint to remove Shiprocket duplicates
+import { Order as ShiprocketOrder } from '../shiprocket/models/order.model.js';
+export const cleanupDuplicates = catchAsync(async (req, res) => {
+  const srOrders = await ShiprocketOrder.find({}).select('awb_code order_id').lean();
+  const srAwbs = srOrders.map(o => o.awb_code).filter(Boolean);
+  const srIds = srOrders.map(o => o.order_id).filter(Boolean);
+  
+  if (srAwbs.length === 0 && srIds.length === 0) {
+    return res.json(new ApiResponse(200, { deleted: 0 }, 'No Shiprocket data found'));
+  }
+  
+  const query = { $or: [] };
+  if (srAwbs.length > 0) query.$or.push({ awb_code: { $in: srAwbs } });
+  if (srIds.length > 0) query.$or.push({ order_id: { $in: srIds } });
+
+  const overlap = await Order.find(query).lean();
+  if (overlap.length > 0) {
+    const result = await Order.deleteMany(query);
+    return res.json(new ApiResponse(200, { found: overlap.length, deleted: result.deletedCount }, 'Cleaned up overlapping records'));
+  }
+  
+  res.json(new ApiResponse(200, { deleted: 0 }, 'No overlapping orders found in ShipMaxx DB'));
 });
