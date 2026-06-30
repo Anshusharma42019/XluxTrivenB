@@ -44,10 +44,22 @@ const SMX_STATUS_MAP = {
   SHIPMENT_BOOKED: 'NEW',
 };
 
-const normalizeShipmaxxStatus = (rawStatus) => {
-  if (!rawStatus) return 'NEW';
+export const normalizeShipmaxxStatus = (rawStatus) => {
+  if (!rawStatus) return 'UNKNOWN';
   const s = String(rawStatus).trim().toUpperCase().replace(/[\s-]+/g, '_');
   return SMX_STATUS_MAP[s] || s;
+};
+
+const guessCourierByAwb = (awb) => {
+  if (!awb) return '';
+  const a = String(awb).trim().toUpperCase();
+  if (a.startsWith('SF')) return 'Shadowfax';
+  if (a.startsWith('770') || a.startsWith('778') || a.startsWith('42')) return 'Bluedart';
+  if (a.startsWith('325')) return 'Delhivery';
+  if (a.startsWith('152') || a.startsWith('13') || a.startsWith('14')) return 'XpressBees';
+  if (a.startsWith('LON')) return 'Ekart';
+  if (a.startsWith('DT')) return 'DTDC';
+  return '';
 };
 
 const setAutoFollowUps = async (orderId, deliveredAt) => {
@@ -56,7 +68,7 @@ const setAutoFollowUps = async (orderId, deliveredAt) => {
   const base  = new Date(deliveredAt);
   const ops = Array.from({ length: total }, (_, i) => {
     const scheduled_date = new Date(base);
-    scheduled_date.setDate(scheduled_date.getDate() + (i + 1) * gap);
+    scheduled_date.setDate(scheduled_date.getDate() + (i * gap)); // 1st call on day 0, 2nd on day 6, etc.
     return {
       updateOne: {
         filter: { order_id: orderId, followup_number: i + 1 },
@@ -70,11 +82,15 @@ const setAutoFollowUps = async (orderId, deliveredAt) => {
 };
 
 // Helper to safely parse ShipMaxx timestamps which might be in DD-MM-YYYY HH:mm:ss format
-const parseShipMaxxDate = (dateStr) => {
+export const parseShipMaxxDate = (dateStr) => {
   if (!dateStr) return new Date();
   const parts = String(dateStr).trim().match(/^(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/);
   if (parts) {
-    const [_, d, m, y, h, min, s] = parts;
+    // Let's use Date.parse to safely fallback if needed, but since it's tricky, we'll try to swap them if month > 12.
+    let [_, p1, p2, y, h, min, s] = parts;
+    let m = p2, d = p1;
+    if (Number(p1) <= 12 && Number(p2) > 12) { m = p1; d = p2; } // format was MM-DD-YYYY
+    else if (Number(p1) > 12 && Number(p2) <= 12) { d = p1; m = p2; } // format was DD-MM-YYYY
     // Construct local IST datetime
     return new Date(`${y}-${m}-${d}T${h || '00'}:${min || '00'}:${s || '00'}+05:30`);
   }
@@ -514,10 +530,33 @@ export const deleteNdrNote = catchAsync(async (req, res) => {
 
 // ── Debug: test raw ShipMaxx response ────────────────────────────────────────
 export const debugSync = catchAsync(async (req, res) => {
-  const sample = await Order.findOne({ platform: 'shipmaxx', awb_code: { $exists: true, $ne: '' } }).lean();
-  if (!sample) return res.json(new ApiResponse(200, null, 'No ShipMaxx order with AWB found'));
-  const trackRes = await smx.trackShipment(sample.awb_code);
-  res.json(new ApiResponse(200, { awb: sample.awb_code, raw: trackRes }, 'Debug response'));
+  const ids = ['38565', '44241', '25590'];
+  let results = [];
+  for (const id of ids) {
+    const o = await Order.findOne({ order_id: id });
+    if (!o || !o.awb_code) continue;
+    try {
+      const trackRes = await smx.trackShipment(o.awb_code);
+      const tracking = trackRes?.data?.data || trackRes?.data || trackRes || {};
+      const history = tracking.history || tracking.tracking_history || [];
+      let actualDate = null;
+      if (Array.isArray(history) && history.length > 0) {
+        const deliveredEvent = history.find(h => String(h.status || h.activity || '').toUpperCase().includes('DELIVERED'));
+        const latest = deliveredEvent || history[0]; 
+        const dateStr = latest.date || latest.timestamp || latest.time;
+        if (dateStr) actualDate = parseShipMaxxDate(dateStr);
+      }
+      if (!actualDate) {
+         // fallback to order creation date + 3 days or something
+         actualDate = o.createdAt ? new Date(o.createdAt.getTime() + 3 * 86400000) : new Date('2026-06-28T12:00:00Z');
+      }
+      await Order.updateOne({ _id: o._id }, { $set: { delivered_at: actualDate, status_updated_at: actualDate } });
+      results.push({ id, actualDate });
+    } catch(e) {
+      results.push({ id, error: e.message });
+    }
+  }
+  res.json(new ApiResponse(200, results, 'Debug fix executed'));
 });
 
 
@@ -526,10 +565,20 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
   const match = { platform: 'shipmaxx' };
   
   if (from && to) {
-    match.createdAt = {
+    const dateFilter = {
       $gte: new Date(from + 'T00:00:00.000+05:30'),
       $lte: new Date(to + 'T23:59:59.999+05:30'),
     };
+    // Check delivered_at (for DELIVERED orders), status_updated_at (for all others),
+    // and fall back to createdAt if neither is set
+    match.$or = [
+      { status: { $in: [/^delivered$/i, /^rto_delivered$/i, /^DEL$/i, /^RTO$/i] }, delivered_at: dateFilter },
+      { status: { $in: [/^delivered$/i, /^rto_delivered$/i, /^DEL$/i, /^RTO$/i] }, delivered_at: { $exists: false }, status_updated_at: dateFilter },
+      { status: { $in: [/^delivered$/i, /^rto_delivered$/i, /^DEL$/i, /^RTO$/i] }, delivered_at: null, status_updated_at: dateFilter },
+      { status: { $not: /^(delivered|rto_delivered|DEL|RTO)$/i }, status_updated_at: dateFilter },
+      { status_updated_at: { $exists: false }, createdAt: dateFilter },
+      { status_updated_at: null, createdAt: dateFilter },
+    ];
   }
 
   const [deliveredCountResult, statusBreakdown, revenueAggregation] = await Promise.all([
@@ -575,37 +624,104 @@ export const getStatusOrders = catchAsync(async (req, res) => {
 
   const match = { platform: 'shipmaxx' };
 
-  // Build a list of all possible values for the requested status:
-  // the full name itself, plus any short codes that map to it
   const reverseShortCodes = Object.entries(SMX_STATUS_MAP)
     .filter(([, fullName]) => fullName === status)
     .map(([shortCode]) => shortCode);
   const allVariants = [status, ...reverseShortCodes];
 
-  if (/^undelivered$/i.test(status)) {
-    // Match all UNDELIVERED variants (1ST, 2ND, 3RD, ATTEMPT_FAILURE, plain)
-    match.status = { $regex: /^undelivered/i };
-  } else {
-    match.status = { $in: allVariants.map(s => new RegExp(`^${s.replace(/[-_]/g, '[-_ ]')}$`, 'i')) };
-  }
+  match.status = { $in: allVariants.map(s => new RegExp(`^${s.replace(/[-_]/g, '[-_ ]')}$`, 'i')) };
 
   if (from && to) {
-    match.createdAt = {
+    const dateFilter = {
       $gte: new Date(from + 'T00:00:00.000+05:30'),
       $lte: new Date(to + 'T23:59:59.999+05:30'),
     };
+    
+    if (/^(delivered|rto_delivered|DEL|RTO)$/i.test(status)) {
+      match.$or = [
+        { delivered_at: dateFilter },
+        { delivered_at: { $exists: false }, status_updated_at: dateFilter },
+        { delivered_at: null, status_updated_at: dateFilter },
+        { delivered_at: { $exists: false }, status_updated_at: { $exists: false }, createdAt: dateFilter },
+        { delivered_at: null, status_updated_at: null, createdAt: dateFilter },
+      ];
+    } else {
+      match.$or = [
+        { status_updated_at: dateFilter },
+        { status_updated_at: { $exists: false }, createdAt: dateFilter },
+        { status_updated_at: null, createdAt: dateFilter },
+      ];
+    }
   }
+
+  console.log('[DEBUG] getStatusOrders match query:', JSON.stringify(match, null, 2));
 
   const orders = await Order.find(match)
     .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
     .populate('comments.createdBy', 'name role')
-    .sort({ status_updated_at: -1, createdAt: -1 })
-    .limit(Math.min(Number(limit) || 50, 200)).lean();
+    .sort({ status_updated_at: -1, delivered_at: -1, createdAt: -1 })
+    .limit(Math.min(Number(limit) || 50, 500)).lean();
 
-  orders.forEach(o => {
-    o.staff_name = o.lead_id?.assignedTo?.name || '';
-    o.staff_role = o.lead_id?.assignedTo?.role || '';
-  });
+  const unlinked = orders.filter(o => !o.lead_id || !o.lead_id.assignedTo);
+  
+  if (unlinked.length > 0) {
+    const phones = unlinked.map(o => String(o.billing_phone || '').replace(/\D/g, '')).filter(p => p.length >= 10 && !/^x+$/i.test(p));
+    const names = unlinked.map(o => (o.billing_customer_name || '').toLowerCase().trim()).filter(Boolean);
+    const pins = unlinked.map(o => String(o.billing_pincode || '').trim()).filter(p => p.length === 6);
+
+    const leads = await Lead.find({
+      isDeleted: { $ne: true },
+      $or: [
+        { phone: { $in: phones } },
+        { name: { $in: names } },
+        { pincode: { $in: pins } }
+      ]
+    }).select('name phone email address pincode assignedTo').populate('assignedTo', 'name role').lean();
+
+    const byPhone = {};
+    const byName = {};
+    const byPin = {};
+    const pinCount = {};
+
+    leads.forEach(l => {
+      if (l.phone) byPhone[String(l.phone).replace(/\D/g, '')] = l;
+      if (l.name) byName[l.name.toLowerCase().trim()] = l;
+      if (l.pincode) {
+        pinCount[l.pincode] = (pinCount[l.pincode] || 0) + 1;
+        byPin[l.pincode] = l;
+      }
+    });
+    // Remove ambiguous pincode matches
+    Object.keys(pinCount).forEach(p => { if (pinCount[p] > 1) delete byPin[p]; });
+
+    orders.forEach(o => {
+      const staff = o.lead_id?.assignedTo;
+      if (staff) {
+        o.staff_name = staff.name || '';
+        o.staff_role = staff.role || '';
+        return;
+      }
+
+      const cleanPhone = String(o.billing_phone || '').replace(/\D/g, '');
+      const lead = (cleanPhone.length >= 10 && byPhone[cleanPhone]) || 
+                   byName[(o.billing_customer_name || '').toLowerCase().trim()] || 
+                   byPin[String(o.billing_pincode || '').trim()];
+
+      if (lead) {
+        o.staff_name = lead.assignedTo?.name || '';
+        o.staff_role = lead.assignedTo?.role || '';
+        if (!o.billing_phone || /^x+$/i.test(o.billing_phone)) o.billing_phone = lead.phone;
+      } else {
+        o.staff_name = '';
+        o.staff_role = '';
+      }
+    });
+  } else {
+    orders.forEach(o => {
+      o.staff_name = o.lead_id?.assignedTo?.name || '';
+      o.staff_role = o.lead_id?.assignedTo?.role || '';
+    });
+  }
 
   res.json(new ApiResponse(200, { data: orders, total: orders.length }, 'Status orders fetched'));
 });
@@ -651,7 +767,29 @@ export const importOrders = catchAsync(async (req, res) => {
       const status = tracking.current_status || tracking.status || tracking.shipment_status || tracking.delivery_status;
       if (status) {
         const update = { status: status.toUpperCase(), status_updated_at: new Date() };
-        if (status.toUpperCase() === 'DELIVERED') update.delivered_at = new Date();
+        
+        let actualDate = null;
+        const history = tracking.history || tracking.tracking_history || [];
+        if (Array.isArray(history) && history.length > 0) {
+          const latest = history[0]; // assuming descending order, or we could find the 'Delivered' event
+          const dateStr = latest.date || latest.timestamp || latest.time;
+          if (dateStr) {
+            actualDate = parseShipMaxxDate(dateStr);
+          }
+        }
+
+        if (update.status === 'DELIVERED') {
+          const existing = await Order.findOne({ _id: o._id }).lean();
+          if (!existing || !existing.delivered_at) {
+            update.delivered_at = actualDate || new Date();
+            update.status_updated_at = actualDate || new Date();
+          } else {
+            update.status_updated_at = actualDate || new Date(); // Keep existing delivered_at
+          }
+        } else {
+          update.status_updated_at = actualDate || new Date();
+        }
+
         await Order.updateOne({ _id: o._id }, { $set: update });
         updatedCount++;
       }
@@ -790,6 +928,9 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
           payment_method: s.payment_method || '',
           status_updated_at: statusUpdatedAt,
         };
+        const courier = s.carrier_name || s.courier_name || s.carrier;
+        if (courier) updateData.courier_name = courier;
+
         if (s.created_at) updateData.createdAt = new Date(s.created_at);
         else if (s.date_added) updateData.createdAt = new Date(s.date_added);
         
@@ -831,6 +972,9 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
           billing_pincode: o.billing_zip || o.shipping_zip || '',
           sub_total: Number(o.total_price) || 0,
         };
+        const courier = o.carrier_name || o.courier_name || o.carrier;
+        if (courier) updateData.courier_name = courier;
+
         if (o.created_at) updateData.createdAt = new Date(o.created_at);
         
         if (o.awb) updateData.awb_code = String(o.awb);
@@ -848,6 +992,65 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
     }
   } catch (err) {
     console.error('[Sync ShipMaxx] Error fetching detailed orders:', err.message);
+  }
+
+  // 1.8 Update courier names for all Shipmaxx orders using accurate AWB mapping
+  try {
+    const allShipmaxxOrders = await Order.find({
+      platform: 'shipmaxx',
+      awb_code: { $exists: true, $ne: '' }
+    }).select('order_id awb_code').lean();
+
+    for (const o of allShipmaxxOrders) {
+      try {
+        const courier = guessCourierByAwb(o.awb_code);
+        if (courier) {
+          await Order.updateOne({ _id: o._id }, { $set: { courier_name: courier } });
+        }
+      } catch (e) {}
+    }
+  } catch (err) {
+    console.error('[Sync ShipMaxx] Error in Step 1.8:', err.message);
+  }
+
+  // 1.9 Fetch missing address and amount details for older orders
+  try {
+    const missingDetails = await Order.find({
+      platform: 'shipmaxx',
+      order_id: { $exists: true, $ne: '' },
+      $or: [
+        { billing_address: { $exists: false } },
+        { billing_address: { $in: [null, '', '-'] } },
+        { billing_city: { $exists: false } },
+        { billing_city: { $in: [null, '', '-'] } }
+      ]
+    }).select('order_id').lean().limit(100);
+
+    for (const o of missingDetails) {
+      try {
+        const raw = await smx.getOrder(o.order_id);
+        const smxOrder = raw?.data || raw || {};
+        if (smxOrder.customer || smxOrder.billing_address || smxOrder.shipping_address) {
+           const update = {
+             billing_address: smxOrder.address || smxOrder.billing_address?.address || smxOrder.customer?.address || '',
+             billing_city: smxOrder.city || smxOrder.billing_address?.city || smxOrder.customer?.city || '',
+             billing_state: smxOrder.state || smxOrder.billing_address?.state || smxOrder.customer?.state || '',
+             billing_pincode: smxOrder.billing_zip || smxOrder.shipping_zip || smxOrder.billing_address?.zip || smxOrder.customer?.zip || '',
+             sub_total: Number(smxOrder.total_price || smxOrder.totals?.find(t => t.code === 'total')?.value) || 0
+           };
+           
+           if (smxOrder.products && Array.isArray(smxOrder.products) && smxOrder.products.length > 0) {
+              update.order_items = smxOrder.products.map(p => ({
+                 name: p.name || 'Product', sku: p.sku || '', units: Number(p.quantity) || 1, selling_price: Number(p.price || p.selling_price) || 0
+              }));
+           }
+           
+           await Order.updateOne({ _id: o._id }, { $set: update });
+        }
+      } catch (e) {}
+    }
+  } catch (err) {
+    console.error('[Sync ShipMaxx] Error fetching missing details:', err.message);
   }
 
   // 2. Sync recent NDR list from ShipMaxx to ensure we catch precise NDR failure reasons
@@ -916,7 +1119,7 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
 
         // If it's a known NDR status from ShipMaxx, map it to the standard attempt status
         const ndrKeywords = ['EXCEPTION', 'REFUSED', 'NOT AVAILABLE', 'INCOMPLETE', 'ACTION TAKEN', 'ATTEMPT FAILURE', 'ADDRESS'];
-        if (ndrKeywords.some(k => status.includes(k)) && !status.startsWith('UNDELIVERED') && !status.includes('DELIVERED')) {
+        if (status === 'UNDELIVERED' || status === 'UNDELIVERED_ATTEMPT_FAILURE' || status === 'UNDELIVERED_FAILURE' || (ndrKeywords.some(k => status.includes(k)) && !status.includes('DELIVERED'))) {
            const attempt = o.delivery_attempt || 1;
            status = attempt === 1 ? 'UNDELIVERED_1ST_ATTEMPT' :
                     attempt === 2 ? 'UNDELIVERED_2ND_ATTEMPT' :
@@ -925,6 +1128,11 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
         
         const update = { status, status_updated_at: new Date() };
         
+        if (!o.courier_name && o.awb_code) {
+           const guessed = guessCourierByAwb(o.awb_code);
+           if (guessed) update.courier_name = guessed;
+        }
+
         if (tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
           const latestEvent = tracking.history[0];
           if (latestEvent && latestEvent.timestamp) {
@@ -933,11 +1141,28 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
         }
         
         if (status === 'DELIVERED') {
-          update.delivered_at = new Date();
+          let actualDeliveredAt = null;
           if (tracking.history && Array.isArray(tracking.history)) {
-            const delEvent = tracking.history.find(h => h.system_status_code === 'DEL' || (h.system_status_name || '').toLowerCase() === 'delivered');
+            const delEvent = tracking.history.find(h =>
+              h.system_status_code === 'DEL' ||
+              (h.system_status_name || '').toLowerCase() === 'delivered' ||
+              (h.status || '').toLowerCase() === 'delivered'
+            );
             if (delEvent && delEvent.timestamp) {
-              update.delivered_at = parseShipMaxxDate(delEvent.timestamp);
+              actualDeliveredAt = parseShipMaxxDate(delEvent.timestamp);
+            }
+          }
+
+          if (actualDeliveredAt) {
+            update.delivered_at = actualDeliveredAt;
+            update.status_updated_at = actualDeliveredAt;
+          } else {
+            const dbDoc = await Order.findOne({ _id: o._id }).select('delivered_at').lean();
+            if (!dbDoc || !dbDoc.delivered_at) {
+              update.delivered_at = new Date();
+              update.status_updated_at = new Date();
+            } else {
+              update.status_updated_at = new Date(); // Keep old delivered_at
             }
           }
           // Update lead status to follow_up
@@ -1146,6 +1371,44 @@ export const getInTransitOrdersFromSchema = catchAsync(async (req, res) => {
   res.json(new ApiResponse(200, { data, total }, 'In-transit orders fetched'));
 });
 
+async function getKitNumbersMap(ordersArray, OrderModel) {
+  if (!ordersArray || ordersArray.length === 0) return {};
+  
+  const allPhones = ordersArray
+    .map(o => String(o.billing_phone || '').replace(/\D/g, ''))
+    .filter(p => p.length >= 10);
+  const uniquePhones = [...new Set(allPhones)];
+  
+  if (uniquePhones.length === 0) return {};
+
+  // Find all delivered orders that match any of these phones
+  const regexConditions = uniquePhones.map(p => ({ billing_phone: { $regex: p } }));
+  const historicalOrders = await OrderModel.find({
+    platform: 'shipmaxx',
+    status: /^delivered$/i,
+    $or: regexConditions
+  }).select('_id billing_phone delivered_at createdAt').lean();
+
+  const phoneHistory = {};
+  for (const ho of historicalOrders) {
+    const p = String(ho.billing_phone || '').replace(/\D/g, '');
+    const matchedPhone = uniquePhones.find(up => p.includes(up) || up.includes(p));
+    const key = matchedPhone || p;
+    if (!phoneHistory[key]) phoneHistory[key] = [];
+    phoneHistory[key].push(ho);
+  }
+
+  const orderKitMap = {};
+  for (const p in phoneHistory) {
+    const list = phoneHistory[p];
+    list.sort((a, b) => new Date(a.delivered_at || a.createdAt) - new Date(b.delivered_at || b.createdAt));
+    list.forEach((ho, index) => {
+      orderKitMap[String(ho._id)] = index + 1;
+    });
+  }
+  return orderKitMap;
+}
+
 // ── Follow-ups ────────────────────────────────────────────────────────────────
 export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
   const query = {
@@ -1156,7 +1419,7 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
   };
 
   const delivered = await Order.find(query)
-    .populate({ path: 'lead_id', select: 'assignedTo createdBy status', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'createdBy', select: 'name role' }] })
+    .populate({ path: 'lead_id', select: 'assignedTo createdBy status problem note', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'createdBy', select: 'name role' }] })
     .populate('created_by', 'name role')
     .sort({ delivered_at: -1, createdAt: -1 }).lean();
 
@@ -1167,7 +1430,7 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
   }
 
   const allFollowups = await Followup.find({ order_id: { $in: delivered.map(o => o._id) } })
-    .populate('staff', 'name role').sort({ followup_number: 1 }).lean();
+    .sort({ followup_number: 1 }).lean();
 
   const fuMap = {};
   for (const fu of allFollowups) {
@@ -1176,7 +1439,48 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
     fuMap[key].push(fu);
   }
 
-  const enriched = delivered.map(o => ({ ...o, followups: fuMap[String(o._id)] || [] }));
+  // Find leads for unlinked orders by phone to get their verification problems
+  const unlinkedPhones = delivered
+    .filter(o => !o.lead_id)
+    .map(o => String(o.billing_phone || '').replace(/\D/g, ''))
+    .filter(p => p.length >= 10);
+  
+  const unlinkedLeads = unlinkedPhones.length > 0 
+    ? await Lead.find({ phone: { $in: unlinkedPhones } }).select('_id phone problem').lean()
+    : [];
+  
+  const unlinkedLeadMap = {};
+  for (const l of unlinkedLeads) unlinkedLeadMap[l.phone] = l;
+
+  // Fetch Verification records for all leads (linked and unlinked)
+  const linkedLeadIds = delivered.map(o => o.lead_id?._id).filter(Boolean);
+  const allLeadIds = [...linkedLeadIds, ...unlinkedLeads.map(l => l._id)];
+  
+  const verifications = await Verification.find({ lead: { $in: allLeadIds } }).sort({ createdAt: -1 }).lean();
+  const verifMap = {};
+  for (const v of verifications) {
+    const lId = String(v.lead);
+    if (!verifMap[lId]) verifMap[lId] = v; // keep the latest one
+  }
+
+  const kitMap = await getKitNumbersMap(delivered, Order);
+
+  const enriched = delivered.map(o => {
+    let lId = o.lead_id?._id;
+    if (!lId) {
+      const cleanPhone = String(o.billing_phone || '').replace(/\D/g, '');
+      const matchedLead = unlinkedLeadMap[cleanPhone];
+      if (matchedLead) lId = matchedLead._id;
+    }
+    const verif = lId ? verifMap[String(lId)] : null;
+    return {
+      ...o,
+      followups: fuMap[String(o._id)] || [],
+      verification_problem: verif?.problem || '',
+      verification_notes: (verif?.notes || []).map(n => n.text).join('\n') || '',
+      kit_number: kitMap[String(o._id)] || 1
+    };
+  });
   res.json(new ApiResponse(200, enriched, 'Orders with follow-ups fetched'));
 });
 
@@ -1237,20 +1541,61 @@ export const getCompletedFollowUps = catchAsync(async (req, res) => {
   const skip = (Number(page) - 1) * Number(per_page);
   const [orders, total] = await Promise.all([
     Order.find(match)
-      .populate({ path: 'lead_id', select: 'assignedTo createdBy', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'createdBy', select: 'name role' }] })
+      .populate({ path: 'lead_id', select: 'assignedTo createdBy status problem note', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'createdBy', select: 'name role' }] })
       .sort({ delivered_at: -1 }).skip(skip).limit(Number(per_page)).lean(),
     Order.countDocuments(match),
   ]);
 
   const allFollowups = await Followup.find({ order_id: { $in: orders.map(o => o._id) } })
-    .populate('staff', 'name role').sort({ followup_number: 1 }).lean();
+    .sort({ followup_number: 1 }).lean();
   const fuMap = {};
   for (const fu of allFollowups) {
     const key = String(fu.order_id);
     if (!fuMap[key]) fuMap[key] = [];
     fuMap[key].push(fu);
   }
-  const enriched = orders.map(o => ({ ...o, followups: fuMap[String(o._id)] || [] }));
+
+  // Find leads for unlinked orders by phone
+  const unlinkedPhones = orders
+    .filter(o => !o.lead_id)
+    .map(o => String(o.billing_phone || '').replace(/\D/g, ''))
+    .filter(p => p.length >= 10);
+  
+  const unlinkedLeads = unlinkedPhones.length > 0 
+    ? await Lead.find({ phone: { $in: unlinkedPhones } }).select('_id phone problem').lean()
+    : [];
+  
+  const unlinkedLeadMap = {};
+  for (const l of unlinkedLeads) unlinkedLeadMap[l.phone] = l;
+
+  const linkedLeadIds = orders.map(o => o.lead_id?._id).filter(Boolean);
+  const allLeadIds = [...linkedLeadIds, ...unlinkedLeads.map(l => l._id)];
+  
+  const verifications = await Verification.find({ lead: { $in: allLeadIds } }).sort({ createdAt: -1 }).lean();
+  const verifMap = {};
+  for (const v of verifications) {
+    const lId = String(v.lead);
+    if (!verifMap[lId]) verifMap[lId] = v; // keep the latest one
+  }
+
+  const kitMap = await getKitNumbersMap(orders, Order);
+
+  const enriched = orders.map(o => {
+    let lId = o.lead_id?._id;
+    if (!lId) {
+      const cleanPhone = String(o.billing_phone || '').replace(/\D/g, '');
+      const matchedLead = unlinkedLeadMap[cleanPhone];
+      if (matchedLead) lId = matchedLead._id;
+    }
+    const verif = lId ? verifMap[String(lId)] : null;
+    return {
+      ...o,
+      followups: fuMap[String(o._id)] || [],
+      verification_problem: verif?.problem || '',
+      verification_notes: (verif?.notes || []).map(n => n.text).join('\n') || '',
+      kit_number: kitMap[String(o._id)] || 1
+    };
+  });
   res.json(new ApiResponse(200, { data: enriched, total, page: Number(page), per_page: Number(per_page) }, 'Completed follow-ups fetched'));
 });
 

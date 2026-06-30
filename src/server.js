@@ -2,6 +2,7 @@ import app from './app.js';
 import { config } from './config/config.js';
 import connectDB from './config/database.js';
 import initAttendanceCron from './modules/attendance/attendance.cron.js';
+import initShipmaxxCron from './modules/shipmaxx/shipmaxx.cron.js';
 import smx from './modules/shipmaxx/shipmaxx.service.js';
 import dns from 'dns';
 
@@ -10,6 +11,7 @@ dns.setServers(['8.8.8.8', '8.8.4.4']);
 // Vercel serverless: connect DB on each cold start, then export app
 const initPromise = connectDB().then(async () => {
   initAttendanceCron();
+  initShipmaxxCron();
   try {
     await smx.login();
     console.log('[ShipMaxx] Token pre-loaded on startup ✓');
@@ -34,3 +36,4 @@ if (process.env.VERCEL !== '1') {
 }
 
 export default handler;
+// trigger nodemon restart

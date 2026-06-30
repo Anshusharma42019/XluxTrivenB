@@ -13,6 +13,7 @@ const orderItemSchema = new mongoose.Schema({
 const shipmaxxOrderSchema = new mongoose.Schema({
   order_id: { type: String, unique: true, sparse: true, index: true },
   awb_code: { type: String, index: true },
+  courier_name: String,
   status: { type: String, default: 'NEW' },
   delivery_attempt: { type: Number, default: 1 },
   

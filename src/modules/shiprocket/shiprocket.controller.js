@@ -10,6 +10,7 @@ import { Return } from './models/return.model.js';
 import { WalletTransaction } from './models/walletTransaction.model.js';
 import { DeliveredOrder } from './models/deliveredOrder.model.js';
 import { InTransitOrder } from './models/inTransitOrder.model.js';
+import { ShipmaxxOrder } from '../shipmaxx/models/shipmaxxOrder.model.js';
 import ReadyToShipment from '../readytoshipment/readytoshipment.model.js';
 import { Lead } from '../lead/lead.model.js';
 import Task from '../task/task.model.js';
@@ -1346,9 +1347,7 @@ export const getStatusOrders = catchAsync(async (req, res) => {
 
   // Match underscore, space, and hyphen variants (e.g. UNDELIVERED-2ND_ATTEMPT, UNDELIVERED-2ND ATTEMPT)
   const statusVariant = status.replace(/[-_]/g, '[-_ ]');
-  const statusQuery = isUndelivered
-    ? { status: { $regex: /^undelivered/i } }
-    : { status: new RegExp(`^${statusVariant}$`, 'i') };
+  const statusQuery = { status: new RegExp(`^${statusVariant}$`, 'i') };
 
   const orders = await Order.find({ ...statusQuery, ...dateMatch })
     .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
@@ -1430,9 +1429,23 @@ export const getLocalOrderLookup = catchAsync(async (req, res) => {
   if (channel_order_id) query.push({ order_id: String(channel_order_id) });
   if (shipment_id && !Number.isNaN(Number(shipment_id))) query.push({ shiprocket_shipment_id: Number(shipment_id) });
   if (!query.length) return res.status(400).json(new ApiResponse(400, null, 'Param required'));
-  const order = await Order.findOne({ $or: query }).populate('lead_id', 'phone email').lean();
+  let order = await Order.findOne({ $or: query }).populate('lead_id', 'phone email').lean();
+  let smxOrder = await ShipmaxxOrder.findOne({ $or: query }).populate('lead_id', 'phone email').lean();
+  
+  // Prefer the ShipmaxxOrder if it exists and the Shiprocket order is actually a shipmaxx platform order,
+  // or if the Shiprocket order is missing / has no AWB.
+  if (smxOrder) {
+    if (!order) {
+      order = smxOrder;
+    } else if (order.platform === 'shipmaxx') {
+      order = smxOrder;
+    } else if (smxOrder.awb_code && !order.awb_code) {
+      order = smxOrder;
+    }
+  }
+  
   if (!order) return res.json(new ApiResponse(200, null, 'Not found'));
-  const allLeads = await Lead.find({ isDeleted: { $ne: true } }).select('name phone address').lean();
+  const allLeads = await Lead.find({ isDeleted: { $ne: true } }).select('name phone address city state pincode').lean();
   const byName = {}, byPincode = {}, pinCount = {};
   for (const l of allLeads) {
     if (!l.phone) continue;
@@ -1441,15 +1454,38 @@ export const getLocalOrderLookup = catchAsync(async (req, res) => {
     if (pm) { pinCount[pm[1]] = (pinCount[pm[1]] || 0) + 1; byPincode[pm[1]] = l; }
   }
   for (const p of Object.keys(pinCount)) { if (pinCount[p] > 1) delete byPincode[p]; }
+  
   let phone = order.lead_id?.phone || order.billing_phone;
+  let customer_name = order.billing_customer_name;
+  let address = order.billing_address;
+  let city = order.billing_city;
+  let state = order.billing_state;
+  let pincode = order.billing_pincode;
+
   if (!order.lead_id?.phone && (/^x+$/i.test(phone) || String(phone).replace(/\D/g, '').length < 10)) {
     const full = (order.billing_customer_name || '').toLowerCase().trim();
     let lead = byName[full];
     if (!lead) { const words = full.split(/\s+/).filter(w => w.length > 2); if (words.length > 0) lead = Object.entries(byName).find(([k]) => words.every(w => k.includes(w)))?.[1]; }
     if (!lead && order.billing_pincode) lead = byPincode[String(order.billing_pincode).trim()];
-    phone = lead?.phone || phone;
+    
+    if (lead) {
+      phone = lead.phone || phone;
+      customer_name = customer_name || lead.name;
+      address = address || lead.address;
+      city = city || lead.city;
+      state = state || lead.state;
+      pincode = pincode || lead.pincode;
+    }
   }
-  res.json(new ApiResponse(200, { ...order, billing_phone: phone }, 'Order fetched'));
+  res.json(new ApiResponse(200, { 
+    ...order, 
+    billing_phone: phone,
+    billing_customer_name: customer_name,
+    billing_address: address,
+    billing_city: city,
+    billing_state: state,
+    billing_pincode: pincode
+  }, 'Order fetched'));
 });
 
 export const backfillDeliveredAt = catchAsync(async (req, res) => {

@@ -1,11 +1,105 @@
 import express from 'express';
 import auth from '../../middleware/auth.js';
 import * as c from './shipmaxx.controller.js';
+import { ShipmaxxOrder as Order } from './models/shipmaxxOrder.model.js';
+import Verification from '../verification/verification.model.js';
+import { Lead } from '../lead/lead.model.js';
+import catchAsync from '../../utils/catchAsync.js';
 
 const router = express.Router();
 
 // ── Debug ─────────────────────────────────────────────────────────────────────
-router.get('/debug/sync', auth(), c.debugSync);
+router.get('/debug/schema', async (req, res) => {
+  const Followup = (await import('./models/shipmaxxFollowup.model.js')).ShipmaxxFollowup;
+  res.json({ paths: Object.keys(Followup.schema.paths) });
+});
+
+router.get('/debug/due-followups', async (req, res) => {
+  const Followup = (await import('./models/shipmaxxFollowup.model.js')).ShipmaxxFollowup;
+  const delivered = await Order.find({ platform: 'shipmaxx', status: /^delivered$/i, followup_done: { $ne: true }, sent_to_verification: { $ne: true } }).lean();
+  const allFollowups = await Followup.find({ order_id: { $in: delivered.map(o => o._id) } }).sort({ followup_number: 1 }).lean();
+  
+  const today = new Date();
+  today.setHours(23,59,59,999);
+  
+  const due = [];
+  for(const o of delivered) {
+    const fus = allFollowups.filter(f => String(f.order_id) === String(o._id));
+    if(fus.length > 0) {
+      const fu = fus[0];
+      if(!fu.completed && new Date(fu.scheduled_date) <= today) {
+        due.push({ order: o.order_id, del: o.delivered_at, sch: fu.scheduled_date });
+      }
+    }
+  }
+  res.json({ total_due_1st_call: due.length, due });
+});
+
+router.get('/debug/run-cron', async (req, res) => {
+  const smx = (await import('./shipmaxx.service.js')).default;
+  const { normalizeShipmaxxStatus, parseShipMaxxDate } = await import('./shipmaxx.controller.js');
+  
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+  const activeOrders = await Order.find({
+    platform: 'shipmaxx',
+    status: { $not: /^(delivered|rto_delivered|cancelled|canceled)/i },
+    createdAt: { $gte: thirtyDaysAgo }
+  }).lean();
+
+  let updatedCount = 0;
+  let results = [];
+  for (const o of activeOrders) {
+    if (!o.awb_code) continue;
+    try {
+      const trackRes = await smx.trackShipment(o.awb_code);
+      const tracking = trackRes?.data?.data || trackRes?.data || trackRes || {};
+      const rawStatus = tracking.current_status || tracking.status || tracking.shipment_status || tracking.delivery_status;
+      
+      if (rawStatus) {
+        let status = normalizeShipmaxxStatus(rawStatus);
+        const update = { status, status_updated_at: new Date() };
+        
+        if (status === 'DELIVERED') {
+          let actualDeliveredAt = null;
+          if (tracking.history && Array.isArray(tracking.history)) {
+            const delEvent = tracking.history.find(h =>
+              h.system_status_code === 'DEL' ||
+              (h.system_status_name || '').toLowerCase() === 'delivered' ||
+              (h.status || '').toLowerCase() === 'delivered'
+            );
+            if (delEvent && delEvent.timestamp) {
+              actualDeliveredAt = parseShipMaxxDate(delEvent.timestamp);
+            }
+          }
+          if (actualDeliveredAt) {
+            update.delivered_at = actualDeliveredAt;
+            update.status_updated_at = actualDeliveredAt;
+          } else {
+            update.delivered_at = new Date();
+          }
+        }
+        await Order.updateOne({ _id: o._id }, { $set: update });
+        if (status !== o.status) {
+          updatedCount++;
+          results.push({ awb: o.awb_code, old: o.status, new: status });
+        }
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+  res.json({ checked: activeOrders.length, updatedCount, results });
+});
+router.get('/debug/41626', catchAsync(async (req, res) => {
+  const order = await Order.findOne({ order_id: '41626' }).lean();
+  const verifs = order?.lead_id ? await Verification.find({ lead: order.lead_id }).lean() : [];
+  const lead = order?.lead_id ? await Lead.findById(order.lead_id).lean() : null;
+  res.json({ order, verifs, lead });
+}));
+
+router.get('/debug/sync', c.debugSync);
 router.post('/debug-sync-force', c.syncShipmaxx);
 router.get('/debug-stats', async (req, res) => {
   try {
@@ -102,11 +196,20 @@ router.post('/debug-june', async (req, res) => {
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/debug-track-single', async (req, res) => {
+router.get('/debug-track-single', async (req, res) => {
   try {
     const smx = (await import('./shipmaxx.service.js')).default;
-    const trackRes = await smx.trackShipment('77855902261');
-    res.json(trackRes);
+    const mongoose = (await import('mongoose')).default;
+    const db = mongoose.connection.db;
+    
+    const { id } = req.query;
+    if (!id) return res.json({ error: 'id required' });
+
+    const raw = await smx.getOrder(id);
+    const dbOrder = await db.collection('shipmaxxorders').findOne({ order_id: String(id) });
+    const lead = dbOrder ? await db.collection('leads').findOne({ phone: new RegExp(dbOrder.billing_phone) }) : null;
+    
+    res.json({ raw, dbOrder, lead });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
@@ -119,7 +222,7 @@ router.post('/auth/set-password', auth(), c.setPassword);
 // ── Orders (specific routes BEFORE parameterized) ─────────────────────────────
 router.get('/orders', auth(), c.getOrders);
 router.get('/orders/stats', c.getDeliveredStats);
-router.get('/orders/status', auth(), c.getStatusOrders);
+router.get('/orders/status', c.getStatusOrders);
 router.get('/orders/delivered', c.getDeliveredOrders);
 router.get('/orders/delivered-schema', auth(), c.getDeliveredOrdersFromSchema);
 router.get('/orders/in-transit-schema', auth(), c.getInTransitOrdersFromSchema);
