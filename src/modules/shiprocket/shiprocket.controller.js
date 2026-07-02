@@ -69,18 +69,38 @@ const cleanupReorderCommissions = async () => {
 };
 
 // Generate commission for re-orders (orders from follow-up → verification → new delivery)
-const generateReorderCommissions = async () => {
+export const generateReorderCommissions = async () => {
+  const logs = [];
   try {
     await cleanupReorderCommissions();
 
+    const today = new Date();
+    // Default to Shiprocket month/year calculation (can be dynamic if needed)
+    const month = today.getMonth();
+    const year = today.getFullYear();
     const settings = await FollowupCommissionSettings.findOne().sort({ createdAt: -1 }).lean();
-    if (!settings || !settings.is_active) return;
+    if (!settings || !settings.is_active) {
+       logs.push("Inactive settings");
+       return logs;
+    }
 
-    // Find all delivered orders that haven't had commission generated yet
-    const pendingOrders = await Order.find({
-      status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-      reorder_commission_generated: { $ne: true },
-    }).populate('lead_id').lean();
+    const [pendingOrdersSR, pendingOrdersSM] = await Promise.all([
+      Order.find({
+        status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+        reorder_commission_generated: { $ne: true },
+      }).populate('lead_id').lean(),
+      ShipmaxxOrder.find({
+        status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+        reorder_commission_generated: { $ne: true },
+      }).populate('lead_id').lean()
+    ]);
+
+    // Tag the platform so we can update the correct collection later
+    const pendingOrders = [
+      ...pendingOrdersSR.map(o => ({ ...o, _model: 'shiprocket' })),
+      ...pendingOrdersSM.map(o => ({ ...o, _model: 'shipmaxx' }))
+    ];
+    logs.push(`[Commission] pendingOrders: ${pendingOrders.length} (SR: ${pendingOrdersSR.length}, SM: ${pendingOrdersSM.length})`);
 
     const reorders = [];
     for (const o of pendingOrders) {
@@ -88,6 +108,7 @@ const generateReorderCommissions = async () => {
         reorders.push(o);
       }
     }
+    logs.push(`[Commission] reorders identified: ${reorders.length}`);
 
     for (const order of reorders) {
       const deliveredAt = order.delivered_at || order.createdAt || new Date();
@@ -103,7 +124,12 @@ const generateReorderCommissions = async () => {
       // ── Staff A: original order staff (created_by on source order or original lead creator) ─────────
       let staffA = null;
       if (order.source_order_id) {
-        const sourceOrder = await Order.findById(order.source_order_id).select('created_by verified_by lead_id').lean();
+        let sourceOrder = null;
+        if (order._model === 'shipmaxx') {
+          sourceOrder = await ShipmaxxOrder.findById(order.source_order_id).select('created_by verified_by lead_id').lean();
+        } else {
+          sourceOrder = await Order.findById(order.source_order_id).select('created_by verified_by lead_id').lean();
+        }
         staffA = sourceOrder?.created_by || sourceOrder?.verified_by;
         if (!staffA && sourceOrder?.lead_id) {
           const srcLead = await Lead.findById(sourceOrder.lead_id).select('assignedTo createdBy').lean();
@@ -127,6 +153,7 @@ const generateReorderCommissions = async () => {
 
       const base = {
         source_order_id: order.source_order_id || order._id,
+        order_model: order._model === 'shipmaxx' ? 'ShipmaxxOrder' : 'ShiprocketOrder',
         lead_id: order.lead_id?._id || order.lead_id || null,
         commission_type: settings.commission_type,
         order_sub_total: order.sub_total || 0,
@@ -138,6 +165,8 @@ const generateReorderCommissions = async () => {
       // Create Staff B commission (re-verification)
       if (staffB) {
         const amountB = calcAmount(false);
+        logs.push(`[Commission] amountB: ${amountB}`);
+        console.log(`[Commission] amountB: ${amountB}`);
         if (amountB > 0) {
           await ReorderCommission.findOneAndUpdate(
             { order_id: order._id, commission_role: 'reorder' },
@@ -159,11 +188,17 @@ const generateReorderCommissions = async () => {
         }
       }
 
-      await Order.findByIdAndUpdate(order._id, { reorder_commission_generated: true });
+      if (order._model === 'shipmaxx') {
+        await ShipmaxxOrder.findByIdAndUpdate(order._id, { reorder_commission_generated: true });
+      } else {
+        await Order.findByIdAndUpdate(order._id, { reorder_commission_generated: true });
+      }
     }
   } catch (e) {
+    logs.push(`Error: ${e.message}`);
     console.error('[Commission] generateReorderCommissions error:', e.message);
   }
+  return logs;
 };
 
 

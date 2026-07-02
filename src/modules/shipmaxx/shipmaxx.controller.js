@@ -39,6 +39,8 @@ const SMX_STATUS_MAP = {
   RBS: 'REACHED_BACK_AT_SELLER_CITY',
   MIS: 'MISROUTED',
   RTO_INTRANSIT: 'RTO_IN_TRANSIT',
+  'RTO-IT': 'RTO_IN_TRANSIT',
+  RTO_IT: 'RTO_IN_TRANSIT',
   SHIPMENT_CANCELLED: 'CANCELED',
   DELIVERY_EXCEPTION: 'UNDELIVERED_ATTEMPT_FAILURE',
   SHIPMENT_BOOKED: 'NEW',
@@ -96,6 +98,37 @@ export const parseShipMaxxDate = (dateStr) => {
   }
   return new Date(dateStr);
 };
+
+export const extractStatusUpdatedAt = (tracking, currentNormalizedStatus) => {
+  let actualUpdatedAt = new Date();
+  if (tracking && tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
+    let oldestConsecutiveDateStr = null;
+    const baseStatus = String(currentNormalizedStatus).replace(/_1ST_ATTEMPT|_2ND_ATTEMPT|_3RD_ATTEMPT|_ATTEMPT_FAILURE|_FAILURE/i, '');
+    for (let i = 0; i < tracking.history.length; i++) {
+      const h = tracking.history[i];
+      const hRawStatus = h.system_status_code || h.status || h.shipment_status || h.delivery_status;
+      if (hRawStatus) {
+        let hStatus = normalizeShipmaxxStatus(hRawStatus);
+        if (hStatus === 'UNDELIVERED_ATTEMPT_FAILURE') hStatus = 'UNDELIVERED';
+        const compareBase = baseStatus === 'UNDELIVERED_ATTEMPT_FAILURE' ? 'UNDELIVERED' : baseStatus;
+        if (hStatus === compareBase) {
+          oldestConsecutiveDateStr = h.date || h.timestamp || h.time;
+        } else {
+          break; // status changed, stop looking back
+        }
+      }
+    }
+    const dateStr = oldestConsecutiveDateStr || tracking.history[0].date || tracking.history[0].timestamp || tracking.history[0].time;
+    if (dateStr) {
+      const parsedDate = parseShipMaxxDate(dateStr);
+      if (parsedDate && !isNaN(parsedDate.getTime())) {
+        actualUpdatedAt = parsedDate;
+      }
+    }
+  }
+  return actualUpdatedAt;
+};
+
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 export const login = catchAsync(async (req, res) => {
@@ -163,6 +196,15 @@ export const createOrder = catchAsync(async (req, res) => {
 
   // Log in CRM Order database
   try {
+    let matchedLeadId = req.body.lead_id || null;
+    if (!matchedLeadId && customer && customer.phone) {
+      const cleanPhone = String(customer.phone).replace(/\D/g, '');
+      if (cleanPhone.length >= 10) {
+        const lead = await Lead.findOne({ phone: new RegExp(cleanPhone.slice(-10) + '$'), isDeleted: { $ne: true } }).select('_id');
+        if (lead) matchedLeadId = lead._id;
+      }
+    }
+
     const subTotal = (products || []).reduce((sum, p) => sum + (Number(p.price) * (Number(p.quantity) || 1)), 0) + (Number(other_charges) || 0) - (Number(total_discount) || 0);
     await Order.create({
       order_id: String(oid),
@@ -179,6 +221,7 @@ export const createOrder = catchAsync(async (req, res) => {
       order_items: (products || []).map(p => ({ name: p.name, sku: p.sku, units: p.quantity, selling_price: p.price })),
       platform: 'shipmaxx',
       created_by: req.user?._id,
+      lead_id: matchedLeadId,
       raw_response: smxRes,
     });
   } catch (err) {
@@ -230,6 +273,15 @@ export const createOrderAndShipment = catchAsync(async (req, res) => {
 
   // Log in CRM Order database
   try {
+    let matchedLeadId = req.body.lead_id || null;
+    if (!matchedLeadId && customer && customer.phone) {
+      const cleanPhone = String(customer.phone).replace(/\D/g, '');
+      if (cleanPhone.length >= 10) {
+        const lead = await Lead.findOne({ phone: new RegExp(cleanPhone.slice(-10) + '$'), isDeleted: { $ne: true } }).select('_id');
+        if (lead) matchedLeadId = lead._id;
+      }
+    }
+
     const subTotal = (products || []).reduce((sum, p) => sum + (Number(p.price) * (Number(p.quantity) || 1)), 0) + (Number(other_charges) || 0) - (Number(total_discount) || 0);
     await Order.create({
       order_id: String(oid),
@@ -246,6 +298,7 @@ export const createOrderAndShipment = catchAsync(async (req, res) => {
       order_items: (products || []).map(p => ({ name: p.name, sku: p.sku, units: p.quantity, selling_price: p.price })),
       platform: 'shipmaxx',
       created_by: req.user?._id,
+      lead_id: matchedLeadId,
       raw_response: smxRes,
     });
   } catch (err) {
@@ -756,7 +809,11 @@ export const importOrders = catchAsync(async (req, res) => {
   const activeOrders = await Order.find({
     platform: 'shipmaxx',
     awb_code: { $exists: true, $ne: '' },
-    status: { $not: /^(delivered|rto_delivered)/i }
+    $or: [
+      { status: { $not: /^(delivered|rto_delivered)/i } },
+      { status: /^(delivered|rto_delivered)/i, delivered_at: { $exists: false } },
+      { status: /^(delivered|rto_delivered)/i, delivered_at: null }
+    ]
   }).lean();
 
   let updatedCount = 0;
@@ -912,18 +969,20 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
         const existing = await Order.findOne(query).select('status status_updated_at').lean();
         
         let statusUpdatedAt = s.date_added ? new Date(s.date_added) : new Date();
+        let finalStatus = newStatus;
         if (existing) {
-          if (existing.status === newStatus && existing.status_updated_at) {
-             statusUpdatedAt = existing.status_updated_at;
-          } else if (existing.status !== newStatus) {
-             statusUpdatedAt = new Date(); // It changed just now!
+          statusUpdatedAt = existing.status_updated_at || statusUpdatedAt; // Never forcefully jump to today in Step 1
+          
+          // Don't downgrade a valid status to UNKNOWN or some raw unmapped string if we already have a good one
+          if (newStatus === 'UNKNOWN' || (!SMX_STATUS_MAP[newStatus] && SMX_STATUS_MAP[existing.status])) {
+            finalStatus = existing.status;
           }
         }
 
         const updateData = {
           order_id: String(s.order_id || s.awb),
           awb_code: String(s.awb || ''),
-          status: newStatus,
+          status: finalStatus,
           platform: 'shipmaxx',
           payment_method: s.payment_method || '',
           status_updated_at: statusUpdatedAt,
@@ -1076,16 +1135,24 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
       if (ndr.orderId) query.order_id = String(ndr.orderId);
       else query.awb_code = String(ndr.awb);
 
+      const existingOrder = await Order.findOne(query);
+
+      let statusUpdatedAt = ndr.attemptDate ? parseShipMaxxDate(`${ndr.attemptDate} ${ndr.attemptTime || '00:00:00'}`) : null;
+      if (!statusUpdatedAt && existingOrder && existingOrder.status_updated_at) {
+         statusUpdatedAt = existingOrder.status_updated_at;
+      } else if (!statusUpdatedAt) {
+         statusUpdatedAt = new Date();
+      }
+
       const updateData = {
         order_id: String(ndr.orderId || ndr.awb),
         awb_code: String(ndr.awb || ''),
         delivery_attempt: attemptNumber,
-        status_updated_at: ndr.attemptDate ? parseShipMaxxDate(`${ndr.attemptDate} ${ndr.attemptTime || '00:00:00'}`) : new Date(),
+        status_updated_at: statusUpdatedAt,
         platform: 'shipmaxx',
       };
       
       // Only overwrite status if we have a valid mapping or if it's not already delivered in db
-      const existingOrder = await Order.findOne(query);
       if (!existingOrder || (existingOrder.status !== 'DELIVERED' && existingOrder.status !== 'RTO_DELIVERED')) {
          updateData.status = mappedStatus;
       }
@@ -1134,10 +1201,7 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
         }
 
         if (tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
-          const latestEvent = tracking.history[0];
-          if (latestEvent && latestEvent.timestamp) {
-            update.status_updated_at = parseShipMaxxDate(latestEvent.timestamp);
-          }
+          update.status_updated_at = extractStatusUpdatedAt(tracking, status);
         }
         
         if (status === 'DELIVERED') {
@@ -1858,4 +1922,53 @@ export const cleanupDuplicates = catchAsync(async (req, res) => {
   }
   
   res.json(new ApiResponse(200, { deleted: 0 }, 'No overlapping orders found in ShipMaxx DB'));
+});
+
+export const debugBackfillDelivered = catchAsync(async (req, res) => {
+  const orders = await Order.find({ platform: 'shipmaxx', status: { $in: [/^delivered$/i, /^rto_delivered$/i, /^DEL$/i, /^RTO$/i] }, delivered_at: { $exists: false } }).limit(500);
+  let fixed = 0;
+  for (const o of orders) {
+    try {
+      const trackRes = await smx.trackShipment(o.awb_code);
+      const tracking = trackRes?.data?.data || trackRes?.data || trackRes || {};
+      let actualDeliveredAt = null;
+      if (tracking.history && Array.isArray(tracking.history)) {
+        const delEvent = tracking.history.find(h => {
+           const c = h.system_status_code || '';
+           const n = (h.system_status_name || '').toLowerCase();
+           const s = (h.status || '').toLowerCase();
+           return c === 'DEL' || c === 'RTO' || n.includes('delivered') || s.includes('delivered') || n.includes('rto') || s.includes('rto');
+        });
+        if (delEvent) {
+          const dStr = delEvent.date || delEvent.timestamp || delEvent.time;
+          if (dStr) {
+            const pd = parseShipMaxxDate(dStr);
+            if (pd && !isNaN(pd.getTime())) actualDeliveredAt = pd;
+          }
+        }
+      }
+      
+      // If we couldn't find a DEL or RTO event, just use the last updated date if it's not today.
+      // If it IS today, use the created date + 3 days to avoid spiking "Today's Delivered".
+      if (!actualDeliveredAt) {
+          const now = new Date();
+          const isToday = o.status_updated_at && o.status_updated_at.toDateString() === now.toDateString();
+          if (o.status_updated_at && !isToday) {
+              actualDeliveredAt = o.status_updated_at;
+          } else {
+              actualDeliveredAt = new Date(o.createdAt.getTime() + 3 * 24 * 60 * 60 * 1000);
+          }
+      }
+      
+      if (actualDeliveredAt) {
+        o.delivered_at = actualDeliveredAt;
+        o.status_updated_at = actualDeliveredAt;
+        await o.save();
+        fixed++;
+      }
+    } catch(err) {
+      console.error(err);
+    }
+  }
+  res.json({ checked: orders.length, fixed });
 });

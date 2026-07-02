@@ -3,9 +3,11 @@ import mongoose from 'mongoose';
 // Tracks commission earned by a staff member when a re-order (sent from follow-up) gets delivered
 const reorderCommissionSchema = new mongoose.Schema({
   // The NEW order that got delivered (the re-order)
-  order_id: { type: mongoose.Schema.Types.ObjectId, ref: 'ShiprocketOrder', required: true, index: true },
+  order_id: { type: mongoose.Schema.Types.ObjectId, refPath: 'order_model', required: true, index: true },
   // The ORIGINAL order that completed follow-ups and was sent to verification
-  source_order_id: { type: mongoose.Schema.Types.ObjectId, ref: 'ShiprocketOrder' },
+  source_order_id: { type: mongoose.Schema.Types.ObjectId, refPath: 'order_model' },
+  // The model for dynamic population
+  order_model: { type: String, enum: ['ShiprocketOrder', 'ShipmaxxOrder'], default: 'ShiprocketOrder' },
   // The lead linking both orders
   lead_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead', index: true },
   // Staff who handled the re-verification and whose order got delivered

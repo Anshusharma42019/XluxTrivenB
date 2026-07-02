@@ -164,6 +164,11 @@ const distributeUnassigned = catchAsync(async (req, res) => {
   res.status(httpStatus.OK).json(new ApiResponse(httpStatus.OK, result, 'Unassigned leads distributed successfully'));
 });
 
+const distributeAbsentSales = catchAsync(async (req, res) => {
+  const result = await leadService.distributeAbsentSalesLeads();
+  res.status(httpStatus.OK).json(new ApiResponse(httpStatus.OK, result, result.message));
+});
+
 const deleteNote = catchAsync(async (req, res) => {
   const lead = await Lead.findOne({ _id: req.params.leadId, isDeleted: false });
   if (!lead) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
@@ -185,4 +190,4 @@ const deleteNote = catchAsync(async (req, res) => {
   res.json(new ApiResponse(httpStatus.OK, lead, 'Note deleted'));
 });
 
-export default { createLead, submitLead, submitLeadForDepartment, getLeads, getLead, updateLead, deleteLead, assignLead, addNote, deleteNote, markCNP, unmarkCNP, addFollowUp, setNextFollowUp, getFollowUpLeads, searchByPhone, exportLeads, distributeUnassigned };
+export default { createLead, submitLead, submitLeadForDepartment, getLeads, getLead, updateLead, deleteLead, assignLead, addNote, deleteNote, markCNP, unmarkCNP, addFollowUp, setNextFollowUp, getFollowUpLeads, searchByPhone, exportLeads, distributeUnassigned, distributeAbsentSales };

@@ -2,6 +2,7 @@ import Lead from '../lead/lead.model.js';
 import Task from '../task/task.model.js';
 import { Order } from '../shiprocket/models/order.model.js';
 import Verification from '../verification/verification.model.js';
+import { ShipmaxxOrder } from '../shipmaxx/models/shipmaxxOrder.model.js';
 import StaffTarget from './staffTarget.model.js';
 import Cnp from '../cnp/cnp.model.js';
 import CallAgain from '../callagain/callagain.model.js';
@@ -414,40 +415,82 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
         status: 'on_hold',
         ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
       }),
-      // DR denominator: total shiprocket orders for this person's leads in the period (dispatched)
-      Order.countDocuments({ 
-        lead_id: { $in: staffLeads },
-        status: { $not: /^(new|pending|cancelled)$/i },
-        ...(isAllTime ? {} : { createdAt: { $gte: startOfDay, $lte: endOfDay } })
-      }),
+      // DR denominator: total orders (Shiprocket + Shipmaxx) for this person's leads in the period (dispatched)
+      Promise.all([
+        Order.countDocuments({ 
+          lead_id: { $in: staffLeads },
+          status: { $not: /^(new|pending|cancelled)$/i },
+          ...(isAllTime ? {} : { createdAt: { $gte: startOfDay, $lte: endOfDay } })
+        }),
+        ShipmaxxOrder.countDocuments({
+          $or: [{ lead_id: { $in: staffLeads } }, { created_by: uid }],
+          status: { $not: /^(new|pending|cancelled)$/i },
+          ...(isAllTime ? {} : { createdAt: { $gte: startOfDay, $lte: endOfDay } })
+        })
+      ]).then(([a, b]) => a + b),
       // Daily actuals: how many were delivered TODAY
-      Order.countDocuments({ 
-        lead_id: { $in: staffLeads }, 
-        status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-        ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
-      }),
+      Promise.all([
+        Order.countDocuments({ 
+          lead_id: { $in: staffLeads }, 
+          status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+          ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
+        }),
+        ShipmaxxOrder.countDocuments({
+          $or: [{ lead_id: { $in: staffLeads } }, { created_by: uid }],
+          status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+          ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
+        })
+      ]).then(([a, b]) => a + b),
       // Daily actuals: how many were RTO TODAY
-      Order.countDocuments({
-        lead_id: { $in: staffLeads },
-        status: { $regex: /^rto/i },
-        ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
-      }),
+      Promise.all([
+        Order.countDocuments({
+          lead_id: { $in: staffLeads },
+          status: { $regex: /^rto/i },
+          ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
+        }),
+        ShipmaxxOrder.countDocuments({
+          $or: [{ lead_id: { $in: staffLeads } }, { created_by: uid }],
+          status: { $regex: /^rto/i },
+          ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
+        })
+      ]).then(([a, b]) => a + b),
       // Monthly cohort for DR/RTO always
-      Order.countDocuments({ 
-        lead_id: { $in: staffLeads },
-        status: { $not: /^(new|pending|cancelled)$/i },
-        createdAt: { $gte: monthStart, $lte: monthEnd }
-      }),
-      Order.countDocuments({ 
-        lead_id: { $in: staffLeads }, 
-        status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-        createdAt: { $gte: monthStart, $lte: monthEnd }
-      }),
-      Order.countDocuments({
-        lead_id: { $in: staffLeads },
-        status: { $regex: /^rto/i },
-        createdAt: { $gte: monthStart, $lte: monthEnd }
-      }),
+      Promise.all([
+        Order.countDocuments({ 
+          lead_id: { $in: staffLeads },
+          status: { $not: /^(new|pending|cancelled)$/i },
+          createdAt: { $gte: monthStart, $lte: monthEnd }
+        }),
+        ShipmaxxOrder.countDocuments({
+          $or: [{ lead_id: { $in: staffLeads } }, { created_by: uid }],
+          status: { $not: /^(new|pending|cancelled)$/i },
+          createdAt: { $gte: monthStart, $lte: monthEnd }
+        })
+      ]).then(([a, b]) => a + b),
+      Promise.all([
+        Order.countDocuments({ 
+          lead_id: { $in: staffLeads }, 
+          status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+          createdAt: { $gte: monthStart, $lte: monthEnd }
+        }),
+        ShipmaxxOrder.countDocuments({
+          $or: [{ lead_id: { $in: staffLeads } }, { created_by: uid }],
+          status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+          createdAt: { $gte: monthStart, $lte: monthEnd }
+        })
+      ]).then(([a, b]) => a + b),
+      Promise.all([
+        Order.countDocuments({
+          lead_id: { $in: staffLeads },
+          status: { $regex: /^rto/i },
+          createdAt: { $gte: monthStart, $lte: monthEnd }
+        }),
+        ShipmaxxOrder.countDocuments({
+          $or: [{ lead_id: { $in: staffLeads } }, { created_by: uid }],
+          status: { $regex: /^rto/i },
+          createdAt: { $gte: monthStart, $lte: monthEnd }
+        })
+      ]).then(([a, b]) => a + b),
       // For Support: total verifications ever assigned to them (their queue)
       Verification.countDocuments({ assignedTo: uid, isDeleted: { $ne: true } })
     ]);
@@ -677,8 +720,10 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
   const allOrderFilter = isAllTime ? {} : {
     createdAt: { $gte: start, $lte: end }
   };
+  const allOrderFilterSM = { ...allOrderFilter };
   if (userRole === 'sales' || (userDepartments && userDepartments.length > 0)) {
     allOrderFilter.lead_id = { $in: staffLeads };
+    allOrderFilterSM.$or = [{ lead_id: { $in: staffLeads } }, { created_by: userId }];
   }
 
   // Delivered stats: count orders delivered in the period
@@ -692,11 +737,13 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
       ]
     })
   };
+  const deliveredFilterSM = { ...deliveredFilter };
   if (userRole === 'sales' || (userDepartments && userDepartments.length > 0)) {
     deliveredFilter.lead_id = { $in: staffLeads };
+    deliveredFilterSM.$or = [{ lead_id: { $in: staffLeads } }, { created_by: userId }];
   }
 
-  const [orderBreakdown, deliveredBreakdown, deliveredRevenueResult] = await Promise.all([
+  const [orderBreakdownSR, deliveredBreakdownSR, deliveredRevenueResultSR, orderBreakdownSM, deliveredBreakdownSM, deliveredRevenueResultSM] = await Promise.all([
     Order.aggregate([
       { $match: allOrderFilter },
       {
@@ -755,15 +802,85 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
     ]),
     Order.aggregate([
       { $match: deliveredFilter },
-      { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } },
+      { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } }
     ]),
+    ShipmaxxOrder.aggregate([
+      { $match: allOrderFilterSM },
+      {
+        $lookup: {
+          from: 'leads',
+          localField: 'lead_id',
+          foreignField: '_id',
+          as: 'leadDoc'
+        }
+      },
+      {
+        $group: {
+          _id: {
+            $cond: [
+              {
+                $or: [
+                  { $ifNull: ['$source_order_id', false] },
+                  { $eq: [{ $arrayElemAt: ['$leadDoc.status', 0] }, 'old'] }
+                ]
+              },
+              'old',
+              'new'
+            ]
+          },
+          count: { $sum: 1 }
+        }
+      }
+    ]),
+    ShipmaxxOrder.aggregate([
+      { $match: deliveredFilterSM },
+      {
+        $lookup: {
+          from: 'leads',
+          localField: 'lead_id',
+          foreignField: '_id',
+          as: 'leadDoc'
+        }
+      },
+      {
+        $group: {
+          _id: {
+            $cond: [
+              {
+                $or: [
+                  { $ifNull: ['$source_order_id', false] },
+                  { $eq: [{ $arrayElemAt: ['$leadDoc.status', 0] }, 'old'] }
+                ]
+              },
+              'old',
+              'new'
+            ]
+          },
+          count: { $sum: 1 }
+        }
+      }
+    ]),
+    ShipmaxxOrder.aggregate([
+      { $match: deliveredFilterSM },
+      { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } }
+    ])
   ]);
 
-  const newOrdersCount = orderBreakdown.find(o => o._id === 'new')?.count || 0;
-  const oldOrdersCount = orderBreakdown.find(o => o._id === 'old')?.count || 0;
+  const mergeBreakdown = (sr, sm) => {
+    const res = {};
+    for (const b of sr) res[b._id] = (res[b._id] || 0) + b.count;
+    for (const b of sm) res[b._id] = (res[b._id] || 0) + b.count;
+    return Object.keys(res).map(_id => ({ _id, count: res[_id] }));
+  };
 
-  const newDeliveredCount = deliveredBreakdown.find(o => o._id === 'new')?.count || 0;
-  const oldDeliveredCount = deliveredBreakdown.find(o => o._id === 'old')?.count || 0;
+  const orderBreakdown = mergeBreakdown(orderBreakdownSR, orderBreakdownSM);
+  const deliveredBreakdown = mergeBreakdown(deliveredBreakdownSR, deliveredBreakdownSM);
+  const deliveredRevenueTotal = (deliveredRevenueResultSR[0]?.total || 0) + (deliveredRevenueResultSM[0]?.total || 0);
+
+  const newOrdersCount = orderBreakdown.find(b => b._id === 'new')?.count || 0;
+  const oldOrdersCount = orderBreakdown.find(b => b._id === 'old')?.count || 0;
+  const newDeliveredCount = deliveredBreakdown.find(b => b._id === 'new')?.count || 0;
+  const oldDeliveredCount = deliveredBreakdown.find(b => b._id === 'old')?.count || 0;
   const deliveredCount = newDeliveredCount + oldDeliveredCount;
   const departmentLeads = {
     migraine: migraineLeadCount,
@@ -812,7 +929,7 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
     deliveredCount,
     newDeliveredCount,
     oldDeliveredCount,
-    deliveredRevenue: deliveredRevenueResult[0]?.total || 0,
+    deliveredRevenue: deliveredRevenueTotal,
   };
 };
 
@@ -842,7 +959,7 @@ export const getStaffCommission = async (userId, month, year) => {
   const daysInMonth = new Date(year, month + 1, 0).getDate();
   const basePay = override?.manualBasePay ?? Math.round((user.baseSalary || 0) * (workingDays / daysInMonth));
 
-  const deliveredCount = await Order.countDocuments({
+  const deliveryQuerySR = {
     lead_id: { $in: staffLeads },
     source_order_id: null,
     status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
@@ -851,25 +968,41 @@ export const getStaffCommission = async (userId, month, year) => {
       { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
       { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
     ],
-  });
+  };
 
-  const revenueResult = await Order.aggregate([
+  const deliveryQuerySM = {
+    source_order_id: null,
+    $or: [ { lead_id: { $in: staffLeads } }, { created_by: userId } ],
+    status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+  };
+  deliveryQuerySM.$and = [
     {
-      $match: {
-        lead_id: { $in: staffLeads },
-        source_order_id: null,
-        status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-        $or: [
-          { delivered_at: { $gte: monthStart, $lte: monthEnd } },
-          { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
-          { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
-        ],
-      },
-    },
-    { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } },
+      $or: [
+        { delivered_at: { $gte: monthStart, $lte: monthEnd } },
+        { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
+        { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
+      ]
+    }
+  ];
+
+  const [deliveredCountSR, deliveredCountSM] = await Promise.all([
+    Order.countDocuments(deliveryQuerySR),
+    ShipmaxxOrder.countDocuments(deliveryQuerySM)
+  ]);
+  const deliveredCount = deliveredCountSR + deliveredCountSM;
+
+  const [revenueResultSR, revenueResultSM] = await Promise.all([
+    Order.aggregate([
+      { $match: deliveryQuerySR },
+      { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } },
+    ]),
+    ShipmaxxOrder.aggregate([
+      { $match: deliveryQuerySM },
+      { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } },
+    ])
   ]);
 
-  const totalRevenue = revenueResult[0]?.total || 0;
+  const totalRevenue = (revenueResultSR[0]?.total || 0) + (revenueResultSM[0]?.total || 0);
   const reorderTotal = reorderComms.reduce((acc, c) => acc + (c.commission_amount || 0), 0);
   const revenueCommission = Math.round(totalRevenue * ((user.commissionRate || 5) / 100));
   
@@ -882,6 +1015,7 @@ export const getStaffCommission = async (userId, month, year) => {
     totalDeliveries: deliveredCount, 
     totalRevenue, 
     revenueCommission,
+    commissionRate: user.commissionRate || 5,
     reorderCommission: reorderTotal,
     totalCommission, 
     basePay, 
@@ -901,31 +1035,44 @@ export const getAllStaffCommissions = async (month, year) => {
   const staff = await Promise.all(allUsers.map(u => getStaffCommission(u._id, month, year)));
   const validStaff = staff.filter(Boolean);
 
-  // Fetch company-wide totals regardless of assignment
-  const totalDeliveries = await Order.countDocuments({
+  const allDeliveryQuerySR = {
+    source_order_id: null,
     status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
     $or: [
       { delivered_at: { $gte: monthStart, $lte: monthEnd } },
       { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
       { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
     ],
-  });
+  };
 
-  const totalRevenueResult = await Order.aggregate([
-    {
-      $match: {
-        status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-        $or: [
-          { delivered_at: { $gte: monthStart, $lte: monthEnd } },
-          { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
-          { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
-        ],
-      },
-    },
-    { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } },
+  const allDeliveryQuerySM = {
+    source_order_id: null,
+    status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+    $or: [
+      { delivered_at: { $gte: monthStart, $lte: monthEnd } },
+      { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
+      { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
+    ],
+  };
+
+  const [totalDeliveriesSR, totalDeliveriesSM] = await Promise.all([
+    Order.countDocuments(allDeliveryQuerySR),
+    ShipmaxxOrder.countDocuments(allDeliveryQuerySM)
+  ]);
+  const totalDeliveries = totalDeliveriesSR + totalDeliveriesSM;
+
+  const [totalRevenueResultSR, totalRevenueResultSM] = await Promise.all([
+    Order.aggregate([
+      { $match: allDeliveryQuerySR },
+      { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } },
+    ]),
+    ShipmaxxOrder.aggregate([
+      { $match: allDeliveryQuerySM },
+      { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } },
+    ])
   ]);
 
-  const grandTotalRevenue = totalRevenueResult[0]?.total || 0;
+  const grandTotalRevenue = (totalRevenueResultSR[0]?.total || 0) + (totalRevenueResultSM[0]?.total || 0);
   const staffDeliveriesSum = validStaff.reduce((s, x) => s + (x.totalDeliveries || 0), 0);
   const staffRevenueSum = validStaff.reduce((s, x) => s + (x.totalRevenue || 0), 0);
 
@@ -961,11 +1108,37 @@ export const getRevenueChart = async (userRole, userId, period = 'monthly') => {
     ? { '_id.year': 1, '_id.week': 1 }
     : { '_id.year': 1, '_id.month': 1 };
 
-  return Order.aggregate([
-    { $match: { status: 'DELIVERED', sub_total: { $gt: 0 } } },
-    { $group: { _id: groupBy, revenue: { $sum: SUB_TOTAL_AMOUNT }, count: { $sum: 1 } } },
-    { $sort: sortBy },
-    { $limit: 12 },
+  const matchQ = { status: { $in: ['DELIVERED', 'Delivered', 'delivered'] }, sub_total: { $gt: 0 } };
+  
+  const [resSR, resSM] = await Promise.all([
+    Order.aggregate([
+      { $match: matchQ },
+      { $group: { _id: groupBy, revenue: { $sum: SUB_TOTAL_AMOUNT }, count: { $sum: 1 } } },
+    ]),
+    ShipmaxxOrder.aggregate([
+      { $match: matchQ },
+      { $group: { _id: groupBy, revenue: { $sum: SUB_TOTAL_AMOUNT }, count: { $sum: 1 } } },
+    ])
   ]);
+
+  const merged = {};
+  for (const item of [...resSR, ...resSM]) {
+    const key = JSON.stringify(item._id);
+    if (!merged[key]) merged[key] = { _id: item._id, revenue: 0, count: 0 };
+    merged[key].revenue += item.revenue;
+    merged[key].count += item.count;
+  }
+  
+  const final = Object.values(merged).sort((a,b) => {
+    if (period === 'weekly') {
+      if (a._id.year !== b._id.year) return a._id.year - b._id.year;
+      return a._id.week - b._id.week;
+    } else {
+      if (a._id.year !== b._id.year) return a._id.year - b._id.year;
+      return a._id.month - b._id.month;
+    }
+  });
+
+  return final.slice(0, 12);
 };
 

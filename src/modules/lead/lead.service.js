@@ -105,11 +105,9 @@ export const getNextSalesUser = async (department = null) => {
   const activeUserIds = activeAttendances.map(a => a.user.toString());
   const activeSalesUsers = salesUsers.filter(u => activeUserIds.includes(u._id.toString()));
 
-  // If no one is checked in, return null so the lead remains unassigned
-  if (activeSalesUsers.length === 0) {
-    return null;
-  }
-  const eligibleUsers = activeSalesUsers;
+  // Fallback: If no one is checked in, fallback to all active sales users 
+  // so night leads are always assigned to someone for the morning.
+  const eligibleUsers = activeSalesUsers.length > 0 ? activeSalesUsers : salesUsers;
 
   // Round Robin: pick user with oldest (or null) lastLeadAssignedAt
   // null = never assigned → highest priority (-Infinity)
@@ -276,6 +274,102 @@ export const distributeUnassignedLeads = async (adminId) => {
   return { success: true, message: `Successfully distributed ${distributedCount} leads.` };
 };
 
+export const distributeAbsentSalesLeads = async () => {
+  console.log("Starting distributeAbsentSalesLeads");
+  // Find users who are checked in and not checked out today
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date();
+  endOfDay.setHours(23, 59, 59, 999);
+  
+  console.log("Fetching all sales users");
+  const allSalesUsers = await User.find({ role: 'sales', isDeleted: false }, '_id');
+  console.log("Found sales users:", allSalesUsers.length);
+  
+  const activeAttendances = await Attendance.find({
+    user: { $in: allSalesUsers.map(u => u._id) },
+    checkIn: { $ne: null },
+    checkOut: null,
+    isDeleted: false,
+    $or: [
+      { date: { $gte: startOfDay, $lte: endOfDay } },
+      { checkIn: { $gte: startOfDay } },
+    ],
+  });
+
+  const activeUserIds = activeAttendances.map(a => a.user.toString());
+  
+  // Sales users who are NOT checked in
+  const absentUserIds = allSalesUsers
+    .filter(u => !activeUserIds.includes(u._id.toString()))
+    .map(u => u._id);
+  console.log("Absent User IDs:", absentUserIds.length);
+
+  if (absentUserIds.length === 0) {
+    return { success: true, message: 'No absent sales users found.' };
+  }
+  
+  if (activeUserIds.length === 0) {
+    return { success: true, message: 'No active sales users to redistribute leads to.' };
+  }
+
+  const leadsToRedistribute = await Lead.find({ 
+    assignedTo: { $in: absentUserIds }, 
+    status: 'new', 
+    isDeleted: false 
+  }).sort({ createdAt: 1 });
+  console.log("Leads to redistribute:", leadsToRedistribute.length);
+
+  let distributedCount = 0;
+
+  for (const lead of leadsToRedistribute) {
+    const assignedToId = await getNextSalesUser(lead.department);
+    
+    // Safety check: ensure we don't accidentally re-assign to an absent user
+    // if getNextSalesUser somehow falls back (it shouldn't if active users exist)
+    if (assignedToId && !absentUserIds.some(id => id.equals(assignedToId))) {
+      lead.assignedTo = assignedToId;
+      await lead.save();
+
+      // Update existing Task or create new one
+      const existingTask = await Task.findOne({ lead: lead._id, status: { $in: ['pending', 'overdue', 'verification', 'ready_to_shipment', 'cnp', 'interested', 'on_hold'] }, isDeleted: false });
+      
+      if (existingTask) {
+        existingTask.assignedTo = assignedToId;
+        await existingTask.save();
+      } else {
+        const dueDate = new Date(Date.now() + 2 * 60 * 60 * 1000);
+        await Task.create({
+          title: `Call ${lead.name}`,
+          description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
+          type: 'call',
+          lead: lead._id,
+          assignedTo: assignedToId,
+          createdBy: assignedToId,
+          department: lead.department,
+          dueDate,
+          priority: 'high',
+          status: 'pending',
+          isDeleted: false,
+        });
+      }
+
+      // Send notification
+      await createNotification({
+        user: assignedToId,
+        title: 'Redistributed Lead Assigned',
+        message: `Lead ${lead.name} reassigned to you due to absence.`,
+        type: 'lead_assigned',
+        relatedLead: lead._id,
+      });
+
+      distributedCount++;
+    }
+  }
+
+  return { success: true, message: `Successfully redistributed ${distributedCount} leads from absent staff.` };
+};
+
 export const getLeads = async (filter, options, userRole, userId, userDepartments = []) => {
   const query = { isDeleted: false };
 
@@ -335,23 +429,40 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
       : [];
     const safeWhitelist = verificationOnHoldLeadIds.filter(id => !cnpLeadIds.includes(id));
 
+    // Optimize exclusion list: Only lookup tasks/cnp/verification for the current user's leads (or departments) to drastically reduce array sizes
+    const matchFilter = { lead: { $ne: null } };
+    if (userRole === 'sales') {
+      matchFilter.assignedTo = userId;
+    } else if (filter.department) {
+      matchFilter.department = filter.department;
+    }
+    matchFilter.isDeleted = false;
+
     const [excludeByTask, excludeByCnpCollection, excludeByVerification] = await Promise.all([
       isInterested
-        ? Task.distinct('lead', { status: { $in: ['pending', 'overdue', 'verification', 'ready_to_shipment'] }, lead: { $ne: null }, isDeleted: false })
+        ? Task.distinct('lead', { ...matchFilter, status: { $in: ['pending', 'overdue', 'verification', 'ready_to_shipment'] } })
         : isOnHold
-          ? Task.distinct('lead', { status: { $in: ['verification', 'ready_to_shipment', 'interested'] }, lead: { $ne: null }, isDeleted: false })
-          : Task.distinct('lead', { status: { $in: ['cnp', 'verification', 'ready_to_shipment', 'interested'] }, lead: { $ne: null }, isDeleted: false }),
-      isOnHold ? Promise.resolve([]) : Cnp.distinct('lead', { lead: { $ne: null } }),
+          ? Task.distinct('lead', { ...matchFilter, status: { $in: ['verification', 'ready_to_shipment', 'interested'] } })
+          : Task.distinct('lead', { ...matchFilter, status: { $in: ['cnp', 'verification', 'ready_to_shipment', 'interested'] } }),
+      isOnHold ? Promise.resolve([]) : Cnp.distinct('lead', { lead: { $ne: null }, ...(userRole === 'sales' ? { assignedTo: userId } : {}) }),
       isOnHold
         ? Promise.resolve([])
         : Verification.distinct('lead', { lead: { $exists: true, $ne: null }, status: { $nin: ['on_hold'] } }),
     ]);
-    const allExclude = [...new Set([...excludeByTask.map(String), ...excludeByCnpCollection.map(String), ...excludeByVerification.map(String)])]
-      .filter(id => !safeWhitelist.includes(id));
-    if (allExclude.length) {
-      const allExcludeIds = allExclude.map(id => new mongoose.Types.ObjectId(id));
+
+    // Use a Set for faster lookups instead of .includes() on a massive array
+    const excludeSet = new Set([
+      ...excludeByTask.map(String),
+      ...excludeByCnpCollection.map(String),
+      ...excludeByVerification.map(String)
+    ]);
+    
+    safeWhitelist.forEach(id => excludeSet.delete(id));
+
+    if (excludeSet.size > 0) {
+      const allExcludeIds = Array.from(excludeSet).map(id => new mongoose.Types.ObjectId(id));
       query._id = query._id
-        ? { $nin: [...new Set([...query._id.$nin.map(String), ...allExclude])].map(id => new mongoose.Types.ObjectId(id)) }
+        ? { $nin: [...(query._id.$nin || []), ...allExcludeIds] }
         : { $nin: allExcludeIds };
     }
   }

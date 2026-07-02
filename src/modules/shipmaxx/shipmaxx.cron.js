@@ -1,7 +1,8 @@
 import cron from 'node-cron';
 import { ShipmaxxOrder as Order } from './models/shipmaxxOrder.model.js';
 import smx from './shipmaxx.service.js';
-import { normalizeShipmaxxStatus, parseShipMaxxDate } from './shipmaxx.controller.js';
+import { normalizeShipmaxxStatus, parseShipMaxxDate, extractStatusUpdatedAt } from './shipmaxx.controller.js';
+import { generateReorderCommissions } from '../shiprocket/shiprocket.controller.js';
 
 const initShipmaxxCron = () => {
   // Sync pending orders every 15 minutes
@@ -14,9 +15,13 @@ const initShipmaxxCron = () => {
 
       const activeOrders = await Order.find({
         platform: 'shipmaxx',
-        status: { $not: /^(delivered|rto_delivered|cancelled|canceled)/i },
-        createdAt: { $gte: twoWeeksAgo }
-      }).limit(50).lean(); // limit to 50 to avoid timeout
+        createdAt: { $gte: twoWeeksAgo },
+        $or: [
+          { status: { $not: /^(delivered|rto_delivered|cancelled|canceled)/i } },
+          { status: /^(delivered|rto_delivered)/i, delivered_at: { $exists: false } },
+          { status: /^(delivered|rto_delivered)/i, delivered_at: null }
+        ]
+      }).sort({ status_updated_at: 1, createdAt: 1 }).limit(50).lean(); // limit to 50 to avoid timeout
 
       let updatedCount = 0;
       for (const o of activeOrders) {
@@ -28,7 +33,11 @@ const initShipmaxxCron = () => {
           
           if (rawStatus) {
             let status = normalizeShipmaxxStatus(rawStatus);
-            const update = { status, status_updated_at: new Date() };
+            let actualUpdatedAt = new Date();
+            if (tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
+              actualUpdatedAt = extractStatusUpdatedAt(tracking, status);
+            }
+            const update = { status, status_updated_at: actualUpdatedAt };
             
             if (status === 'DELIVERED') {
               let actualDeliveredAt = null;
@@ -55,6 +64,9 @@ const initShipmaxxCron = () => {
         } catch (e) {
           console.error('[Cron] ShipMaxx tracking failed for AWB:', o.awb_code, e.message);
         }
+      }
+      if (updatedCount > 0) {
+        await generateReorderCommissions();
       }
       console.log(`[Cron] ShipMaxx auto-sync finished. Checked ${activeOrders.length}, Updated ${updatedCount}.`);
     } catch (error) {

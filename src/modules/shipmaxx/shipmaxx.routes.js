@@ -37,7 +37,7 @@ router.get('/debug/due-followups', async (req, res) => {
 
 router.get('/debug/run-cron', async (req, res) => {
   const smx = (await import('./shipmaxx.service.js')).default;
-  const { normalizeShipmaxxStatus, parseShipMaxxDate } = await import('./shipmaxx.controller.js');
+  const { normalizeShipmaxxStatus, parseShipMaxxDate, extractStatusUpdatedAt } = await import('./shipmaxx.controller.js');
   
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -59,7 +59,11 @@ router.get('/debug/run-cron', async (req, res) => {
       
       if (rawStatus) {
         let status = normalizeShipmaxxStatus(rawStatus);
-        const update = { status, status_updated_at: new Date() };
+        let actualUpdatedAt = new Date();
+        if (tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
+          actualUpdatedAt = extractStatusUpdatedAt(tracking, status);
+        }
+        const update = { status, status_updated_at: actualUpdatedAt };
         
         if (status === 'DELIVERED') {
           let actualDeliveredAt = null;
@@ -99,8 +103,57 @@ router.get('/debug/41626', catchAsync(async (req, res) => {
   res.json({ order, verifs, lead });
 }));
 
+router.get('/debug/backfill-leads', catchAsync(async (req, res) => {
+  const unlinked = await Order.find({ lead_id: null, platform: 'shipmaxx' });
+  let updated = 0;
+  for (const order of unlinked) {
+    if (order.billing_phone) {
+      const cleanPhone = String(order.billing_phone).replace(/\D/g, '');
+      if (cleanPhone.length >= 10) {
+        const lead = await Lead.findOne({ phone: new RegExp(cleanPhone.slice(-10) + '$'), isDeleted: { $ne: true } }).select('_id');
+        if (lead) {
+          order.lead_id = lead._id;
+          await order.save();
+          updated++;
+        }
+      }
+    }
+  }
+  
+  // Also run reorder commissions generation for Shipmaxx orders
+  const { generateReorderCommissions } = await import('../shiprocket/shiprocket.controller.js');
+  await generateReorderCommissions();
+
+  res.json({ totalUnlinkedFound: unlinked.length, successfullyLinked: updated, reorderCommissionsGenerated: true });
+}));
+
+router.get('/debug/dump-reorders', catchAsync(async (req, res) => {
+  const IST_OFFSET = 5.5 * 60 * 60 * 1000;
+  const monthStart = new Date(Date.UTC(2026, 6, 1) - IST_OFFSET);
+  const monthEnd = new Date(Date.UTC(2026, 7, 0, 23, 59, 59, 999) - IST_OFFSET);
+  
+  const orders = await Order.find({
+    status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+    platform: 'shipmaxx',
+    delivered_at: { $gte: monthStart, $lte: monthEnd }
+  }).lean();
+  
+  const srOrders = await Order.find({
+    status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+    $or: [
+      { delivered_at: { $gte: monthStart, $lte: monthEnd } },
+      { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
+      { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
+    ]
+  }).select('_id source_order_id lead_id created_by order_id').lean();
+
+  res.json({ shiprocketCount: srOrders.length, items: srOrders });
+}));
+
 router.get('/debug/sync', c.debugSync);
 router.post('/debug-sync-force', c.syncShipmaxx);
+router.get('/debug/run-cron', c.debugSync);
+router.get('/debug-backfill-delivered', c.debugBackfillDelivered);
 router.get('/debug-stats', async (req, res) => {
   try {
     const mongoose = (await import('mongoose')).default;
