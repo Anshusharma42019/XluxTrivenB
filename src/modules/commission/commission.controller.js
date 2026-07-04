@@ -100,7 +100,7 @@ export const getStaffCommissionSummary = catchAsync(async (req, res) => {
   for (const r of commissionRows) commMap[String(r._id)] = r;
 
   // Fetch ALL active sales/staff users
-  const users = await User.find({ isDeleted: { $ne: true }, role: { $in: ['sales', 'staff', 'manager'] } })
+  const users = await User.find({ isDeleted: { $ne: true }, role: { $in: ['sales', 'staff', 'manager', 'support', 'logistics'] } })
     .select('name role').lean();
 
   // Merge — users with no commission get zeros
@@ -139,7 +139,7 @@ export const markCommissionPaid = catchAsync(async (req, res) => {
   const commission = await ReorderCommission.findByIdAndUpdate(
     id,
     { status: 'paid', paid_at: new Date(), paid_by: req.user._id },
-    { new: true }
+    { returnDocument: 'after' }
   ).populate('staff_id', 'name role');
   if (!commission) return res.status(404).json(new ApiResponse(404, null, 'Commission not found'));
   res.json(new ApiResponse(200, commission, 'Commission marked as paid'));

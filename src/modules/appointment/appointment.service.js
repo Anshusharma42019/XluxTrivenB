@@ -89,7 +89,7 @@ export const updateAppointment = async (id, body) => {
   const appt = await Appointment.findOneAndUpdate(
     { _id: id, isDeleted: false },
     body,
-    { new: true, runValidators: true }
+    { returnDocument: 'after', runValidators: true }
   ).lean();
   if (!appt) throw new ApiError(httpStatus.NOT_FOUND, 'Appointment not found');
   return appt;
@@ -99,7 +99,7 @@ export const deleteAppointment = async (id) => {
   const appt = await Appointment.findOneAndUpdate(
     { _id: id, isDeleted: false },
     { isDeleted: true },
-    { new: true }
+    { returnDocument: 'after' }
   );
   if (!appt) throw new ApiError(httpStatus.NOT_FOUND, 'Appointment not found');
 };
@@ -108,7 +108,7 @@ export const addFieldNote = async (id, text, addedBy) => {
   const appt = await Appointment.findOneAndUpdate(
     { _id: id, isDeleted: false },
     { $push: { fieldNotes: { text, addedBy, addedAt: new Date() } } },
-    { new: true, runValidators: false }
+    { returnDocument: 'after', runValidators: false }
   ).lean();
   if (!appt) throw new ApiError(httpStatus.NOT_FOUND, 'Appointment not found');
   return appt;

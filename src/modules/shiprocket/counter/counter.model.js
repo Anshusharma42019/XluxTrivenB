@@ -11,7 +11,7 @@ export const getNextOrderId = async () => {
   const counter = await Counter.findByIdAndUpdate(
     'order_id',
     { $inc: { seq: 1 } },
-    { new: true, upsert: true }
+    { returnDocument: 'after', upsert: true }
   );
   return `ORD-${String(counter.seq).padStart(3, '0')}`;
 };

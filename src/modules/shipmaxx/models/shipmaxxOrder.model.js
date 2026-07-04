@@ -77,7 +77,7 @@ shipmaxxOrderSchema.statics.updateWithTransaction = async function (query, updat
   const session = await mongoose.startSession();
   session.startTransaction();
   try {
-    const doc = await this.findOneAndUpdate(query, update, { ...options, new: true, session });
+    const doc = await this.findOneAndUpdate(query, update, { ...options, returnDocument: 'after', session });
     
     if (doc) {
       const isDelivered = /^delivered$/i.test(doc.status);

@@ -55,7 +55,7 @@ export const syncPilesLead = async (lead) => {
     await PilesLead.findOneAndUpdate(
       { lead: lead._id },
       { $set: toPilesLeadPayload(lead) },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
+      { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
     );
   } else {
     await PilesLead.findOneAndUpdate(
@@ -313,9 +313,14 @@ export const distributeAbsentSalesLeads = async () => {
     return { success: true, message: 'No active sales users to redistribute leads to.' };
   }
 
+  // Include yesterday and today to catch leads assigned after their shift yesterday
+  const startOfYesterday = new Date(startOfDay);
+  startOfYesterday.setDate(startOfYesterday.getDate() - 1);
+
   const leadsToRedistribute = await Lead.find({ 
     assignedTo: { $in: absentUserIds }, 
     status: 'new', 
+    createdAt: { $gte: startOfYesterday, $lte: endOfDay },
     isDeleted: false 
   }).sort({ createdAt: 1 });
   console.log("Leads to redistribute:", leadsToRedistribute.length);
@@ -705,7 +710,7 @@ export const markCNP = async (leadId, userRole, userId) => {
         cnpCount: 1,
         lastCnpAt: new Date(),
       },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
+      { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
     );
   }
 

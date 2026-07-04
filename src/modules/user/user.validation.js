@@ -26,7 +26,9 @@ export const createUser = {
     role: z.enum(['admin', 'manager', 'sales', 'doctor', 'staff', 'logistics', 'support']).optional(),
     departments: z.array(z.enum(['migraine', 'piles'])).optional(),
     baseSalary: z.coerce.number().min(0).optional(),
+    commissionRate: z.coerce.number().min(0).max(100).optional(),
     specialization: z.string().optional(),
+    joiningDate: z.string().optional(),
   }),
 };
 
@@ -40,7 +42,9 @@ export const updateUser = {
     role: z.enum(['admin', 'manager', 'sales', 'doctor', 'staff', 'logistics', 'support']).optional(),
     departments: z.array(z.enum(['migraine', 'piles'])).optional(),
     baseSalary: z.coerce.number().min(0).optional(),
+    commissionRate: z.coerce.number().min(0).max(100).optional(),
     specialization: z.string().optional(),
+    joiningDate: z.string().optional(),
   }).refine((data) => Object.keys(data).length > 0, {
     message: 'Must provide at least one field to update',
   }),

@@ -67,7 +67,7 @@ router.patch('/:id/increment', auth('admin', 'manager', 'sales', 'support'), dep
     const record = await Cnp.findByIdAndUpdate(
       req.params.id,
       { $inc: { cnpCount: 1 }, lastCnpAt: new Date(), $push: { cnpHistory: { clickedAt: new Date() } } },
-      { new: true }
+      { returnDocument: 'after' }
     ).populate('assignedTo', 'name email').populate('lead', 'name phone status problem address houseNo cityVillage postOffice landmark district state pincode department');
     res.json({ status: 200, data: record });
   } catch (e) {

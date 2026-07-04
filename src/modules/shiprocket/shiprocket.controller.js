@@ -933,7 +933,7 @@ export const updateFollowupRelief = catchAsync(async (req, res) => {
   const fu = await Followup.findOneAndUpdate(
     { order_id: id, followup_number: Number(followup_number) },
     { $set: { relief_percentage: Number(relief_percentage) } },
-    { new: true }
+    { returnDocument: 'after' }
   );
   if (!fu) return res.status(404).json(new ApiResponse(404, null, 'Followup not found'));
   res.json(new ApiResponse(200, fu, 'Relief percentage updated'));
@@ -964,7 +964,7 @@ export const updateOrderContact = catchAsync(async (req, res) => {
     if (req.body[key] !== undefined) update[key] = String(req.body[key]).trim();
   }
   if (!Object.keys(update).length) return res.status(400).json(new ApiResponse(400, null, 'No valid fields'));
-  const order = await Order.findByIdAndUpdate(id, { $set: update }, { new: true })
+  const order = await Order.findByIdAndUpdate(id, { $set: update }, { returnDocument: 'after' })
     .select(allowed.join(' ') + ' lead_id').lean();
 
   // Also update Lead so phone persists after Shiprocket sync
@@ -1001,7 +1001,7 @@ export const saveOrderNote = catchAsync(async (req, res) => {
     const order = await Order.findByIdAndUpdate(
       req.params.id,
       { notes: String(req.body.notes || '') },
-      { new: true }
+      { returnDocument: 'after' }
     ).select('notes').lean();
 
     return res.json(new ApiResponse(200, order, 'Note saved'));
@@ -1012,7 +1012,7 @@ export const saveOrderNote = catchAsync(async (req, res) => {
   const order = await Order.findByIdAndUpdate(
     req.params.id,
     { $push: { comments: { text: text.trim(), type, section: section.trim(), createdBy: req.user._id, createdAt: new Date() } } },
-    { new: true }
+    { returnDocument: 'after' }
   ).populate('comments.createdBy', 'name role').select('comments').lean();
   await logOrderActivity({
     orderId: req.params.id,
@@ -1040,12 +1040,12 @@ export const addFollowUp = catchAsync(async (req, res) => {
     completed: status === 'completed',
     completed_at: status === 'completed' ? new Date() : undefined,
   });
-  const order = await Order.findByIdAndUpdate(id, { ...(next_follow_up ? { next_follow_up: new Date(next_follow_up) } : {}) }, { new: true }).select('follow_ups next_follow_up').lean();
+  const order = await Order.findByIdAndUpdate(id, { ...(next_follow_up ? { next_follow_up: new Date(next_follow_up) } : {}) }, { returnDocument: 'after' }).select('follow_ups next_follow_up').lean();
   res.json(new ApiResponse(200, order, 'Follow up added'));
 });
 
 export const setNextFollowUp = catchAsync(async (req, res) => {
-  const order = await Order.findByIdAndUpdate(req.params.id, { next_follow_up: req.body.next_follow_up ? new Date(req.body.next_follow_up) : null }, { new: true }).select('follow_ups next_follow_up').lean();
+  const order = await Order.findByIdAndUpdate(req.params.id, { next_follow_up: req.body.next_follow_up ? new Date(req.body.next_follow_up) : null }, { returnDocument: 'after' }).select('follow_ups next_follow_up').lean();
   res.json(new ApiResponse(200, order, 'Next follow up set'));
 });
 
@@ -1807,7 +1807,7 @@ export const updateNdrNote = catchAsync(async (req, res) => {
   const note = await NdrNote.findByIdAndUpdate(
     req.params.id,
     { $set: req.body },
-    { new: true }
+    { returnDocument: 'after' }
   ).lean();
   if (!note) return res.status(404).json(new ApiResponse(404, null, 'Note not found'));
   res.json(new ApiResponse(200, note, 'NDR note updated'));
@@ -1999,7 +1999,7 @@ export const webhook = catchAsync(async (req, res) => {
   if (awb) query.push({ awb_code: String(awb) });
 
   if (query.length) {
-    const order = await Order.findOneAndUpdate({ $or: query }, { status: event, status_updated_at: eventDate, ...(awb ? { awb_code: String(awb) } : {}), ...(event === 'DELIVERED' ? { delivered_at: eventDate } : {}) }, { new: true }).lean();
+    const order = await Order.findOneAndUpdate({ $or: query }, { status: event, status_updated_at: eventDate, ...(awb ? { awb_code: String(awb) } : {}), ...(event === 'DELIVERED' ? { delivered_at: eventDate } : {}) }, { returnDocument: 'after' }).lean();
     if (event === 'DELIVERED' && order) {
       await logOrderActivity({
         orderId: order._id,

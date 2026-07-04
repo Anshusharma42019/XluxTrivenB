@@ -3,6 +3,13 @@ import catchAsync from '../../utils/catchAsync.js';
 import ApiResponse from '../../utils/ApiResponse.js';
 import * as dashboardService from './dashboard.service.js';
 
+export const debugDeliveries = catchAsync(async (req, res) => {
+  const month = new Date().getMonth();
+  const year = new Date().getFullYear();
+  const data = await dashboardService.getAllStaffCommissions(month, year);
+  res.send({ month, year, data });
+});
+
 const getStats = catchAsync(async (req, res) => {
   const { date, from, to, department } = req.query;
   const userDepts = ['sales', 'support', 'logistics'].includes(req.user.role) ? req.userDepartments : (department ? [department] : []);
@@ -83,4 +90,4 @@ const saveCommissionOverride = catchAsync(async (req, res) => {
   res.json(new ApiResponse(httpStatus.OK, data, 'Commission override saved'));
 });
 
-export default { getStats, getRevenueChart, getStaffStats, setStaffTarget, getTargetHistory, getStaffVerifications, getStaffTodayLists, getStaffMonthlyChart, getAllStaffStats, getStaffCommission, getAllStaffCommissions, saveCommissionOverride };
+export default { debugDeliveries, getStats, getRevenueChart, getStaffStats, setStaffTarget, getTargetHistory, getStaffVerifications, getStaffTodayLists, getStaffMonthlyChart, getAllStaffStats, getStaffCommission, getAllStaffCommissions, saveCommissionOverride };

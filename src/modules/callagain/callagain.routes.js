@@ -76,7 +76,7 @@ router.post('/', auth('admin', 'manager', 'sales', 'support'), requireCheckedIn,
     const record = await CallAgain.findOneAndUpdate(
       { lead: leadId },
       updatePayload,
-      { upsert: true, new: true }
+      { upsert: true, returnDocument: 'after' }
     ).populate('lead', 'name phone problem department').populate('assignedTo', 'name email').populate('createdBy', 'name email');
 
     res.json({ status: 200, data: record });
@@ -92,7 +92,7 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), requireChecke
     const record = await CallAgain.findByIdAndUpdate(
       req.params.id,
       { status },
-      { new: true }
+      { returnDocument: 'after' }
     ).populate('lead', 'name phone department').populate('assignedTo', 'name email');
 
     if (!record) return res.status(404).json({ message: 'Not found' });

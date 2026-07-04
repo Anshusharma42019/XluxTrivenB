@@ -589,7 +589,7 @@ export const updateNdrNote = catchAsync(async (req, res) => {
   const note = await NdrNote.findByIdAndUpdate(
     req.params.id,
     { $set: req.body },
-    { new: true }
+    { returnDocument: 'after' }
   ).lean();
   if (!note) return res.status(404).json(new ApiResponse(404, null, 'Note not found'));
   res.json(new ApiResponse(200, note, 'NDR note updated'));
@@ -819,7 +819,7 @@ export const saveOrderNote = catchAsync(async (req, res) => {
   const order = await Order.updateWithTransaction(
     { _id: id, platform: 'shipmaxx' },
     { $push: { comments: comment } },
-    { new: true }
+    { returnDocument: 'after' }
   ).populate('comments.createdBy', 'name role').lean();
 
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
@@ -1692,12 +1692,12 @@ export const addFollowUp = catchAsync(async (req, res) => {
     completed: status === 'completed',
     completed_at: status === 'completed' ? new Date() : undefined,
   });
-  const order = await Order.findByIdAndUpdate(id, { ...(next_follow_up ? { next_follow_up: new Date(next_follow_up) } : {}) }, { new: true }).select('next_follow_up').lean();
+  const order = await Order.findByIdAndUpdate(id, { ...(next_follow_up ? { next_follow_up: new Date(next_follow_up) } : {}) }, { returnDocument: 'after' }).select('next_follow_up').lean();
   res.json(new ApiResponse(200, order, 'Follow up added'));
 });
 
 export const setNextFollowUp = catchAsync(async (req, res) => {
-  const order = await Order.findByIdAndUpdate(req.params.id, { next_follow_up: req.body.next_follow_up ? new Date(req.body.next_follow_up) : null }, { new: true }).select('next_follow_up').lean();
+  const order = await Order.findByIdAndUpdate(req.params.id, { next_follow_up: req.body.next_follow_up ? new Date(req.body.next_follow_up) : null }, { returnDocument: 'after' }).select('next_follow_up').lean();
   res.json(new ApiResponse(200, order, 'Next follow up set'));
 });
 
@@ -1708,7 +1708,7 @@ export const updateFollowupRelief = catchAsync(async (req, res) => {
   const fu = await Followup.findOneAndUpdate(
     { order_id: req.params.id, followup_number: Number(followup_number) },
     { $set: { relief_percentage: Number(relief_percentage) } },
-    { new: true }
+    { returnDocument: 'after' }
   );
   if (!fu) return res.status(404).json(new ApiResponse(404, null, 'Followup not found'));
   res.json(new ApiResponse(200, fu, 'Relief percentage updated'));
@@ -1739,7 +1739,7 @@ export const updateOrderContact = catchAsync(async (req, res) => {
     if (req.body[key] !== undefined) update[key] = String(req.body[key]).trim();
   }
   if (!Object.keys(update).length) return res.status(400).json(new ApiResponse(400, null, 'No valid fields'));
-  const order = await Order.updateWithTransaction({ _id: id, platform: 'shipmaxx' }, { $set: update }, { new: true })
+  const order = await Order.updateWithTransaction({ _id: id, platform: 'shipmaxx' }, { $set: update }, { returnDocument: 'after' })
     .select(allowed.join(' ') + ' lead_id').lean();
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
   if (order.lead_id) {

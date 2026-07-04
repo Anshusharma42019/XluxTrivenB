@@ -423,7 +423,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
           ...(isAllTime ? {} : { createdAt: { $gte: startOfDay, $lte: endOfDay } })
         }),
         ShipmaxxOrder.countDocuments({
-          $or: [{ lead_id: { $in: staffLeads } }, { created_by: uid }],
+          $or: [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }],
           status: { $not: /^(new|pending|cancelled)$/i },
           ...(isAllTime ? {} : { createdAt: { $gte: startOfDay, $lte: endOfDay } })
         })
@@ -436,7 +436,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
           ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
         }),
         ShipmaxxOrder.countDocuments({
-          $or: [{ lead_id: { $in: staffLeads } }, { created_by: uid }],
+          lead_id: { $in: staffLeads },
           status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
           ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
         })
@@ -449,7 +449,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
           ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
         }),
         ShipmaxxOrder.countDocuments({
-          $or: [{ lead_id: { $in: staffLeads } }, { created_by: uid }],
+          lead_id: { $in: staffLeads },
           status: { $regex: /^rto/i },
           ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
         })
@@ -462,7 +462,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
           createdAt: { $gte: monthStart, $lte: monthEnd }
         }),
         ShipmaxxOrder.countDocuments({
-          $or: [{ lead_id: { $in: staffLeads } }, { created_by: uid }],
+          lead_id: { $in: staffLeads },
           status: { $not: /^(new|pending|cancelled)$/i },
           createdAt: { $gte: monthStart, $lte: monthEnd }
         })
@@ -474,7 +474,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
           createdAt: { $gte: monthStart, $lte: monthEnd }
         }),
         ShipmaxxOrder.countDocuments({
-          $or: [{ lead_id: { $in: staffLeads } }, { created_by: uid }],
+          lead_id: { $in: staffLeads },
           status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
           createdAt: { $gte: monthStart, $lte: monthEnd }
         })
@@ -486,7 +486,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
           createdAt: { $gte: monthStart, $lte: monthEnd }
         }),
         ShipmaxxOrder.countDocuments({
-          $or: [{ lead_id: { $in: staffLeads } }, { created_by: uid }],
+          $or: [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }],
           status: { $regex: /^rto/i },
           createdAt: { $gte: monthStart, $lte: monthEnd }
         })
@@ -723,7 +723,7 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
   const allOrderFilterSM = { ...allOrderFilter };
   if (userRole === 'sales' || (userDepartments && userDepartments.length > 0)) {
     allOrderFilter.lead_id = { $in: staffLeads };
-    allOrderFilterSM.$or = [{ lead_id: { $in: staffLeads } }, { created_by: userId }];
+    allOrderFilterSM.$or = [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: userId }];
   }
 
   // Delivered stats: count orders delivered in the period
@@ -740,7 +740,7 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
   const deliveredFilterSM = { ...deliveredFilter };
   if (userRole === 'sales' || (userDepartments && userDepartments.length > 0)) {
     deliveredFilter.lead_id = { $in: staffLeads };
-    deliveredFilterSM.$or = [{ lead_id: { $in: staffLeads } }, { created_by: userId }];
+    deliveredFilterSM.lead_id = { $in: staffLeads };
   }
 
   const [orderBreakdownSR, deliveredBreakdownSR, deliveredRevenueResultSR, orderBreakdownSM, deliveredBreakdownSM, deliveredRevenueResultSM] = await Promise.all([
@@ -957,7 +957,30 @@ export const getStaffCommission = async (userId, month, year) => {
 
   const workingDays = attendance.present + attendance.late + attendance.half_day;
   const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const basePay = override?.manualBasePay ?? Math.round((user.baseSalary || 0) * (workingDays / daysInMonth));
+
+  // Joining date aware base pay calculation:
+  // Agar staff is month mein join kiya, toh sirf joining date ke baad ke billable days count karein
+  // joiningDate na ho toh createdAt use karein fallback ke roop mein
+  const joiningDate = user.joiningDate ? new Date(user.joiningDate) : new Date(user.createdAt);
+  const joiningYear = joiningDate.getFullYear();
+  const joiningMonth = joiningDate.getMonth();
+  const joiningDay = joiningDate.getDate();
+
+  if (joiningYear > year || (joiningYear === year && joiningMonth > month)) {
+    // Staff has not joined yet in this month
+    return null;
+  }
+
+  let billableDays;
+  if (joiningYear === year && joiningMonth === month) {
+    // Staff is month mein join kiya — joining day se month end tak ke din
+    billableDays = daysInMonth - joiningDay + 1;
+  } else {
+    // Staff pehle join kar chuka hai — puri month billable hai
+    billableDays = daysInMonth;
+  }
+
+  const basePay = override?.manualBasePay ?? Math.round((user.baseSalary || 0) * (workingDays / Math.max(billableDays, 1)));
 
   const deliveryQuerySR = {
     lead_id: { $in: staffLeads },
@@ -972,7 +995,7 @@ export const getStaffCommission = async (userId, month, year) => {
 
   const deliveryQuerySM = {
     source_order_id: null,
-    $or: [ { lead_id: { $in: staffLeads } }, { created_by: userId } ],
+    lead_id: { $in: staffLeads },
     status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
   };
   deliveryQuerySM.$and = [
@@ -1025,8 +1048,8 @@ export const getStaffCommission = async (userId, month, year) => {
 
 export const getAllStaffCommissions = async (month, year) => {
   const User = (await import('../user/user.model.js')).default;
-  const allUsers = await User.find({ role: { $in: ['sales', 'manager', 'staff'] }, isDeleted: false })
-    .select('_id name role baseSalary commissionRate').lean();
+  const allUsers = await User.find({ role: { $in: ['sales', 'manager', 'staff', 'support', 'logistics'] }, isDeleted: false })
+    .select('_id name role baseSalary commissionRate joiningDate createdAt').lean();
 
   const IST_OFFSET = 5.5 * 60 * 60 * 1000;
   const monthStart = new Date(Date.UTC(year, month, 1) - IST_OFFSET);
@@ -1095,7 +1118,7 @@ export const saveCommissionOverride = async ({ userId, month, year, manualCommis
   return CommissionOverride.findOneAndUpdate(
     { user: userId, month, year },
     { $set: update },
-    { upsert: true, new: true }
+    { upsert: true, returnDocument: 'after' }
   ).lean();
 };
 

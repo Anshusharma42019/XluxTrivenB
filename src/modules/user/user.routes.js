@@ -36,6 +36,26 @@ router.get('/test-users', async (req, res) => {
   }
 });
 
+// One-time fix: initialize joiningDate from createdAt for existing users
+router.post('/admin/fix-joining-dates', auth('admin'), catchAsync(async (req, res) => {
+  const User = (await import('./user.model.js')).default;
+  // Fetch users with missing/null joiningDate
+  const usersToUpdate = await User.find({ 
+    $or: [{ joiningDate: { $exists: false } }, { joiningDate: null }] 
+  });
+  
+  let updatedCount = 0;
+  for (const u of usersToUpdate) {
+    u.joiningDate = u.createdAt;
+    await u.save({ validateBeforeSave: false });
+    updatedCount++;
+  }
+
+  const users = await User.find({ isDeleted: { $ne: true }, role: { $ne: 'admin' } })
+    .select('name role createdAt joiningDate').lean();
+  res.json(new ApiResponse(200, { updated: updatedCount, users }, 'Joining dates initialized'));
+}));
+
 
 router.get('/stats/shipment-counts', auth('admin', 'manager'), userController.getStaffShipmentCounts);
 

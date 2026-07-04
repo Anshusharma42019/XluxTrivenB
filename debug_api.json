@@ -1,0 +1,267 @@
+{
+  "month": 6,
+  "year": 2026,
+  "data": {
+    "staff": [
+      {
+        "user": {
+          "_id": "69e0a29b874359e9e8531841",
+          "name": "Ayush",
+          "phone": "9335026562",
+          "password": "$2b$08$9HLtjyWoqvEFXfesyP7BROcVAUKPMLhl5.ErSJCagZ.LoURfq/sey",
+          "role": "sales",
+          "avatar": "https://res.cloudinary.com/dgibkaebk/image/upload/v1780835535/crm-triven/avatars/w76llns8uslwr65eb8ya.jpg",
+          "isEmailVerified": false,
+          "deletedAt": null,
+          "isDeleted": false,
+          "createdAt": "2026-04-16T08:49:32.001Z",
+          "updatedAt": "2026-07-04T07:50:13.876Z",
+          "__v": 0,
+          "baseSalary": 0,
+          "commissionRate": 10,
+          "specialization": "",
+          "departments": [
+            "migraine"
+          ],
+          "lastLeadAssignedAt": "2026-07-04T07:50:13.876Z"
+        },
+        "attendance": {
+          "present": 0,
+          "absent": 0,
+          "half_day": 0,
+          "late": 3
+        },
+        "totalDeliveries": 3,
+        "totalRevenue": 4500,
+        "revenueCommission": 450,
+        "commissionRate": 10,
+        "reorderCommission": 0,
+        "totalCommission": 450,
+        "basePay": 0,
+        "totalPay": 450
+      },
+      {
+        "user": {
+          "_id": "69e0a2bf874359e9e8531842",
+          "name": "Sweety Yadav",
+          "phone": "7380914504",
+          "password": "$2b$08$SI6MM50EeB3TNa5EQRkNReSp7cmxQznXjOMgFBCc4wL5YAm5HqwNu",
+          "role": "sales",
+          "avatar": null,
+          "isEmailVerified": false,
+          "deletedAt": null,
+          "isDeleted": false,
+          "createdAt": "2026-04-16T08:50:07.579Z",
+          "updatedAt": "2026-07-04T07:22:08.474Z",
+          "__v": 0,
+          "baseSalary": 0,
+          "commissionRate": 10,
+          "specialization": "",
+          "departments": [
+            "migraine"
+          ],
+          "lastLeadAssignedAt": "2026-07-04T07:22:08.474Z"
+        },
+        "attendance": {
+          "present": 0,
+          "absent": 0,
+          "half_day": 0,
+          "late": 4
+        },
+        "totalDeliveries": 3,
+        "totalRevenue": 4500,
+        "revenueCommission": 450,
+        "commissionRate": 10,
+        "reorderCommission": 0,
+        "totalCommission": 450,
+        "basePay": 0,
+        "totalPay": 450
+      },
+      {
+        "user": {
+          "_id": "69e0a2e9874359e9e8531843",
+          "name": "Prashant Singh Sengar",
+          "phone": "8545877386",
+          "password": "$2b$08$tM1OPXEpWHzahouvwvqWBuPASYGQq7rGiqSkySvj8EzSyWy//z5u2",
+          "role": "manager",
+          "avatar": "https://res.cloudinary.com/dgibkaebk/image/upload/v1776346653/crm-triven/avatars/pvxturj1co8yt7ktb7ur.jpg",
+          "isEmailVerified": false,
+          "deletedAt": null,
+          "isDeleted": false,
+          "createdAt": "2026-04-16T08:50:49.529Z",
+          "updatedAt": "2026-04-24T14:27:39.328Z",
+          "__v": 0,
+          "baseSalary": 0
+        },
+        "attendance": {
+          "present": 0,
+          "absent": 0,
+          "half_day": 0,
+          "late": 4
+        },
+        "totalDeliveries": 0,
+        "totalRevenue": 0,
+        "revenueCommission": 0,
+        "commissionRate": 5,
+        "reorderCommission": 0,
+        "totalCommission": 0,
+        "basePay": 0,
+        "totalPay": 0
+      },
+      {
+        "user": {
+          "_id": "69f44d4149512088f27d638d",
+          "name": "Deepika Rathore",
+          "phone": "6392433650",
+          "password": "$2b$08$AHuNC0RDPINldmLC.sRNvOJWkwEbZF/eQXYRNeoiI38kt2QFS7mNC",
+          "role": "sales",
+          "avatar": "https://res.cloudinary.com/dgibkaebk/image/upload/v1782993122/crm-triven/avatars/pwo3ooredcosei1pbqv2.jpg",
+          "isEmailVerified": false,
+          "baseSalary": 0,
+          "deletedAt": null,
+          "isDeleted": false,
+          "createdAt": "2026-05-01T06:50:41.511Z",
+          "updatedAt": "2026-07-04T07:29:03.064Z",
+          "__v": 0,
+          "commissionRate": 10,
+          "specialization": "",
+          "departments": [
+            "migraine"
+          ],
+          "lastLeadAssignedAt": "2026-07-04T07:29:03.064Z"
+        },
+        "attendance": {
+          "present": 0,
+          "absent": 0,
+          "half_day": 0,
+          "late": 4
+        },
+        "totalDeliveries": 12,
+        "totalRevenue": 17700,
+        "revenueCommission": 1770,
+        "commissionRate": 10,
+        "reorderCommission": 0,
+        "totalCommission": 1770,
+        "basePay": 0,
+        "totalPay": 1770
+      },
+      {
+        "user": {
+          "_id": "6a1299fc198004f1d4792ea7",
+          "name": "Priti singh",
+          "phone": "6392124863",
+          "password": "$2b$08$95kI1T4g7FNO7e4Ejhvl8us77Od7UOqSl9PHKJYqpAYC4NJbsYP.q",
+          "role": "sales",
+          "specialization": "",
+          "avatar": null,
+          "isEmailVerified": false,
+          "baseSalary": 0,
+          "commissionRate": 10,
+          "deletedAt": null,
+          "isDeleted": false,
+          "createdAt": "2026-05-24T06:26:04.355Z",
+          "updatedAt": "2026-07-04T07:27:36.457Z",
+          "__v": 5,
+          "departments": [
+            "migraine"
+          ],
+          "lastLeadAssignedAt": "2026-07-04T07:27:36.457Z"
+        },
+        "attendance": {
+          "present": 0,
+          "absent": 0,
+          "half_day": 0,
+          "late": 3
+        },
+        "totalDeliveries": 4,
+        "totalRevenue": 6000,
+        "revenueCommission": 600,
+        "commissionRate": 10,
+        "reorderCommission": 0,
+        "totalCommission": 600,
+        "basePay": 0,
+        "totalPay": 600
+      },
+      {
+        "user": {
+          "_id": "6a16ad756e5c11f169ddf085",
+          "name": "Annu",
+          "phone": "7068710993",
+          "password": "$2b$08$PQFlhtS15d5c4lsr/WXIYePvbU9IPT9LMQsVAH4oi2/OUeFh1rJpi",
+          "role": "sales",
+          "specialization": "",
+          "avatar": null,
+          "isEmailVerified": false,
+          "departments": [
+            "migraine"
+          ],
+          "baseSalary": 0,
+          "commissionRate": 10,
+          "deletedAt": null,
+          "isDeleted": false,
+          "createdAt": "2026-05-27T08:38:13.512Z",
+          "updatedAt": "2026-07-04T04:39:13.129Z",
+          "__v": 0,
+          "lastLeadAssignedAt": "2026-07-04T04:39:13.128Z"
+        },
+        "attendance": {
+          "present": 2,
+          "absent": 0,
+          "half_day": 0,
+          "late": 1
+        },
+        "totalDeliveries": 2,
+        "totalRevenue": 3000,
+        "revenueCommission": 300,
+        "commissionRate": 10,
+        "reorderCommission": 0,
+        "totalCommission": 900,
+        "basePay": 0,
+        "totalPay": 900
+      },
+      {
+        "user": {
+          "_id": "6a3b6d26789f7f92afb4f4c5",
+          "name": "Satyendra singh",
+          "phone": "6394711869",
+          "password": "$2b$08$N01P9ZH0.2n82UzgHiQQ/O70Ml1HXzKQZFBtVST5SUgN5OcdKqLou",
+          "role": "sales",
+          "specialization": "",
+          "avatar": null,
+          "isEmailVerified": false,
+          "departments": [
+            "piles"
+          ],
+          "baseSalary": 0,
+          "commissionRate": 10,
+          "lastLeadAssignedAt": "2026-07-04T07:45:26.653Z",
+          "deletedAt": null,
+          "isDeleted": false,
+          "createdAt": "2026-06-24T05:37:42.732Z",
+          "updatedAt": "2026-07-04T07:45:26.654Z",
+          "__v": 0
+        },
+        "attendance": {
+          "present": 1,
+          "absent": 0,
+          "half_day": 0,
+          "late": 3
+        },
+        "totalDeliveries": 4,
+        "totalRevenue": 6000,
+        "revenueCommission": 600,
+        "commissionRate": 10,
+        "reorderCommission": 0,
+        "totalCommission": 600,
+        "basePay": 0,
+        "totalPay": 600
+      }
+    ],
+    "grandTotalDeliveries": 32,
+    "grandTotalRevenue": 46750,
+    "grandTotalCommission": 4770,
+    "grandTotalPay": 4770,
+    "unassignedDeliveries": 4,
+    "unassignedRevenue": 5050
+  }
+}

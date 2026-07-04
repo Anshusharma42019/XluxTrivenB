@@ -6,6 +6,7 @@ import catchAsync from '../../utils/catchAsync.js';
 
 const router = express.Router();
 
+router.get('/debug', dashboardController.debugDeliveries);
 router.get('/stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, dashboardController.getStats);
 router.get('/revenue-chart', auth('admin', 'manager'), departmentFilter, dashboardController.getRevenueChart);
 router.get('/staff-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, dashboardController.getStaffStats);
