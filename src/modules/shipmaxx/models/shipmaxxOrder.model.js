@@ -73,4 +73,61 @@ const shipmaxxOrderSchema = new mongoose.Schema({
   raw_response: mongoose.Schema.Types.Mixed,
 }, { timestamps: true });
 
+shipmaxxOrderSchema.statics.updateWithTransaction = async function (query, update, options = {}) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+  try {
+    const doc = await this.findOneAndUpdate(query, update, { ...options, new: true, session });
+    
+    if (doc) {
+      const isDelivered = /^delivered$/i.test(doc.status);
+      const isRto = /^rto/i.test(doc.status);
+      
+      let DeliveredModel, InTransitModel, RtoModel;
+      try { DeliveredModel = mongoose.model('ShipmaxxDeliveredOrder'); } catch(e) {}
+      try { InTransitModel = mongoose.model('ShipmaxxInTransitOrder'); } catch(e) {}
+      try { RtoModel = mongoose.model('ShipmaxxRtoOrder'); } catch(e) {}
+      
+      const data = {
+        order_id: doc.order_id,
+        billing_customer_name: doc.billing_customer_name || '',
+        billing_phone: doc.billing_phone || '',
+        billing_email: doc.billing_email || '',
+        billing_address: doc.billing_address || '',
+        billing_city: doc.billing_city || '',
+        billing_state: doc.billing_state || '',
+        billing_pincode: doc.billing_pincode || '',
+        awb_code: doc.awb_code || '',
+        courier_name: doc.courier_name || '',
+        payment_method: doc.payment_method || '',
+        sub_total: doc.sub_total || 0,
+        order_items: doc.order_items || [],
+        status: doc.status,
+        lead_id: doc.lead_id || null,
+        status_updated_at: doc.status_updated_at || doc.createdAt,
+        order_date: doc.createdAt
+      };
+
+      if (isDelivered) {
+        data.delivered_at = doc.delivered_at || doc.createdAt;
+        if (DeliveredModel) await DeliveredModel.findOneAndUpdate({ order_id: doc.order_id }, { $set: data }, { upsert: true, session });
+        if (InTransitModel) await InTransitModel.deleteOne({ order_id: doc.order_id }, { session });
+      } else if (isRto) {
+        if (RtoModel) await RtoModel.findOneAndUpdate({ order_id: doc.order_id }, { $set: data }, { upsert: true, session });
+        if (InTransitModel) await InTransitModel.deleteOne({ order_id: doc.order_id }, { session });
+      } else {
+        if (InTransitModel) await InTransitModel.findOneAndUpdate({ order_id: doc.order_id }, { $set: data }, { upsert: true, session });
+      }
+    }
+
+    await session.commitTransaction();
+    return doc;
+  } catch (err) {
+    await session.abortTransaction();
+    throw err;
+  } finally {
+    session.endSession();
+  }
+};
+
 export const ShipmaxxOrder = mongoose.model('ShipmaxxOrder', shipmaxxOrderSchema);

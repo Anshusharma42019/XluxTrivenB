@@ -11,6 +11,7 @@ const router = express.Router();
 
 router.get('/daily', auth('admin', 'manager', 'sales', 'support'), departmentFilter, taskController.getDailyTasks);
 router.get('/by-lead/:leadId', auth('admin', 'manager', 'sales', 'support'), departmentFilter, taskController.getTaskByLead);
+router.post('/check-tasks', taskController.checkTasks);
 
 // Admin-only: remove duplicate tasks for the same lead (keep newest)
 router.post('/cleanup-duplicates', auth('admin', 'manager'), async (req, res) => {

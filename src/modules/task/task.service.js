@@ -144,7 +144,11 @@ export const getTasks = async (filter, userRole, userId, userDepartments = []) =
     // Removed department filter here so they can see tasks assigned to them even if department is null
   } else {
     if (filter.assignedTo) query.assignedTo = new mongoose.Types.ObjectId(String(filter.assignedTo));
-    if (filter.department) query.department = filter.department;
+    if (filter.department) {
+      query.department = filter.department;
+    } else if (userDepartments && userDepartments.length > 0) {
+      query.department = { $in: userDepartments };
+    }
   }
   if (filter.status) {
     query.status = filter.status;
@@ -255,7 +259,7 @@ export const deleteTask = async (id) => {
   await task.save();
 };
 
-export const getDailyTasks = async (userId, userRole, userDepartments = []) => {
+export const getDailyTasks = async (filter, userId, userRole, userDepartments = []) => {
   const start = new Date();
   start.setHours(0, 0, 0, 0);
   const end = new Date();
@@ -266,9 +270,20 @@ export const getDailyTasks = async (userId, userRole, userDepartments = []) => {
     dueDate: { $gte: start, $lte: end },
     status: { $nin: hiddenTaskStatuses },
   };
+  
+  if (filter.status) query.status = filter.status;
+  if (filter.type) query.type = filter.type;
+  
   if (userRole === 'sales') {
     query.assignedTo = new mongoose.Types.ObjectId(String(userId));
     // Removed department filter here so they can see tasks assigned to them even if department is null
+  } else {
+    if (filter.assignedTo) query.assignedTo = new mongoose.Types.ObjectId(String(filter.assignedTo));
+    if (filter.department) {
+      query.department = filter.department;
+    } else if (userDepartments && userDepartments.length > 0) {
+      query.department = { $in: userDepartments };
+    }
   }
   const hiddenLeadIds = await Lead.distinct('_id', { status: { $in: hiddenTaskLeadStatuses }, isDeleted: { $ne: true } });
   if (hiddenLeadIds.length) query.lead = { $nin: hiddenLeadIds };

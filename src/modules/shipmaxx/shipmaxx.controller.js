@@ -21,29 +21,43 @@ const DEFAULT_FOLLOWUP_GAP_DAYS = 6;
 // ShipMaxx API returns short codes (DEL, INT, UND, etc.) — always normalize
 // to full standard status names before storing in the database.
 const SMX_STATUS_MAP = {
+  ADI: 'REVERSE_PICKUP_FAILED',
+  CTR: 'REVERSE_PICKUP_SCHEDULED',
+  CUN: 'DISPOSED_OFF',
+  DAC: 'REVERSE_PICKED_UP',
   DEL: 'DELIVERED',
+  DEX: 'DELIVERY_EXCEPTION',
+  DMG: 'DAMAGED',
   INT: 'IN_TRANSIT',
-  UND: 'UNDELIVERED',
-  RTO: 'RTO_DELIVERED',
+  LOS: 'LOST',
   OFD: 'OUT_FOR_DELIVERY',
-  DEX: 'UNDELIVERED_ATTEMPT_FAILURE',
-  SC:  'SHIPPED',
-  PCN: 'CANCELED',
-  RRA: 'RTO_INITIATED',
-  SPD: 'PICKUP_SCHEDULED',
+  OFP: 'OUT_FOR_PICKUP',
+  ONH: 'REVERSE_PICKUP_CANCELLED',
+  PCN: 'PICKUP_CANCELLED',
+  PKD: 'PICKUP_DONE',
+  PKF: 'PICKUP_FAILED',
+  RRA: 'RTO_INTRANSIT',
+  RTD: 'RTO_DELIVERED',
+  RTO: 'RTO_INITIATED',
+  RUN: 'RTO_UNDELIVERED',
+  SC:  'CANCELLED',
   SPB: 'NEW',
+  SPD: 'PICKUP_SCHEDULED',
+  UND: 'UNDELIVERED',
   NFI: 'NEW',
+  NEW: 'NEW',
+  CANCELED: 'CANCELLED',
+  CANCELLED: 'CANCELLED',
+  RTO_IN_TRANSIT: 'RTO_IN_TRANSIT',
   RTO_INT: 'RTO_IN_TRANSIT',
+  'RTO-IT': 'RTO_IN_TRANSIT',
+  RTO_IT: 'RTO_IN_TRANSIT',
   RTO_OFD: 'RTO_OFD',
   RAD: 'REACHED_AT_DESTINATION_HUB',
   RBS: 'REACHED_BACK_AT_SELLER_CITY',
   MIS: 'MISROUTED',
-  RTO_INTRANSIT: 'RTO_IN_TRANSIT',
-  'RTO-IT': 'RTO_IN_TRANSIT',
-  RTO_IT: 'RTO_IN_TRANSIT',
-  SHIPMENT_CANCELLED: 'CANCELED',
-  DELIVERY_EXCEPTION: 'UNDELIVERED_ATTEMPT_FAILURE',
-  SHIPMENT_BOOKED: 'NEW',
+  UNDELIVERED_ATTEMPT_FAILURE: 'UNDELIVERED',
+  UNDELIVERED_FAILURE: 'UNDELIVERED'
 };
 
 export const normalizeShipmaxxStatus = (rawStatus) => {
@@ -102,10 +116,15 @@ export const parseShipMaxxDate = (dateStr) => {
 export const extractStatusUpdatedAt = (tracking, currentNormalizedStatus) => {
   let actualUpdatedAt = new Date();
   if (tracking && tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
+    const sortedHistory = [...tracking.history].sort((a, b) => {
+      const d1 = parseShipMaxxDate(a.date || a.timestamp || a.time).getTime();
+      const d2 = parseShipMaxxDate(b.date || b.timestamp || b.time).getTime();
+      return isNaN(d1) || isNaN(d2) ? 0 : d2 - d1; // newest first
+    });
     let oldestConsecutiveDateStr = null;
     const baseStatus = String(currentNormalizedStatus).replace(/_1ST_ATTEMPT|_2ND_ATTEMPT|_3RD_ATTEMPT|_ATTEMPT_FAILURE|_FAILURE/i, '');
-    for (let i = 0; i < tracking.history.length; i++) {
-      const h = tracking.history[i];
+    for (let i = 0; i < sortedHistory.length; i++) {
+      const h = sortedHistory[i];
       const hRawStatus = h.system_status_code || h.status || h.shipment_status || h.delivery_status;
       if (hRawStatus) {
         let hStatus = normalizeShipmaxxStatus(hRawStatus);
@@ -118,7 +137,7 @@ export const extractStatusUpdatedAt = (tracking, currentNormalizedStatus) => {
         }
       }
     }
-    const dateStr = oldestConsecutiveDateStr || tracking.history[0].date || tracking.history[0].timestamp || tracking.history[0].time;
+    const dateStr = oldestConsecutiveDateStr || sortedHistory[0].date || sortedHistory[0].timestamp || sortedHistory[0].time;
     if (dateStr) {
       const parsedDate = parseShipMaxxDate(dateStr);
       if (parsedDate && !isNaN(parsedDate.getTime())) {
@@ -319,7 +338,7 @@ export const createOrderAndShipment = catchAsync(async (req, res) => {
     awb = shipRes.awb || shipRes.awb_number;
 
     if (awb) {
-      await Order.findOneAndUpdate(
+      await Order.updateWithTransaction(
         { order_id: String(oid), platform: 'shipmaxx' },
         { $set: { awb_code: awb, status: 'SHIPPED', status_updated_at: new Date() } }
       );
@@ -342,7 +361,7 @@ export const updateOrder = catchAsync(async (req, res) => {
 
   if (req.body.status) {
     try {
-      await Order.findOneAndUpdate(
+      await Order.updateWithTransaction(
         { order_id: String(order_id), platform: 'shipmaxx' },
         { $set: { status: String(req.body.status).toUpperCase(), status_updated_at: new Date() } }
       );
@@ -369,7 +388,7 @@ export const createShipment = catchAsync(async (req, res) => {
 
   if (awb) {
     try {
-      await Order.findOneAndUpdate(
+      await Order.updateWithTransaction(
         { order_id: String(order_id), platform: 'shipmaxx' },
         { $set: { awb_code: awb, status: 'SHIPPED', status_updated_at: new Date() } }
       );
@@ -394,7 +413,7 @@ export const cancelShipment = catchAsync(async (req, res) => {
   const data = await smx.cancelShipment(req.body);
   
   try {
-    await Order.findOneAndUpdate(
+    await Order.updateWithTransaction(
       { platform: 'shipmaxx', awb_code: awb },
       { $set: { status: 'CANCELLED', status_updated_at: new Date() } }
     );
@@ -603,7 +622,7 @@ export const debugSync = catchAsync(async (req, res) => {
          // fallback to order creation date + 3 days or something
          actualDate = o.createdAt ? new Date(o.createdAt.getTime() + 3 * 86400000) : new Date('2026-06-28T12:00:00Z');
       }
-      await Order.updateOne({ _id: o._id }, { $set: { delivered_at: actualDate, status_updated_at: actualDate } });
+      await Order.updateWithTransaction({ _id: o._id }, { $set: { delivered_at: actualDate, status_updated_at: actualDate } });
       results.push({ id, actualDate });
     } catch(e) {
       results.push({ id, error: e.message });
@@ -672,15 +691,20 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
 });
 
 export const getStatusOrders = catchAsync(async (req, res) => {
-  const { status, from, to, limit = 50 } = req.query;
-  if (!status) return res.status(400).json(new ApiResponse(400, null, 'Status is required'));
+  const { status, shipment_status, from, to, limit = 50 } = req.query;
+  
+  const queryStatus = shipment_status ? 
+    (SMX_STATUS_MAP[String(shipment_status).trim().toUpperCase()] || String(shipment_status).trim().toUpperCase()) 
+    : status;
+
+  if (!queryStatus) return res.status(400).json(new ApiResponse(400, null, 'Status is required'));
 
   const match = { platform: 'shipmaxx' };
 
   const reverseShortCodes = Object.entries(SMX_STATUS_MAP)
-    .filter(([, fullName]) => fullName === status)
+    .filter(([, fullName]) => fullName === queryStatus)
     .map(([shortCode]) => shortCode);
-  const allVariants = [status, ...reverseShortCodes];
+  const allVariants = [queryStatus, ...reverseShortCodes];
 
   match.status = { $in: allVariants.map(s => new RegExp(`^${s.replace(/[-_]/g, '[-_ ]')}$`, 'i')) };
 
@@ -712,7 +736,7 @@ export const getStatusOrders = catchAsync(async (req, res) => {
   const orders = await Order.find(match)
     .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
     .populate('comments.createdBy', 'name role')
-    .sort({ status_updated_at: -1, delivered_at: -1, createdAt: -1 })
+    .sort({ status_updated_at: -1, delivered_at: -1, createdAt: -1, _id: -1 })
     .limit(Math.min(Number(limit) || 50, 500)).lean();
 
   const unlinked = orders.filter(o => !o.lead_id || !o.lead_id.assignedTo);
@@ -792,7 +816,7 @@ export const saveOrderNote = catchAsync(async (req, res) => {
     createdAt: new Date()
   };
 
-  const order = await Order.findOneAndUpdate(
+  const order = await Order.updateWithTransaction(
     { _id: id, platform: 'shipmaxx' },
     { $push: { comments: comment } },
     { new: true }
@@ -847,7 +871,7 @@ export const importOrders = catchAsync(async (req, res) => {
           update.status_updated_at = actualDate || new Date();
         }
 
-        await Order.updateOne({ _id: o._id }, { $set: update });
+        await Order.updateWithTransaction({ _id: o._id }, { $set: update });
         updatedCount++;
       }
     } catch (err) {
@@ -920,7 +944,7 @@ export const importByIds = catchAsync(async (req, res) => {
       };
 
       if (existing) {
-        await Order.updateOne({ _id: existing._id }, { $set: fields });
+        await Order.updateWithTransaction({ _id: existing._id }, { $set: fields });
         updated++;
       } else {
         await Order.create(fields);
@@ -944,11 +968,17 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
 
   // 0. Fix existing orders with short-code statuses (one-time migration)
   for (const [shortCode, fullStatus] of Object.entries(SMX_STATUS_MAP)) {
+    if (shortCode.toUpperCase() === fullStatus.toUpperCase()) continue;
     await Order.updateMany(
       { platform: 'shipmaxx', status: new RegExp(`^${shortCode}$`, 'i') },
       { $set: { status: fullStatus } }
     ).catch(() => {});
   }
+  
+  // also explicitly fix the old ones that got converted wrongly
+  await Order.updateMany({ platform: 'shipmaxx', status: 'SHIPMENT_BOOKED' }, { $set: { status: 'NEW' } }).catch(() => {});
+  await Order.updateMany({ platform: 'shipmaxx', status: 'SHIPMENT_CANCELLED' }, { $set: { status: 'CANCELLED' } }).catch(() => {});
+  await Order.updateMany({ platform: 'shipmaxx', status: 'RTO_INTRANSIT' }, { $set: { status: 'RTO_IN_TRANSIT' } }).catch(() => {});
   
   // 1. Sync ALL recent shipments from ShipMaxx to catch historical or externally created orders
   try {
@@ -973,8 +1003,7 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
         if (existing) {
           statusUpdatedAt = existing.status_updated_at || statusUpdatedAt; // Never forcefully jump to today in Step 1
           
-          // Don't downgrade a valid status to UNKNOWN or some raw unmapped string if we already have a good one
-          if (newStatus === 'UNKNOWN' || (!SMX_STATUS_MAP[newStatus] && SMX_STATUS_MAP[existing.status])) {
+          if (newStatus === 'UNKNOWN') {
             finalStatus = existing.status;
           }
         }
@@ -1000,7 +1029,7 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
             units: p.quantity,
           }));
         }
-        await Order.findOneAndUpdate(query, { $set: updateData }, { upsert: true }).catch(() => {});
+        await Order.updateWithTransaction(query, { $set: updateData }, { upsert: true }).catch(() => {});
         updatedCount++;
       }
       
@@ -1038,7 +1067,7 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
         
         if (o.awb) updateData.awb_code = String(o.awb);
         
-        await Order.findOneAndUpdate(
+        await Order.updateWithTransaction(
           { platform: 'shipmaxx', order_id: String(o.order_id) },
           { $set: updateData },
           { upsert: true }
@@ -1064,7 +1093,7 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
       try {
         const courier = guessCourierByAwb(o.awb_code);
         if (courier) {
-          await Order.updateOne({ _id: o._id }, { $set: { courier_name: courier } });
+          await Order.updateWithTransaction({ _id: o._id }, { $set: { courier_name: courier } });
         }
       } catch (e) {}
     }
@@ -1104,7 +1133,7 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
               }));
            }
            
-           await Order.updateOne({ _id: o._id }, { $set: update });
+           await Order.updateWithTransaction({ _id: o._id }, { $set: update });
         }
       } catch (e) {}
     }
@@ -1164,7 +1193,7 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
         if (ndr.customer.state) updateData.billing_state = ndr.customer.state;
       }
       
-      await Order.findOneAndUpdate(query, { $set: updateData }, { upsert: true }).catch(() => {});
+      await Order.updateWithTransaction(query, { $set: updateData }, { upsert: true }).catch(() => {});
     }
   } catch (err) {
     console.error('[Sync ShipMaxx] Error fetching NDRs:', err.message);
@@ -1232,7 +1261,7 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
           // Update lead status to follow_up
           if (o.lead_id) await Lead.findByIdAndUpdate(o.lead_id, { status: 'follow_up' }).catch(() => {});
         }
-        await Order.updateOne({ _id: o._id }, { $set: update });
+        await Order.updateWithTransaction({ _id: o._id }, { $set: update });
         updatedCount++;
       }
     } catch (err) {
@@ -1250,41 +1279,25 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
     await setAutoFollowUps(o._id, o.delivered_at || o.createdAt || new Date());
   }
 
-  // Sync delivered orders into DeliveredOrder collection
-  const delivered = await Order.find({ platform: 'shipmaxx', status: /^delivered$/i })
-    .select('order_id billing_customer_name billing_phone billing_email billing_address billing_city billing_state billing_pincode awb_code courier_name payment_method sub_total order_items status lead_id delivered_at createdAt').lean();
-  for (const o of delivered) {
-    await DeliveredOrder.findOneAndUpdate(
-      { order_id: o.order_id },
-      { $set: { order_id: o.order_id, billing_customer_name: o.billing_customer_name || '', billing_phone: o.billing_phone || '', billing_email: o.billing_email || '', billing_address: o.billing_address || '', billing_city: o.billing_city || '', billing_state: o.billing_state || '', billing_pincode: o.billing_pincode || '', awb_code: o.awb_code || '', courier_name: o.courier_name || '', payment_method: o.payment_method || '', sub_total: o.sub_total || 0, order_items: o.order_items || [], status: o.status, lead_id: o.lead_id || null, delivered_at: o.delivered_at || o.createdAt, order_date: o.createdAt } },
-      { upsert: true }
-    ).catch(() => {});
-  }
-
-  // Sync active orders into InTransitOrder collection
-  const active = await Order.find({ platform: 'shipmaxx', status: { $not: /^(delivered|rto)/i } })
-    .select('order_id billing_customer_name billing_phone billing_city billing_state billing_pincode awb_code courier_name payment_method sub_total order_items status lead_id status_updated_at createdAt').lean();
-  for (const o of active) {
-    await InTransitOrder.findOneAndUpdate(
-      { order_id: o.order_id },
-      { $set: { order_id: o.order_id, billing_customer_name: o.billing_customer_name || '', billing_phone: o.billing_phone || '', billing_city: o.billing_city || '', billing_state: o.billing_state || '', billing_pincode: o.billing_pincode || '', awb_code: o.awb_code || '', courier_name: o.courier_name || '', payment_method: o.payment_method || '', sub_total: o.sub_total || 0, order_items: o.order_items || [], status: o.status, lead_id: o.lead_id || null, status_updated_at: o.status_updated_at || o.createdAt, order_date: o.createdAt } },
-      { upsert: true }
-    ).catch(() => {});
-  }
-  await InTransitOrder.deleteMany({ order_id: { $in: delivered.map(o => o.order_id) } }).catch(() => {});
-
-  res.json(new ApiResponse(200, { updatedCount, deliveredSynced: delivered.length, activeSynced: active.length }, `Sync complete. Updated: ${updatedCount} orders.`));
+  res.json(new ApiResponse(200, { updatedCount, deliveredSynced: 0, activeSynced: 0 }, `Sync complete. Updated: ${updatedCount} orders.`));
 });
 
 export const getOrders = catchAsync(async (req, res) => {
-  const { status, from, to, search, page = 1, limit = 50, has_awb } = req.query;
+  const { status, shipment_status, from, to, search, page = 1, limit = 50, has_awb } = req.query;
   const match = { platform: 'shipmaxx' };
 
   if (has_awb === 'true') {
     match.awb_code = { $exists: true, $ne: '' };
   }
 
-  if (status && status !== 'all') {
+  if (shipment_status) {
+    const mapped = SMX_STATUS_MAP[String(shipment_status).trim().toUpperCase()];
+    if (mapped) {
+      match.status = mapped;
+    } else {
+      match.status = String(shipment_status).trim().toUpperCase();
+    }
+  } else if (status && status !== 'all') {
     const statusVariant = status.replace(/[-_]/g, '[-_ ]');
     if (/^undelivered$/i.test(status)) {
       match.status = { $regex: /^undelivered/i };
@@ -1317,7 +1330,7 @@ export const getOrders = catchAsync(async (req, res) => {
     Order.find(match)
       .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
       .populate('comments.createdBy', 'name role')
-      .sort({ createdAt: -1 })
+      .sort({ createdAt: -1, _id: -1 })
       .skip((pg - 1) * lim)
       .limit(lim)
       .lean(),
@@ -1355,7 +1368,7 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
   const [orders, total] = await Promise.all([
     Order.find(match)
       .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
-      .sort({ delivered_at: -1, createdAt: -1 })
+      .sort({ delivered_at: -1, createdAt: -1, _id: -1 })
       .skip(skip).limit(Number(per_page)).lean(),
     Order.countDocuments(match),
   ]);
@@ -1726,7 +1739,7 @@ export const updateOrderContact = catchAsync(async (req, res) => {
     if (req.body[key] !== undefined) update[key] = String(req.body[key]).trim();
   }
   if (!Object.keys(update).length) return res.status(400).json(new ApiResponse(400, null, 'No valid fields'));
-  const order = await Order.findOneAndUpdate({ _id: id, platform: 'shipmaxx' }, { $set: update }, { new: true })
+  const order = await Order.updateWithTransaction({ _id: id, platform: 'shipmaxx' }, { $set: update }, { new: true })
     .select(allowed.join(' ') + ' lead_id').lean();
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
   if (order.lead_id) {

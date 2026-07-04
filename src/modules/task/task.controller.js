@@ -14,7 +14,7 @@ const getTasks = catchAsync(async (req, res) => {
 });
 
 const getDailyTasks = catchAsync(async (req, res) => {
-  const tasks = await taskService.getDailyTasks(req.user._id, req.user.role, req.userDepartments);
+  const tasks = await taskService.getDailyTasks(req.query, req.user._id, req.user.role, req.userDepartments);
   res.json(new ApiResponse(httpStatus.OK, tasks, "Today's tasks fetched"));
 });
 
@@ -48,4 +48,39 @@ const getTaskByLead = catchAsync(async (req, res) => {
   res.json(new ApiResponse(httpStatus.OK, task, 'Task fetched'));
 });
 
-export default { createTask, getTasks, getDailyTasks, getTask, updateTask, deleteTask, addNote, getTaskByLead };
+const checkTasks = catchAsync(async (req, res) => {
+  const Task = (await import('./task.model.js')).default;
+  const Lead = (await import('../lead/lead.model.js')).default;
+  
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  const end = new Date(); end.setHours(23, 59, 59, 999);
+  
+  const query = {
+    isDeleted: false,
+    dueDate: { $gte: start, $lte: end },
+    status: { $nin: ['verification', 'cnp', 'cancel_call', 'cancelled', 'ready_to_shipment', 'interested', 'on_hold', 'closed_lost'] }
+  };
+  
+  const hiddenLeadIds = await Lead.distinct('_id', { status: { $in: ['closed_lost', 'on_hold', 'follow_up'] }, isDeleted: { $ne: true } });
+  if (hiddenLeadIds.length) {
+    query.lead = { $nin: hiddenLeadIds };
+  }
+  
+  const tasks = await Task.find(query).populate('lead', 'name status');
+  
+  let followUpLeads = 0;
+  let callTitleTasks = 0;
+  
+  tasks.forEach(t => {
+    if (t.lead && t.lead.status === 'follow_up') {
+      followUpLeads++;
+    }
+    if (t.title && t.title.toLowerCase().includes('call again')) {
+      callTitleTasks++;
+    }
+  });
+  
+  res.json({ total: tasks.length, followUpLeads, callTitleTasks, hiddenLeadIdsCount: hiddenLeadIds.length });
+});
+
+export default { createTask, getTasks, getDailyTasks, getTask, updateTask, deleteTask, addNote, getTaskByLead, checkTasks };

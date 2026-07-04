@@ -394,6 +394,8 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
     // Removed department filter here so sales can always see leads assigned to them even if department is null
   } else if (filter.department) {
     query.department = filter.department;
+  } else if (userDepartments && userDepartments.length > 0) {
+    query.department = { $in: userDepartments };
   }
 
   // Export mode: skip all status/pipeline filters, return everything

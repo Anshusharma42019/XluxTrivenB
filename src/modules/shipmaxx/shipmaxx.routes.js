@@ -126,6 +126,31 @@ router.get('/debug/backfill-leads', catchAsync(async (req, res) => {
 
   res.json({ totalUnlinkedFound: unlinked.length, successfullyLinked: updated, reorderCommissionsGenerated: true });
 }));
+router.get('/debug/test-consistency', catchAsync(async (req, res) => {
+  const order = await Order.findOne({ platform: 'shipmaxx', status: 'IN_TRANSIT' }).lean();
+  if (!order) return res.json({ msg: 'No IN_TRANSIT order found' });
+  
+  await Order.updateWithTransaction({ _id: order._id }, { $set: { status: 'DELIVERED', delivered_at: new Date() } });
+  
+  // Wait for hooks
+  await new Promise(r => setTimeout(r, 1000));
+  
+  const mongoose = await import('mongoose');
+  const inTransitModel = mongoose.default.model('ShipmaxxInTransitOrder');
+  const deliveredModel = mongoose.default.model('ShipmaxxDeliveredOrder');
+  
+  const stillInTransit = await inTransitModel.findOne({ order_id: order.order_id });
+  const nowDelivered = await deliveredModel.findOne({ order_id: order.order_id });
+  
+  // Revert back
+  await Order.updateWithTransaction({ _id: order._id }, { $set: { status: 'IN_TRANSIT', delivered_at: null } });
+  
+  res.json({
+    order_id: order.order_id,
+    stillInTransit: !!stillInTransit,
+    nowDelivered: !!nowDelivered,
+  });
+}));
 
 router.get('/debug/dump-reorders', catchAsync(async (req, res) => {
   const IST_OFFSET = 5.5 * 60 * 60 * 1000;

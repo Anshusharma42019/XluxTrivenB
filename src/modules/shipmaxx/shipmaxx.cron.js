@@ -13,6 +13,54 @@ const initShipmaxxCron = () => {
       const twoWeeksAgo = new Date();
       twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
 
+      // 1. Fetch new shipments from ShipMaxx (Auto-sync new orders)
+      try {
+        const shipRes = await smx.getShipments({ limit: 50, per_page: 50, page: 1 });
+        const shipments = shipRes?.data?.data || shipRes?.data || [];
+        for (const s of shipments) {
+          if (!s.awb && !s.order_id) continue;
+          const query = { platform: 'shipmaxx' };
+          if (s.order_id) query.order_id = String(s.order_id);
+          else query.awb_code = String(s.awb);
+
+          const newStatus = normalizeShipmaxxStatus(s.status);
+          const existing = await Order.findOne(query).select('status status_updated_at').lean();
+          let statusUpdatedAt = s.date_added ? new Date(s.date_added) : new Date();
+          let finalStatus = newStatus;
+          
+          if (existing) {
+            statusUpdatedAt = existing.status_updated_at || statusUpdatedAt;
+            if (newStatus === 'UNKNOWN' || (!SMX_STATUS_MAP[newStatus] && SMX_STATUS_MAP[existing.status])) {
+              finalStatus = existing.status;
+            }
+          }
+          
+          const updateData = {
+            order_id: String(s.order_id || s.awb),
+            awb_code: String(s.awb || ''),
+            status: finalStatus,
+            platform: 'shipmaxx',
+            payment_method: s.payment_method || '',
+            status_updated_at: statusUpdatedAt,
+          };
+          const courier = s.carrier_name || s.courier_name || s.carrier;
+          if (courier) updateData.courier_name = courier;
+
+          if (s.created_at) updateData.createdAt = new Date(s.created_at);
+          else if (s.date_added) updateData.createdAt = new Date(s.date_added);
+          
+          if (s.products && Array.isArray(s.products)) {
+            updateData.order_items = s.products.map(p => ({
+              name: p.name, sku: p.sku, units: p.quantity
+            }));
+          }
+          await Order.updateWithTransaction(query, { $set: updateData }, { upsert: true }).catch(() => {});
+        }
+      } catch (err) {
+        console.error('[Cron] Error fetching new ShipMaxx shipments:', err.message);
+      }
+
+      // 2. Track existing active orders
       const activeOrders = await Order.find({
         platform: 'shipmaxx',
         createdAt: { $gte: twoWeeksAgo },
@@ -58,7 +106,7 @@ const initShipmaxxCron = () => {
                 update.delivered_at = new Date();
               }
             }
-            await Order.updateOne({ _id: o._id }, { $set: update });
+            await Order.updateWithTransaction({ _id: o._id }, { $set: update }).catch(() => {});
             if (status !== o.status) updatedCount++;
           }
         } catch (e) {
