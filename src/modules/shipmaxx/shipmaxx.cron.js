@@ -30,8 +30,9 @@ const initShipmaxxCron = () => {
           
           if (existing) {
             statusUpdatedAt = existing.status_updated_at || statusUpdatedAt;
-            if (newStatus === 'UNKNOWN' || (!SMX_STATUS_MAP[newStatus] && SMX_STATUS_MAP[existing.status])) {
-              finalStatus = existing.status;
+            if (newStatus === 'UNKNOWN') {
+              console.log(`[Cron] ShipMaxx order ${s.awb || s.order_id} status is UNKNOWN, skipping update.`);
+              continue;
             }
           }
           
