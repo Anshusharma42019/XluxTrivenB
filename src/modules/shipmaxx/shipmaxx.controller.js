@@ -828,14 +828,21 @@ export const saveOrderNote = catchAsync(async (req, res) => {
     createdAt: new Date()
   };
 
-  const order = await Order.updateWithTransaction(
+  let order = await Order.updateWithTransaction(
     { _id: id, platform: 'shipmaxx' },
     { $push: { comments: comment } },
     { returnDocument: 'after' }
-  ).populate('comments.createdBy', 'name role').lean();
+  );
 
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
-  res.json(new ApiResponse(200, order.comments || [], 'Order note saved'));
+
+  order = await Order.populate(order, { path: 'comments.createdBy', select: 'name role' });
+
+  // Since `.lean()` was originally used (but wouldn't work on the returned doc directly), 
+  // we can use `.toObject()` or just respond with the populated document's comments.
+  const comments = order.toObject ? order.toObject().comments : order.comments;
+
+  res.json(new ApiResponse(200, comments || [], 'Order note saved'));
 });
 
 export const importOrders = catchAsync(async (req, res) => {
@@ -1595,19 +1602,27 @@ export const updateOrderContact = catchAsync(async (req, res) => {
     if (req.body[key] !== undefined) update[key] = String(req.body[key]).trim();
   }
   if (!Object.keys(update).length) return res.status(400).json(new ApiResponse(400, null, 'No valid fields'));
-  const order = await Order.updateWithTransaction({ _id: id, platform: 'shipmaxx' }, { $set: update }, { returnDocument: 'after' })
-    .select(allowed.join(' ') + ' lead_id').lean();
-  if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
-  if (order.lead_id) {
+  const orderDoc = await Order.updateWithTransaction({ _id: id, platform: 'shipmaxx' }, { $set: update }, { returnDocument: 'after' });
+  if (!orderDoc) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
+  
+  if (orderDoc.lead_id) {
     const leadUpdate = {};
     if (update.billing_phone)   leadUpdate.phone       = update.billing_phone;
     if (update.billing_city)    leadUpdate.cityVillage = update.billing_city;
     if (update.billing_state)   leadUpdate.state       = update.billing_state;
     if (update.billing_pincode) leadUpdate.pincode     = update.billing_pincode;
     if (update.billing_address) leadUpdate.address     = update.billing_address;
-    if (Object.keys(leadUpdate).length) await Lead.findByIdAndUpdate(order.lead_id, { $set: leadUpdate });
+    if (Object.keys(leadUpdate).length) await Lead.findByIdAndUpdate(orderDoc.lead_id, { $set: leadUpdate });
   }
-  res.json(new ApiResponse(200, order, 'Contact updated'));
+
+  // Create a selected object to match previous .select().lean() behavior
+  const orderObj = orderDoc.toObject ? orderDoc.toObject() : orderDoc;
+  const selectedOrder = { _id: orderObj._id, lead_id: orderObj.lead_id };
+  for (const key of allowed) {
+    selectedOrder[key] = orderObj[key];
+  }
+
+  res.json(new ApiResponse(200, selectedOrder, 'Contact updated'));
 });
 
 // ── Search by phone (for order creation auto-fill) ────────────────────────────
