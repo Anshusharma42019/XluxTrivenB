@@ -6,7 +6,7 @@ import User from '../user/user.model.js';
 import * as leadService from '../lead/lead.service.js';
 import streamifier from 'streamifier';
 import cloudinary from '../../config/cloudinary.js';
-import { sendWhatsAppMessage, sendInteraktChatMessage } from './interakt.service.js';
+import { sendWhatsAppMessage, sendInteraktChatMessage, getApprovedTemplates } from './interakt.service.js';
 
 /**
  * Handle incoming webhooks from Interakt
@@ -222,12 +222,16 @@ const sendMessage = catchAsync(async (req, res) => {
   } catch (err) {
     console.error('[Interakt] sendMessage failed:', err?.response?.data || err.message);
     // Don't block — still save the note so staff have a record
+    interaktResult = { error: err?.response?.data?.message || err.message };
   }
 
   // Save outbound note
   const sentBy = req.user?._id || null;
   
   let noteText = message || '';
+  if (interaktResult && interaktResult.error) {
+    noteText = `[FAILED] ${noteText}`;
+  }
   if (mediaUrl) {
     noteText = `[Attached Media: ${mediaUrl}] ${noteText}`;
   }
@@ -266,5 +270,9 @@ export default {
   latestLeads: catchAsync(async (req, res) => {
     const leads = await Lead.find({ source: 'social_media' }).sort({ createdAt: -1 }).limit(10).lean();
     res.status(200).json({ success: true, leads });
+  }),
+  getTemplates: catchAsync(async (req, res) => {
+    const templates = await getApprovedTemplates();
+    res.status(httpStatus.OK).json(new ApiResponse(httpStatus.OK, { templates }, 'Templates fetched successfully'));
   })
 };
