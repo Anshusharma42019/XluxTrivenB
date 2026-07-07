@@ -341,13 +341,6 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
     };
   }
 
-  // 1. Fetch Mapping Data
-  const allLeadsMap = new Map();
-  const allLeads = await Lead.find({ isDeleted: { $ne: true } }).select('_id assignedTo').lean();
-  for (const l of allLeads) {
-    if (l.assignedTo) allLeadsMap.set(String(l._id), String(l.assignedTo));
-  }
-
   // 2. Fetch Bulk Data in parallel
   const [
     allAttendances, allAppointments, allTargets, allVerifications, allTasks, 
@@ -356,13 +349,35 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
     Attendance.find({ date: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('user checkIn checkOut workingHours').lean(),
     Appointment.find({ appointmentDate: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('doctorName status').lean(),
     StaffTarget.find({ date: { $gte: fromDate || dateStr, $lte: toDate || dateStr } }).lean(),
-    Verification.find({ isDeleted: { $ne: true } }).select('assignedTo status createdAt updatedAt').lean(),
-    Task.find({ isDeleted: false, $or: [{ status: 'pending' }, { status: { $in: ['interested', 'cancel_call'] } }] }).select('assignedTo status updatedAt').lean(),
+    Verification.find({ isDeleted: { $ne: true }, createdAt: { $gte: monthStart, $lte: endOfDay } }).select('assignedTo status createdAt updatedAt').lean(),
+    Task.find({ 
+      isDeleted: false, 
+      $or: [
+        { status: 'pending' }, 
+        { status: { $in: ['interested', 'cancel_call'] }, updatedAt: { $gte: startOfDay, $lte: endOfDay } }
+      ] 
+    }).select('assignedTo status updatedAt').lean(),
     Cnp.find({ ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }).select('assignedTo').lean(),
     CallAgain.find({ ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }).select('assignedTo').lean(),
     Lead.find({ ...(isAllTime ? {} : { $or: [{ createdAt: { $gte: startOfDay, $lte: endOfDay } }, { updatedAt: { $gte: startOfDay, $lte: endOfDay } }] }) }).select('assignedTo status createdAt updatedAt').lean(),
-    Order.find({ status: { $not: /^(new|pending|cancelled)$/i } }).select('lead_id created_by status createdAt updatedAt').lean(),
-    ShipmaxxOrder.find({ status: { $not: /^(new|pending|cancelled)$/i } }).select('lead_id created_by status createdAt updatedAt').lean()
+    Order.find({ 
+      status: { $not: /^(new|pending|cancelled)$/i },
+      $or: [
+        { createdAt: { $gte: monthStart, $lte: endOfDay } },
+        { updatedAt: { $gte: startOfDay, $lte: endOfDay } }
+      ]
+    }).select('lead_id created_by status createdAt updatedAt')
+      .populate('lead_id', 'assignedTo')
+      .lean(),
+    ShipmaxxOrder.find({ 
+      status: { $not: /^(new|pending|cancelled)$/i },
+      $or: [
+        { createdAt: { $gte: monthStart, $lte: endOfDay } },
+        { updatedAt: { $gte: startOfDay, $lte: endOfDay } }
+      ]
+    }).select('lead_id created_by status createdAt updatedAt')
+      .populate('lead_id', 'assignedTo')
+      .lean()
   ]);
 
   // Helper to check date range
@@ -449,7 +464,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
 
   // Process Orders (SR and SM)
   const processOrder = (o) => {
-    let uid = o.lead_id ? allLeadsMap.get(String(o.lead_id)) : null;
+    let uid = o.lead_id && typeof o.lead_id === 'object' ? String(o.lead_id.assignedTo) : null;
     
     // Check if we should fallback to created_by for sales
     if (!uid && o.created_by) {
@@ -877,12 +892,6 @@ export const getAllStaffCommissions = async (month, year) => {
     };
   }
 
-  const allLeadsMap = new Map();
-  const allLeads = await Lead.find({ isDeleted: { $ne: true } }).select('_id assignedTo').lean();
-  for (const l of allLeads) {
-    if (l.assignedTo) allLeadsMap.set(String(l._id), String(l.assignedTo));
-  }
-
   const [allAttendances, allOverrides, allReorders, allOrdersSR, allOrdersSM] = await Promise.all([
     Attendance.find({ date: { $gte: monthStart, $lte: monthEnd }, isDeleted: false }).select('user status').lean(),
     CommissionOverride.find({ month, year }).lean(),
@@ -894,7 +903,9 @@ export const getAllStaffCommissions = async (month, year) => {
         { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
         { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
       ]
-    }).select('lead_id created_by verified_by source_order_id sub_total total').lean(),
+    }).select('lead_id created_by verified_by source_order_id sub_total total')
+      .populate('lead_id', 'assignedTo')
+      .lean(),
     ShipmaxxOrder.find({
       status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
       $or: [
@@ -902,7 +913,9 @@ export const getAllStaffCommissions = async (month, year) => {
         { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
         { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
       ]
-    }).select('lead_id created_by verified_by source_order_id sub_total total').lean()
+    }).select('lead_id created_by verified_by source_order_id sub_total total')
+      .populate('lead_id', 'assignedTo')
+      .lean()
   ]);
 
   for (const a of allAttendances) {
@@ -930,7 +943,7 @@ export const getAllStaffCommissions = async (month, year) => {
     if (o.source_order_id) {
       uid = o.verified_by ? String(o.verified_by) : null;
     } else {
-      uid = o.lead_id ? allLeadsMap.get(String(o.lead_id)) : null;
+      uid = o.lead_id && typeof o.lead_id === 'object' ? String(o.lead_id.assignedTo) : null;
       if (!uid && o.created_by) uid = String(o.created_by);
     }
     

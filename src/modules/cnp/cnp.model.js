@@ -29,4 +29,9 @@ const cnpSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+cnpSchema.index({ assignedTo: 1, updatedAt: -1 });
+cnpSchema.index({ department: 1, updatedAt: -1 });
+cnpSchema.index({ assignedTo: 1, department: 1, updatedAt: -1 });
+cnpSchema.index({ lead: 1 });
+
 export default mongoose.model('Cnp', cnpSchema);

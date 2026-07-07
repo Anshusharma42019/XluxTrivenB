@@ -164,10 +164,15 @@ export const getTasks = async (filter, userRole, userId, userDepartments = []) =
     query.dueDate = { $gte: start, $lte: end };
   }
 
-  await Task.updateMany(
+  // Run overdue update in background to avoid blocking the query response
+  Task.updateMany(
     { status: 'pending', dueDate: { $lt: new Date() }, isDeleted: false },
     { status: 'overdue' }
-  );
+  ).catch(err => console.error('[Task] Overdue check error:', err.message));
+
+  const page = parseInt(filter.page) || 1;
+  const limit = parseInt(filter.limit) || 20;
+  const skip = (page - 1) * limit;
 
   const pipeline = [ { $match: query } ];
 
@@ -189,18 +194,36 @@ export const getTasks = async (filter, userRole, userId, userDepartments = []) =
         ]
       }
     });
-    pipeline.push({ $project: { _id: 1 } });
-  } else {
-    pipeline.push({ $project: { _id: 1 } });
   }
 
-  const result = await Task.aggregate(pipeline);
-  const taskIds = result.map(r => r._id);
+  pipeline.push({ $sort: { createdAt: -1 } });
+  
+  const dataPipeline = [
+    ...pipeline,
+    { $skip: skip },
+    { $limit: limit },
+    { $project: { _id: 1 } }
+  ];
 
-  return Task.find({ _id: { $in: taskIds } })
+  const countPipeline = [
+    ...pipeline,
+    { $count: 'count' }
+  ];
+
+  const [dataResult, countResult] = await Promise.all([
+    Task.aggregate(dataPipeline),
+    Task.aggregate(countPipeline)
+  ]);
+
+  const taskIds = dataResult.map(r => r._id);
+  const total = countResult[0] ? countResult[0].count : 0;
+
+  const tasks = await Task.find({ _id: { $in: taskIds } })
     .populate('assignedTo', 'name email')
     .populate('lead', 'name phone status')
     .sort({ createdAt: -1 });
+
+  return { tasks, total, page, limit, totalPages: Math.ceil(total / limit) };
 };
 
 export const getTaskById = async (id, userRole, userId, userDepartments = []) => {

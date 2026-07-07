@@ -12,4 +12,9 @@ const callAgainSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+callAgainSchema.index({ assignedTo: 1, updatedAt: -1 });
+callAgainSchema.index({ department: 1, updatedAt: -1 });
+callAgainSchema.index({ assignedTo: 1, department: 1, updatedAt: -1 });
+callAgainSchema.index({ lead: 1 });
+
 export default mongoose.model('CallAgain', callAgainSchema);

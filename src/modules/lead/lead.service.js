@@ -549,22 +549,24 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
   pipeline.push({ $sort: sortCriteria });
 
   if (!isExport) {
-    pipeline.push({
-      $facet: {
-        paginatedResults: [
-          { $skip: skip },
-          { $limit: limit },
-          { $project: { _id: 1 } }
-        ],
-        totalCount: [
-          { $count: 'count' }
-        ]
-      }
-    });
+    const dataPipeline = [
+      ...pipeline,
+      { $skip: skip },
+      { $limit: limit },
+      { $project: { _id: 1 } }
+    ];
+    const countPipeline = [
+      ...pipeline,
+      { $count: 'count' }
+    ];
 
-    const result = await Lead.aggregate(pipeline);
-    const paginatedIds = result[0].paginatedResults.map(r => r._id);
-    const total = result[0].totalCount[0] ? result[0].totalCount[0].count : 0;
+    const [dataResult, countResult] = await Promise.all([
+      Lead.aggregate(dataPipeline),
+      Lead.aggregate(countPipeline)
+    ]);
+
+    const paginatedIds = dataResult.map(r => r._id);
+    const total = countResult[0] ? countResult[0].count : 0;
 
     const leads = await Lead.find({ _id: { $in: paginatedIds } })
       .populate('assignedTo', 'name email role')

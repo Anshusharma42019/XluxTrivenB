@@ -38,19 +38,30 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
         query.createdAt = { $gte: new Date(now.getFullYear(), now.getMonth(), 1) };
       }
     }
+    const limitVal = parseInt(req.query.limit) || 100;
     const records = await Cnp.find(query)
       .populate('assignedTo', 'name email departments')
-      .populate('lead', 'name phone status problem address houseNo cityVillage postOffice landmark district state pincode notes follow_ups next_follow_up department')
-      .sort({ createdAt: -1 });
+      .populate({
+        path: 'lead',
+        select: 'name phone status problem address houseNo cityVillage postOffice landmark district state pincode notes follow_ups next_follow_up department',
+        options: {
+          projection: {
+            notes: { $slice: -5 },
+            follow_ups: { $slice: -5 }
+          }
+        }
+      })
+      .sort({ createdAt: -1 })
+      .limit(limitVal);
 
-    // Auto-backfill department from assignedTo.departments or lead.department if missing
+    // Auto-backfill department from assignedTo.departments or lead.department if missing asynchronously
     const deptUpdates = records.filter(r => !r.department);
     if (deptUpdates.length > 0) {
-      await Promise.all(deptUpdates.map(r => {
+      deptUpdates.forEach(r => {
         const dept = r.lead?.department || r.assignedTo?.departments?.[0] || null;
         r.department = dept;
-        return Cnp.updateOne({ _id: r._id }, { $set: { department: dept } });
-      }));
+        Cnp.updateOne({ _id: r._id }, { $set: { department: dept } }).catch(err => console.error('[CNP] Auto-backfill dept error:', err.message));
+      });
     }
 
     res.json({ status: 200, data: records });

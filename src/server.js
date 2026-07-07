@@ -7,7 +7,7 @@ import initLeadCron from './modules/lead/lead.cron.js';
 import smx from './modules/shipmaxx/shipmaxx.service.js';
 import dns from 'dns';
 
-dns.setServers(['8.8.8.8', '8.8.4.4']);
+// dns.setServers(['8.8.8.8', '8.8.4.4']);
 
 // Vercel serverless: connect DB on each cold start, then export app
 const initPromise = connectDB().then(() => {

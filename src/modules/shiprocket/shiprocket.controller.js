@@ -214,6 +214,15 @@ export const nextOrderId = catchAsync(async (req, res) => {
   res.json(new ApiResponse(200, { order_id }, 'Next order ID'));
 });
 
+export const getFollowupCommissionSettings = catchAsync(async (req, res) => {
+  const commSettings = await FollowupCommissionSettings.findOne().sort({ createdAt: -1 }).lean() || {};
+  res.json(new ApiResponse(200, {
+    total_followups: DEFAULT_FOLLOWUP_TOTAL,
+    followup_gap_days: DEFAULT_FOLLOWUP_GAP_DAYS,
+    ...commSettings
+  }, 'Followup commission settings fetched'));
+});
+
 // ── Orders ────────────────────────────────────────────────────────────────────
 export const createOrder = catchAsync(async (req, res) => {
   const body = { ...req.body };
@@ -1061,23 +1070,29 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
   const settings = getFollowupSettings();
   const totalFollowups = Number(settings.total_followups) || DEFAULT_FOLLOWUP_TOTAL;
 
-  // Backfill: flag orders where all configured followups are done but followup_done not set
-  const unflagged = await Order.find({
-    status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-    auto_followups_set: true,
-    followup_done: { $ne: true },
-  }).select('_id').lean();
-  if (unflagged.length > 0) {
-    const fuCounts = await Followup.aggregate([
-      { $match: { order_id: { $in: unflagged.map(o => o._id) } } },
-      { $group: { _id: '$order_id', total: { $sum: 1 }, incomplete: { $sum: { $cond: ['$completed', 0, 1] } } } },
-      { $match: { total: { $gte: totalFollowups }, incomplete: 0 } },
-    ]);
-    if (fuCounts.length > 0) {
-      await Order.updateMany({ _id: { $in: fuCounts.map(f => f._id) } }, { $set: { followup_done: true } });
-      console.log(`[FollowUp] Backfilled followup_done for ${fuCounts.length} orders.`);
+  // Run backfill asynchronously in background to avoid blocking the response
+  (async () => {
+    try {
+      const unflagged = await Order.find({
+        status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+        auto_followups_set: true,
+        followup_done: { $ne: true },
+      }).select('_id').lean();
+      if (unflagged.length > 0) {
+        const fuCounts = await Followup.aggregate([
+          { $match: { order_id: { $in: unflagged.map(o => o._id) } } },
+          { $group: { _id: '$order_id', total: { $sum: 1 }, incomplete: { $sum: { $cond: ['$completed', 0, 1] } } } },
+          { $match: { total: { $gte: totalFollowups }, incomplete: 0 } },
+        ]);
+        if (fuCounts.length > 0) {
+          await Order.updateMany({ _id: { $in: fuCounts.map(f => f._id) } }, { $set: { followup_done: true } });
+          console.log(`[FollowUp] Backfilled followup_done for ${fuCounts.length} orders in background.`);
+        }
+      }
+    } catch (err) {
+      console.error('[FollowUp] Background backfill error:', err.message);
     }
-  }
+  })();
 
   // --- Department Filtering Logic ---
   let leadQuery = { isDeleted: { $ne: true } };
@@ -1106,7 +1121,7 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
   const delivered = await Order.find(query)
     .populate({
       path: 'lead_id',
-      select: 'createdBy assignedTo department status',
+      select: 'createdBy assignedTo department status phone address name',
       populate: [
         { path: 'createdBy', select: 'name role' },
         { path: 'assignedTo', select: 'name role' }
@@ -1115,10 +1130,14 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
     .populate('verified_by', 'name role')
     .populate('created_by', 'name role')
     .sort({ delivered_at: -1, createdAt: -1 }).lean();
+
   const needsSetting = delivered.filter(o => !o.auto_followups_set);
   if (needsSetting.length) {
-    await Promise.all(needsSetting.map(o => setAutoFollowUps(o._id, o.delivered_at || o.createdAt || new Date())));
+    // Trigger auto follow-up generation in background
+    Promise.all(needsSetting.map(o => setAutoFollowUps(o._id, o.delivered_at || o.createdAt || new Date())))
+      .catch(err => console.error('[FollowUp] Auto followups generation error:', err.message));
   }
+
   const allFollowups = await Followup.find({ order_id: { $in: delivered.map(o => o._id) } })
     .populate('staff', 'name role')
     .sort({ followup_number: 1 })
@@ -1129,33 +1148,53 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
     if (!fuMap[key]) fuMap[key] = [];
     fuMap[key].push(fu);
   }
-  const allLeads = await Lead.find({ isDeleted: { $ne: true } })
-    .select('name phone address assignedTo createdBy')
-    .populate('assignedTo', 'name role')
-    .populate('createdBy', 'name role')
-    .lean();
-  const byName = {}, byPin = {}, pinCount = {};
-  for (const l of allLeads) {
-    if (!l.phone) continue;
-    const full = (l.name || '').toLowerCase().trim();
-    byName[full] = l;
-    const pm = (l.address || '').match(/\b(\d{6})\b/);
-    if (pm) { pinCount[pm[1]] = (pinCount[pm[1]] || 0) + 1; byPin[pm[1]] = l; }
-  }
-  for (const p of Object.keys(pinCount)) { if (pinCount[p] > 1) delete byPin[p]; }
 
-  const enriched = delivered.map(o => {
-    const followups = fuMap[String(o._id)] || [];
-    if (o.billing_phone && !/^x+$/i.test(o.billing_phone) && String(o.billing_phone).replace(/\D/g, '').length >= 10) return { ...o, followups };
-    const full = (o.billing_customer_name || '').toLowerCase().trim();
-    let lead = byName[full];
-    if (!lead) {
-      const words = full.split(/\s+/);
-      lead = Object.entries(byName).find(([k]) => words.every(w => k.includes(w)))?.[1];
+  // Optimize Lead matching: only fetch specific matching leads instead of the entire database
+  const needsLeadMatching = delivered.filter(o => !o.billing_phone || /^x+$/i.test(o.billing_phone) || String(o.billing_phone).replace(/\D/g, '').length < 10);
+  let enriched = [];
+
+  if (needsLeadMatching.length > 0) {
+    const Lead = (await import('../lead/lead.model.js')).default;
+    const names = needsLeadMatching.map(o => (o.billing_customer_name || '').trim().toLowerCase()).filter(Boolean);
+    const pincodes = needsLeadMatching.map(o => String(o.billing_pincode || '').trim()).filter(Boolean);
+
+    const matchedLeads = await Lead.find({
+      isDeleted: { $ne: true },
+      $or: [
+        { name: { $in: names.map(n => new RegExp(`^${n}$`, 'i')) } },
+        { pincode: { $in: pincodes } }
+      ]
+    })
+      .select('name phone address assignedTo createdBy')
+      .populate('assignedTo', 'name role')
+      .populate('createdBy', 'name role')
+      .lean();
+
+    const byName = {}, byPin = {}, pinCount = {};
+    for (const l of matchedLeads) {
+      if (!l.phone) continue;
+      const full = (l.name || '').toLowerCase().trim();
+      byName[full] = l;
+      const pm = (l.address || '').match(/\b(\d{6})\b/);
+      if (pm) { pinCount[pm[1]] = (pinCount[pm[1]] || 0) + 1; byPin[pm[1]] = l; }
     }
-    if (!lead && o.billing_pincode) lead = byPin[String(o.billing_pincode).trim()];
-    return { ...o, lead_id: o.lead_id || lead, billing_phone: lead?.phone || o.billing_phone, followups };
-  });
+    for (const p of Object.keys(pinCount)) { if (pinCount[p] > 1) delete byPin[p]; }
+
+    enriched = delivered.map(o => {
+      const followups = fuMap[String(o._id)] || [];
+      if (o.billing_phone && !/^x+$/i.test(o.billing_phone) && String(o.billing_phone).replace(/\D/g, '').length >= 10) return { ...o, followups };
+      const full = (o.billing_customer_name || '').toLowerCase().trim();
+      let lead = byName[full];
+      if (!lead) {
+        const words = full.split(/\s+/);
+        lead = Object.entries(byName).find(([k]) => words.every(w => k.includes(w)))?.[1];
+      }
+      if (!lead && o.billing_pincode) lead = byPin[String(o.billing_pincode).trim()];
+      return { ...o, lead_id: o.lead_id || lead, billing_phone: lead?.phone || o.billing_phone, followups };
+    });
+  } else {
+    enriched = delivered.map(o => ({ ...o, followups: fuMap[String(o._id)] || [] }));
+  }
 
   const leadIds = enriched.map(o => o.lead_id?._id || o.lead_id).filter(Boolean);
   const allOrdersForLeads = await Order.find({ lead_id: { $in: leadIds } })

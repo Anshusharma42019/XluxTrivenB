@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import auth from '../../middleware/auth.js';
 import requireCheckedIn from '../../middleware/requireCheckedIn.js';
 import departmentFilter from '../../middleware/departmentFilter.js';
@@ -11,6 +12,9 @@ const router = express.Router();
 
 router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, async (req, res) => {
   try {
+    const Lead = (await import('../lead/lead.model.js')).default;
+    const User = (await import('../user/user.model.js')).default;
+
     const query = { status: { $nin: ['verified', 'on_hold'] }, isDeleted: { $ne: true } };
     if (['sales', 'support', 'logistics'].includes(req.user.role)) {
       if (req.userDepartments && req.userDepartments.length > 0) {
@@ -22,6 +26,61 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
     } else if (req.query.department) {
       query.department = req.query.department;
     }
+
+    // Apply day preset filter
+    const dayFilter = req.query.dayFilter;
+    const customDate = req.query.customDate;
+    if (dayFilter === 'today' || dayFilter === 'yesterday' || dayFilter === 'custom') {
+      const IST_OFFSET = 5.5 * 60 * 60 * 1000;
+      const nowIST = new Date(Date.now() + IST_OFFSET);
+      const todayIST = new Date(Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), nowIST.getUTCDate()) - IST_OFFSET);
+      const yesterdayIST = new Date(todayIST.getTime() - 24 * 60 * 60 * 1000);
+      
+      if (dayFilter === 'today') {
+        query.createdAt = { $gte: todayIST };
+      } else if (dayFilter === 'yesterday') {
+        query.createdAt = { $gte: yesterdayIST, $lt: todayIST };
+      } else if (dayFilter === 'custom' && customDate) {
+        const from = new Date(`${customDate}T00:00:00.000+05:30`);
+        const to = new Date(from.getTime() + 24 * 60 * 60 * 1000);
+        query.createdAt = { $gte: from, $lt: to };
+      }
+    }
+
+    // Apply text regex search matching
+    const search = req.query.search;
+    if (search) {
+      const matchingLeads = await Lead.find({
+        $or: [
+          { name: new RegExp(search, 'i') },
+          { phone: new RegExp(search, 'i') }
+        ]
+      }).select('_id').lean();
+      const matchingLeadIds = matchingLeads.map(l => l._id);
+
+      const matchingUsers = await User.find({
+        name: new RegExp(search, 'i')
+      }).select('_id').lean();
+      const matchingUserIds = matchingUsers.map(u => u._id);
+
+      query.$and = [
+        ...(query.$and || []),
+        {
+          $or: [
+            { title: new RegExp(search, 'i') },
+            { lead: { $in: matchingLeadIds } },
+            { assignedTo: { $in: matchingUserIds } },
+            { district: new RegExp(search, 'i') }
+          ]
+        }
+      ];
+    }
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 15;
+    const skip = (page - 1) * limit;
+
+    const total = await Verification.countDocuments(query);
     const records = await Verification.find(query)
       .populate('assignedTo', 'name email departments')
       .populate({
@@ -31,16 +90,18 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
       })
       .populate('task', 'department')
       .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
       .lean();
 
     // Auto-backfill department from assignedTo.departments or lead.department if missing
     const deptUpdates = records.filter(r => !r.department);
     if (deptUpdates.length > 0) {
-      await Promise.all(deptUpdates.map(r => {
+      deptUpdates.forEach(r => {
         const dept = r.assignedTo?.departments?.[0] || r.lead?.department || r.task?.department || 'migraine';
         r.department = dept;
-        return Verification.updateOne({ _id: r._id }, { $set: { department: dept } });
-      }));
+        Verification.updateOne({ _id: r._id }, { $set: { department: dept } }).catch(err => console.error('[Verification] Auto-backfill dept error:', err.message));
+      });
     }
 
     // Backfill relief_percentage from followups for records missing it
@@ -53,16 +114,33 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
         const orders = await Order.find({ lead_id: { $in: leadIds } }).select('_id lead_id').lean();
         const orderMap = {};
         for (const o of orders) orderMap[String(o.lead_id)] = String(o._id);
-        await Promise.all(missing.map(async r => {
+        const orderIds = Object.values(orderMap).map(id => new mongoose.Types.ObjectId(id));
+
+        // Query all latest followups with a relief_percentage in a single query
+        const followupsList = await Followup.find({ 
+          order_id: { $in: orderIds }, 
+          relief_percentage: { $ne: null } 
+        }).sort({ followup_number: -1 }).lean();
+
+        // Map orderId to the latest relief_percentage
+        const reliefMap = {};
+        for (const f of followupsList) {
+          const oId = String(f.order_id);
+          if (reliefMap[oId] === undefined) {
+            reliefMap[oId] = f.relief_percentage;
+          }
+        }
+
+        // Apply relief_percentages in-memory and write to DB in background
+        missing.forEach(r => {
           const leadId = String(r.lead?._id || r.lead);
           const orderId = orderMap[leadId];
-          if (!orderId) return;
-          const followups = await Followup.find({ order_id: orderId, relief_percentage: { $ne: null } }).sort({ followup_number: -1 }).limit(1).lean();
-          if (followups[0]?.relief_percentage != null) {
-            r.relief_percentage = followups[0].relief_percentage;
-            await Verification.findByIdAndUpdate(r._id, { relief_percentage: followups[0].relief_percentage });
+          const relief = reliefMap[orderId];
+          if (relief != null) {
+            r.relief_percentage = relief;
+            Verification.findByIdAndUpdate(r._id, { relief_percentage: relief }).catch(err => console.error('[Verification] Auto-backfill relief percentage error:', err.message));
           }
-        }));
+        });
       }
     } catch (backfillErr) {
       console.error('[Verification] backfill relief_percentage error:', backfillErr.message);
@@ -82,7 +160,16 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
       r.kit_number = (countMap[lId] || 0) + 1;
     });
 
-    res.json({ status: 200, data: records });
+    res.json({
+      status: 200,
+      data: {
+        records,
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (e) {
     res.status(500).json({ status: 500, message: e.message });
   }
@@ -131,114 +218,115 @@ router.get('/test-data', async (req, res) => {
 
 // Sync tasks with status 'verification' into Verification collection
 router.post('/sync', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, async (req, res) => {
-  try {
-    const Task = (await import('../task/task.model.js')).default;
+  // Respond immediately so client never waits
+  res.json({ status: 200, message: 'Sync started' });
 
-    const verificationTasks = await Task.find({ status: 'verification', isDeleted: false }, '_id title assignedTo lead dueDate description cityVillageType cityVillage houseNo postOffice district landmark pincode state reminderAt notes problem age weight height otherProblems problemDuration price department');
-    const existingTaskIds = await Verification.distinct('task');
-    const existingSet = new Set(existingTaskIds.map(id => id.toString()));
-    const newTasks = verificationTasks.filter(t => !existingSet.has(t._id.toString()));
+  // Run the sync process asynchronously in the background
+  (async () => {
+    try {
+      const Task = (await import('../task/task.model.js')).default;
+      const verificationTasks = await Task.find({ status: 'verification', isDeleted: false }, '_id title assignedTo lead dueDate description cityVillageType cityVillage houseNo postOffice district landmark pincode state reminderAt notes problem age weight height otherProblems problemDuration price department');
+      const existingTaskIds = await Verification.distinct('task');
+      const existingSet = new Set(existingTaskIds.map(id => id.toString()));
+      const newTasks = verificationTasks.filter(t => !existingSet.has(t._id.toString()));
 
-    if (newTasks.length > 0) {
-      try {
-        await Verification.insertMany(
-          newTasks.map(task => ({
-            task: task._id, title: task.title, assignedTo: task.assignedTo, lead: task.lead,
-            dueDate: task.dueDate, description: task.description,
-            cityVillageType: task.cityVillageType, cityVillage: task.cityVillage,
-            houseNo: task.houseNo, postOffice: task.postOffice, district: task.district,
-            landmark: task.landmark, pincode: task.pincode, state: task.state,
-            reminderAt: task.reminderAt, notes: task.notes,
-            problem: task.problem, age: task.age, weight: task.weight, height: task.height,
-            otherProblems: task.otherProblems, problemDuration: task.problemDuration, price: task.price,
-            department: task.department,
-          })),
-          { ordered: false }
-        );
-
-        // Send WhatsApp confirmation to each new lead entering Verification
-        const Lead = (await import('../lead/lead.model.js')).default;
-        for (const task of newTasks) {
-          try {
-            let leadPhone = null;
-            let leadName = null;
-            let leadProblem = null;
-            let leadAddress = null;
-
-            if (task.lead) {
-              const leadDoc = await Lead.findById(task.lead)
-                .select('name phone problem address houseNo cityVillage postOffice district state pincode')
-                .lean();
-              if (leadDoc) {
-                leadPhone   = leadDoc.phone;
-                leadName    = leadDoc.name;
-                leadProblem = leadDoc.problem || '';
-                // Build full address from parts
-                const addrParts = [
-                  leadDoc.houseNo,
-                  leadDoc.cityVillage,
-                  leadDoc.postOffice,
-                  leadDoc.district,
-                  leadDoc.state,
-                  leadDoc.pincode,
-                ].filter(Boolean);
-                leadAddress = addrParts.length > 0 ? addrParts.join(', ') : (leadDoc.address || '');
-              }
-            }
-
-            // Also use task-level fields if lead fields are empty
-            const finalProblem = leadProblem || task.problem || '';
-            const finalPrice   = task.price || '';
-            const finalAddress = leadAddress || [
-              task.houseNo, task.cityVillage, task.postOffice,
-              task.district, task.state, task.pincode
-            ].filter(Boolean).join(', ') || '';
-
-            if (leadPhone) {
-              await sendVerificationConfirmation({
-                phone: leadPhone,
-                customerName: leadName || task.title,
-                problem: finalProblem,
-                price: finalPrice,
-                address: finalAddress,
-              });
-            }
-          } catch (waErr) {
-            console.error('[WhatsApp] Verification confirmation error for task', task._id, ':', waErr.message);
-          }
-        }
-      } catch (err) {
-        // Ignore duplicate key errors (11000) during bulk insert
-        if (err.code !== 11000) console.error('Sync insert error:', err);
-      }
-    }
-
-    const existingTasks = verificationTasks.filter(t => existingSet.has(t._id.toString()));
-    if (existingTasks.length > 0) {
-      const ops = existingTasks.map(task => ({
-        updateOne: {
-          filter: { task: task._id },
-          update: {
-            $set: {
-              title: task.title, assignedTo: task.assignedTo, lead: task.lead,
-              age: task.age, weight: task.weight, height: task.height, price: task.price,
-              problem: task.problem, otherProblems: task.otherProblems,
-              problemDuration: task.problemDuration, description: task.description,
+      if (newTasks.length > 0) {
+        try {
+          await Verification.insertMany(
+            newTasks.map(task => ({
+              task: task._id, title: task.title, assignedTo: task.assignedTo, lead: task.lead,
+              dueDate: task.dueDate, description: task.description,
               cityVillageType: task.cityVillageType, cityVillage: task.cityVillage,
               houseNo: task.houseNo, postOffice: task.postOffice, district: task.district,
               landmark: task.landmark, pincode: task.pincode, state: task.state,
-              reminderAt: task.reminderAt, department: task.department
+              reminderAt: task.reminderAt, notes: task.notes,
+              problem: task.problem, age: task.age, weight: task.weight, height: task.height,
+              otherProblems: task.otherProblems, problemDuration: task.problemDuration, price: task.price,
+              department: task.department,
+            })),
+            { ordered: false }
+          );
+
+          // Send WhatsApp confirmation to each new lead entering Verification
+          const Lead = (await import('../lead/lead.model.js')).default;
+          for (const task of newTasks) {
+            try {
+              let leadPhone = null;
+              let leadName = null;
+              let leadProblem = null;
+              let leadAddress = null;
+
+              if (task.lead) {
+                const leadDoc = await Lead.findById(task.lead)
+                  .select('name phone problem address houseNo cityVillage postOffice district state pincode')
+                  .lean();
+                if (leadDoc) {
+                  leadPhone   = leadDoc.phone;
+                  leadName    = leadDoc.name;
+                  leadProblem = leadDoc.problem || '';
+                  const addrParts = [
+                    leadDoc.houseNo,
+                    leadDoc.cityVillage,
+                    leadDoc.postOffice,
+                    leadDoc.district,
+                    leadDoc.state,
+                    leadDoc.pincode,
+                  ].filter(Boolean);
+                  leadAddress = addrParts.length > 0 ? addrParts.join(', ') : (leadDoc.address || '');
+                }
+              }
+
+              const finalProblem = leadProblem || task.problem || '';
+              const finalPrice   = task.price || '';
+              const finalAddress = leadAddress || [
+                task.houseNo, task.cityVillage, task.postOffice,
+                task.district, task.state, task.pincode
+              ].filter(Boolean).join(', ') || '';
+
+              if (leadPhone) {
+                await sendVerificationConfirmation({
+                  phone: leadPhone,
+                  customerName: leadName || task.title,
+                  problem: finalProblem,
+                  price: finalPrice,
+                  address: finalAddress,
+                });
+              }
+            } catch (waErr) {
+              console.error('[WhatsApp] Verification confirmation error for task', task._id, ':', waErr.message);
             }
           }
+        } catch (err) {
+          // Ignore duplicate key errors (11000) during bulk insert
+          if (err.code !== 11000) console.error('Sync insert error:', err);
         }
-      }));
-      await Verification.bulkWrite(ops, { ordered: false }).catch(err => console.error('Sync bulkWrite error:', err));
-    }
+      }
 
-    res.json({ status: 200, message: `Synced ${newTasks.length} new records` });
-  } catch (e) {
-    res.status(500).json({ status: 500, message: e.message });
-  }
+      const existingTasks = verificationTasks.filter(t => existingSet.has(t._id.toString()));
+      if (existingTasks.length > 0) {
+        const ops = existingTasks.map(task => ({
+          updateOne: {
+            filter: { task: task._id },
+            update: {
+              $set: {
+                title: task.title, assignedTo: task.assignedTo, lead: task.lead,
+                age: task.age, weight: task.weight, height: task.height, price: task.price,
+                problem: task.problem, otherProblems: task.otherProblems,
+                problemDuration: task.problemDuration, description: task.description,
+                cityVillageType: task.cityVillageType, cityVillage: task.cityVillage,
+                houseNo: task.houseNo, postOffice: task.postOffice, district: task.district,
+                landmark: task.landmark, pincode: task.pincode, state: task.state,
+                reminderAt: task.reminderAt, department: task.department
+              }
+            }
+          }
+        }));
+        await Verification.bulkWrite(ops, { ordered: false }).catch(err => console.error('Sync bulkWrite error:', err));
+      }
+    } catch (bgError) {
+      console.error('[Verification Sync Background Error]:', bgError.message);
+    }
+  })();
 });
 
 // MUST be before /:id routes
@@ -373,9 +461,52 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
       _isPipelineOnly: true,
     }));
 
-    const allRecords = [...verificationRecords, ...pipelineRecords].sort((a, b) => new Date(b.onHoldUntil || b.createdAt) - new Date(a.onHoldUntil || a.createdAt));
+    // Filter by dayPreset
+    const dayFilter = req.query.dayFilter;
+    const customDate = req.query.customDate;
+    let filteredRecords = [...verificationRecords, ...pipelineRecords];
+
+    if (dayFilter === 'today' || dayFilter === 'yesterday' || dayFilter === 'custom') {
+      const IST_OFFSET = 5.5 * 60 * 60 * 1000;
+      const nowIST = new Date(Date.now() + IST_OFFSET);
+      const todayIST = new Date(Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), nowIST.getUTCDate()) - IST_OFFSET);
+      const yesterdayIST = new Date(todayIST.getTime() - 24 * 60 * 60 * 1000);
+      
+      filteredRecords = filteredRecords.filter(r => {
+        const dateVal = new Date(r.onHoldAt || r.updatedAt || r.createdAt);
+        if (dayFilter === 'today') return dateVal >= todayIST;
+        if (dayFilter === 'yesterday') return dateVal >= yesterdayIST && dateVal < todayIST;
+        if (dayFilter === 'custom' && customDate) {
+          const from = new Date(customDate);
+          const to = new Date(from); to.setDate(from.getDate() + 1);
+          return dateVal >= from && dateVal < to;
+        }
+        return true;
+      });
+    }
+
+    // Filter by search term
+    const search = req.query.search;
+    if (search) {
+      const q = search.toLowerCase();
+      filteredRecords = filteredRecords.filter(r =>
+        r.title?.toLowerCase().includes(q) ||
+        r.lead?.name?.toLowerCase().includes(q) ||
+        r.lead?.phone?.includes(q) ||
+        r.assignedTo?.name?.toLowerCase().includes(q)
+      );
+    }
+
+    const sortedRecords = filteredRecords.sort((a, b) => new Date(b.onHoldUntil || b.createdAt) - new Date(a.onHoldUntil || a.createdAt));
+
+    const total = sortedRecords.length;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 15;
+    const skip = (page - 1) * limit;
+    const paginatedRecords = sortedRecords.slice(skip, skip + limit);
+
     const { Order } = (await import('../shiprocket/models/order.model.js'));
-    const leadIds = allRecords.map(r => r.lead?._id || r.lead).filter(Boolean);
+    const leadIds = paginatedRecords.map(r => r.lead?._id || r.lead).filter(Boolean);
     const orderCounts = await Order.aggregate([
       { $match: { lead_id: { $in: leadIds } } },
       { $group: { _id: '$lead_id', count: { $sum: 1 } } }
@@ -383,12 +514,21 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
     const countMap = {};
     for (const oc of orderCounts) countMap[String(oc._id)] = oc.count;
 
-    allRecords.forEach(r => {
+    paginatedRecords.forEach(r => {
       const lId = String(r.lead?._id || r.lead);
       r.kit_number = (countMap[lId] || 0) + 1;
     });
 
-    res.json({ status: 200, data: allRecords });
+    res.json({
+      status: 200,
+      data: {
+        records: paginatedRecords,
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (e) {
     res.status(500).json({ status: 500, message: e.message });
   }

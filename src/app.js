@@ -7,12 +7,18 @@ import { errorConverter, errorHandler } from "./middleware/error.js";
 import ApiError from "./utils/ApiError.js";
 import routes from "./routes/index.js";
 import { webhook } from "./modules/shiprocket/shiprocket.controller.js";
+import { cacheInvalidatorMiddleware } from "./middleware/cache.js";
 
 const app = express();
 
-// if (config.env !== "test") {
-//   app.use(morgan("dev"));
-// }
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    console.log(`[API] ${req.method} ${req.originalUrl} - ${res.statusCode} (${duration}ms)`);
+  });
+  next();
+});
 
 // set security HTTP headers
 app.use(helmet({ referrerPolicy: { policy: "no-referrer-when-downgrade" } }));
@@ -72,6 +78,7 @@ app.get("/", (req, res) => res.json({
 app.post("/webhook/shiprocket", webhook);
 
 // v1 api routes
+app.use(cacheInvalidatorMiddleware);
 app.use("/api/v1", routes);
 
 // Pincode proxy — avoids CORS/referrer issues with external API

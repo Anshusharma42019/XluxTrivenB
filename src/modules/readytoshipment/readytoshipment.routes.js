@@ -161,17 +161,107 @@ router.get('/', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter
     }
     const validTaskIds = await Task.distinct('_id', taskQuery);
 
-    const records = await ReadyToShipment.find({
-      sentToShiprocket: { $ne: true },
-      task: { $in: validTaskIds },
-    })
-      .populate('assignedTo', 'name email')
-      .populate('lead', 'name phone status')
-      .populate('task', 'department')
-      .sort({ createdAt: -1 })
-      .lean();
+    const rtsQuery = { sentToShiprocket: { $ne: true }, task: { $in: validTaskIds } };
 
-    res.json({ status: 200, data: records });
+    const { dayFilter, customDate, typeFilter, search } = req.query;
+
+    // Apply date range filters
+    if (dayFilter === 'today') {
+      const start = new Date(); start.setHours(0, 0, 0, 0);
+      const end = new Date(); end.setHours(23, 59, 59, 999);
+      rtsQuery.createdAt = { $gte: start, $lte: end };
+    } else if (dayFilter === 'yesterday') {
+      const start = new Date(); start.setDate(start.getDate() - 1); start.setHours(0, 0, 0, 0);
+      const end = new Date(); end.setDate(end.getDate() - 1); end.setHours(23, 59, 59, 999);
+      rtsQuery.createdAt = { $gte: start, $lte: end };
+    } else if (dayFilter === 'custom' && customDate) {
+      const start = new Date(`${customDate}T00:00:00.000+05:30`);
+      const end = new Date(`${customDate}T23:59:59.999+05:30`);
+      rtsQuery.createdAt = { $gte: start, $lte: end };
+    }
+
+    // Apply lead type and search keyword filter matching lead details
+    let matchLeadIds = null;
+    if (typeFilter && typeFilter !== 'all' || search) {
+      const Lead = (await import('../lead/lead.model.js')).default;
+      const leadSubQuery = { isDeleted: { $ne: true } };
+
+      if (typeFilter === 'new') {
+        leadSubQuery.status = { $ne: 'old' };
+        leadSubQuery.pending_reorder_source = { $exists: false };
+      } else if (typeFilter === 'old') {
+        leadSubQuery.$or = [
+          { status: 'old' },
+          { pending_reorder_source: { $exists: true, $ne: null } }
+        ];
+      }
+
+      if (search) {
+        leadSubQuery.$or = [
+          { name: { $regex: search, $options: 'i' } },
+          { phone: { $regex: search, $options: 'i' } }
+        ];
+      }
+
+      matchLeadIds = await Lead.distinct('_id', leadSubQuery);
+    }
+
+    if (search) {
+      const User = (await import('../user/user.model.js')).default;
+      const matchUserIds = await User.distinct('_id', { name: { $regex: search, $options: 'i' } });
+
+      const searchConditions = [
+        { title: { $regex: search, $options: 'i' } },
+        { state: { $regex: search, $options: 'i' } },
+        { district: { $regex: search, $options: 'i' } },
+        { assignedTo: { $in: matchUserIds } }
+      ];
+
+      if (matchLeadIds) {
+        searchConditions.push({ lead: { $in: matchLeadIds } });
+      }
+
+      if (typeFilter && typeFilter !== 'all') {
+        rtsQuery.$and = [
+          { lead: { $in: matchLeadIds } },
+          { $or: searchConditions }
+        ];
+      } else {
+        rtsQuery.$or = searchConditions;
+      }
+    } else if (matchLeadIds) {
+      rtsQuery.lead = { $in: matchLeadIds };
+    }
+
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.max(1, parseInt(req.query.limit) || 15);
+    const skip = (page - 1) * limit;
+
+    const [records, total] = await Promise.all([
+      ReadyToShipment.find(rtsQuery)
+        .populate('assignedTo', 'name email')
+        .populate({
+          path: 'lead',
+          select: 'name phone status pending_reorder_source'
+        })
+        .populate('task', 'department')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      ReadyToShipment.countDocuments(rtsQuery)
+    ]);
+
+    res.json({
+      status: 200,
+      data: {
+        records,
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (e) {
     res.status(500).json({ status: 500, message: e.message });
   }

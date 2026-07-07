@@ -63,6 +63,7 @@ router.post('/manifests/print', auth(), c.printManifest);
 
 // ── Pickup locations ──────────────────────────────────────────────────────────
 router.get('/settings/company/pickup', auth(), c.getPickupLocations);
+router.get('/settings/followups-commission', auth(), c.getFollowupCommissionSettings);
 
 // ── Returns ───────────────────────────────────────────────────────────────────
 router.get('/returns', auth(), c.getReturns);

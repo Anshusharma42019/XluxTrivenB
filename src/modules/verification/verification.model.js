@@ -46,5 +46,8 @@ verificationSchema.index({ status: 1, createdAt: -1 });
 verificationSchema.index({ assignedTo: 1, createdAt: -1 });
 verificationSchema.index({ assignedTo: 1, updatedAt: -1 });
 verificationSchema.index({ department: 1, status: 1, updatedAt: -1 });
+verificationSchema.index({ assignedTo: 1, department: 1, status: 1, updatedAt: -1 });
+verificationSchema.index({ assignedTo: 1, department: 1, status: 1, createdAt: -1 });
+verificationSchema.index({ lead: 1 });
 
 export default mongoose.model('Verification', verificationSchema);

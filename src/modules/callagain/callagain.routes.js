@@ -31,11 +31,22 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
         query.createdAt = { $gte: new Date(now.getFullYear(), now.getMonth(), 1) };
       }
     }
+    const limitVal = parseInt(req.query.limit) || 100;
     const records = await CallAgain.find(query)
-      .populate('lead', 'name phone problem email address houseNo cityVillage postOffice landmark district state pincode source status type revenue assignedTo createdBy cnpCount cnpAt notes follow_ups next_follow_up note createdAt department')
+      .populate({
+        path: 'lead',
+        select: 'name phone problem email address houseNo cityVillage postOffice landmark district state pincode source status type revenue assignedTo createdBy cnpCount cnpAt notes follow_ups next_follow_up note createdAt department',
+        options: {
+          projection: {
+            notes: { $slice: -5 },
+            follow_ups: { $slice: -5 }
+          }
+        }
+      })
       .populate('assignedTo', 'name email')
       .populate('createdBy', 'name email')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .limit(limitVal);
     res.json({ status: 200, data: records });
   } catch (e) {
     res.status(500).json({ status: 500, message: e.message });
