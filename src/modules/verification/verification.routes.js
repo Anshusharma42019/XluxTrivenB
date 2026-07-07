@@ -323,7 +323,7 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
         select: 'name phone status onHoldReason onHoldUntil address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem createdBy pending_reorder_source',
         populate: { path: 'createdBy', select: 'name role' }
       })
-      .sort({ onHoldUntil: 1 })
+      .sort({ onHoldUntil: -1 })
       .lean();
 
     // Auto-backfill department from assignedTo.departments or lead.department if missing
@@ -357,7 +357,7 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
     // Get pipeline on-hold leads NOT in verification
     const pipelineOnHoldLeads = await Lead.find(leadQuery)
       .populate('assignedTo', 'name email')
-      .sort({ onHoldUntil: 1 })
+      .sort({ onHoldUntil: -1 })
       .lean();
 
     // Shape pipeline leads to match verification record structure
@@ -373,7 +373,7 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
       _isPipelineOnly: true,
     }));
 
-    const allRecords = [...verificationRecords, ...pipelineRecords];
+    const allRecords = [...verificationRecords, ...pipelineRecords].sort((a, b) => new Date(b.onHoldUntil || b.createdAt) - new Date(a.onHoldUntil || a.createdAt));
     const { Order } = (await import('../shiprocket/models/order.model.js'));
     const leadIds = allRecords.map(r => r.lead?._id || r.lead).filter(Boolean);
     const orderCounts = await Order.aggregate([

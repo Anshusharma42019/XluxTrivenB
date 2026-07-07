@@ -250,6 +250,14 @@ export const createOrder = catchAsync(async (req, res) => {
   // Always use a fresh auto-generated order_id — never reuse one
   const order_id = await getNextOrderId();
 
+  if (!body.lead_id) {
+    const cleanPhone = String(phone).replace(/\D/g, '');
+    if (cleanPhone.length >= 10) {
+      const leadMatch = await Lead.findOne({ phone: new RegExp(cleanPhone.slice(-10) + '$'), isDeleted: { $ne: true } }).select('_id').lean();
+      if (leadMatch) body.lead_id = leadMatch._id;
+    }
+  }
+
   const payload = {
     order_id,
     order_date,

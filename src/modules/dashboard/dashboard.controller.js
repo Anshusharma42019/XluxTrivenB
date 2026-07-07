@@ -90,4 +90,16 @@ const saveCommissionOverride = catchAsync(async (req, res) => {
   res.json(new ApiResponse(httpStatus.OK, data, 'Commission override saved'));
 });
 
-export default { debugDeliveries, getStats, getRevenueChart, getStaffStats, setStaffTarget, getTargetHistory, getStaffVerifications, getStaffTodayLists, getStaffMonthlyChart, getAllStaffStats, getStaffCommission, getAllStaffCommissions, saveCommissionOverride };
+const getUnassignedOrders = catchAsync(async (req, res) => {
+  const { month, year } = req.query;
+  const data = await dashboardService.getUnassignedOrders(Number(month), Number(year));
+  res.json(new ApiResponse(httpStatus.OK, data, 'Unassigned orders fetched'));
+});
+
+const assignOrder = catchAsync(async (req, res) => {
+  const { orderId, staffId, platform } = req.body;
+  const data = await dashboardService.assignOrder(orderId, staffId, platform);
+  res.json(new ApiResponse(httpStatus.OK, data, 'Order assigned successfully'));
+});
+
+export default { debugDeliveries, getStats, getRevenueChart, getStaffStats, setStaffTarget, getTargetHistory, getStaffVerifications, getStaffTodayLists, getStaffMonthlyChart, getAllStaffStats, getStaffCommission, getAllStaffCommissions, saveCommissionOverride, getUnassignedOrders, assignOrder };

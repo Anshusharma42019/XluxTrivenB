@@ -431,12 +431,12 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
       // Daily actuals: how many were delivered TODAY
       Promise.all([
         Order.countDocuments({ 
-          lead_id: { $in: staffLeads }, 
+          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
           status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
           ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
         }),
         ShipmaxxOrder.countDocuments({
-          lead_id: { $in: staffLeads },
+          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
           status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
           ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
         })
@@ -444,12 +444,12 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
       // Daily actuals: how many were RTO TODAY
       Promise.all([
         Order.countDocuments({
-          lead_id: { $in: staffLeads },
+          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
           status: { $regex: /^rto/i },
           ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
         }),
         ShipmaxxOrder.countDocuments({
-          lead_id: { $in: staffLeads },
+          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
           status: { $regex: /^rto/i },
           ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
         })
@@ -457,36 +457,36 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
       // Monthly cohort for DR/RTO always
       Promise.all([
         Order.countDocuments({ 
-          lead_id: { $in: staffLeads },
+          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
           status: { $not: /^(new|pending|cancelled)$/i },
           createdAt: { $gte: monthStart, $lte: monthEnd }
         }),
         ShipmaxxOrder.countDocuments({
-          lead_id: { $in: staffLeads },
+          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
           status: { $not: /^(new|pending|cancelled)$/i },
           createdAt: { $gte: monthStart, $lte: monthEnd }
         })
       ]).then(([a, b]) => a + b),
       Promise.all([
         Order.countDocuments({ 
-          lead_id: { $in: staffLeads }, 
+          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
           status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
           createdAt: { $gte: monthStart, $lte: monthEnd }
         }),
         ShipmaxxOrder.countDocuments({
-          lead_id: { $in: staffLeads },
+          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
           status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
           createdAt: { $gte: monthStart, $lte: monthEnd }
         })
       ]).then(([a, b]) => a + b),
       Promise.all([
         Order.countDocuments({
-          lead_id: { $in: staffLeads },
+          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
           status: { $regex: /^rto/i },
           createdAt: { $gte: monthStart, $lte: monthEnd }
         }),
         ShipmaxxOrder.countDocuments({
-          $or: [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }],
+          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
           status: { $regex: /^rto/i },
           createdAt: { $gte: monthStart, $lte: monthEnd }
         })
@@ -746,120 +746,21 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
   const [orderBreakdownSR, deliveredBreakdownSR, deliveredRevenueResultSR, orderBreakdownSM, deliveredBreakdownSM, deliveredRevenueResultSM] = await Promise.all([
     Order.aggregate([
       { $match: allOrderFilter },
-      {
-        $lookup: {
-          from: 'leads',
-          localField: 'lead_id',
-          foreignField: '_id',
-          as: 'leadDoc'
-        }
-      },
-      {
-        $group: {
-          _id: {
-            $cond: [
-              {
-                $or: [
-                  { $ifNull: ['$source_order_id', false] },
-                  { $eq: [{ $arrayElemAt: ['$leadDoc.status', 0] }, 'old'] }
-                ]
-              },
-              'old',
-              'new'
-            ]
-          },
-          count: { $sum: 1 }
-        }
-      }
+      { $lookup: { from: 'leads', localField: 'lead_id', foreignField: '_id', as: 'leadDoc' } },
+      { $group: { _id: { $cond: [ { $or: [ { $ifNull: ['$source_order_id', false] }, { $eq: [{ $arrayElemAt: ['$leadDoc.status', 0] }, 'old'] } ] }, 'old', 'new' ] }, count: { $sum: 1 } } }
     ]),
-    Order.aggregate([
-      { $match: deliveredFilter },
-      {
-        $lookup: {
-          from: 'leads',
-          localField: 'lead_id',
-          foreignField: '_id',
-          as: 'leadDoc'
-        }
-      },
-      {
-        $group: {
-          _id: {
-            $cond: [
-              {
-                $or: [
-                  { $ifNull: ['$source_order_id', false] },
-                  { $eq: [{ $arrayElemAt: ['$leadDoc.status', 0] }, 'old'] }
-                ]
-              },
-              'old',
-              'new'
-            ]
-          },
-          count: { $sum: 1 }
-        }
-      }
-    ]),
+    // We will compute delivered counts manually below to ensure accurate 2-kit tracking
+    Order.find(deliveredFilter).select('_id lead_id createdAt status_updated_at delivered_at').lean(),
     Order.aggregate([
       { $match: deliveredFilter },
       { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } }
     ]),
     ShipmaxxOrder.aggregate([
       { $match: allOrderFilterSM },
-      {
-        $lookup: {
-          from: 'leads',
-          localField: 'lead_id',
-          foreignField: '_id',
-          as: 'leadDoc'
-        }
-      },
-      {
-        $group: {
-          _id: {
-            $cond: [
-              {
-                $or: [
-                  { $ifNull: ['$source_order_id', false] },
-                  { $eq: [{ $arrayElemAt: ['$leadDoc.status', 0] }, 'old'] }
-                ]
-              },
-              'old',
-              'new'
-            ]
-          },
-          count: { $sum: 1 }
-        }
-      }
+      { $lookup: { from: 'leads', localField: 'lead_id', foreignField: '_id', as: 'leadDoc' } },
+      { $group: { _id: { $cond: [ { $or: [ { $ifNull: ['$source_order_id', false] }, { $eq: [{ $arrayElemAt: ['$leadDoc.status', 0] }, 'old'] } ] }, 'old', 'new' ] }, count: { $sum: 1 } } }
     ]),
-    ShipmaxxOrder.aggregate([
-      { $match: deliveredFilterSM },
-      {
-        $lookup: {
-          from: 'leads',
-          localField: 'lead_id',
-          foreignField: '_id',
-          as: 'leadDoc'
-        }
-      },
-      {
-        $group: {
-          _id: {
-            $cond: [
-              {
-                $or: [
-                  { $ifNull: ['$source_order_id', false] },
-                  { $eq: [{ $arrayElemAt: ['$leadDoc.status', 0] }, 'old'] }
-                ]
-              },
-              'old',
-              'new'
-            ]
-          },
-          count: { $sum: 1 }
-        }
-      }
-    ]),
+    ShipmaxxOrder.find(deliveredFilterSM).select('_id lead_id createdAt status_updated_at delivered_at').lean(),
     ShipmaxxOrder.aggregate([
       { $match: deliveredFilterSM },
       { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } }
@@ -874,13 +775,44 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
   };
 
   const orderBreakdown = mergeBreakdown(orderBreakdownSR, orderBreakdownSM);
-  const deliveredBreakdown = mergeBreakdown(deliveredBreakdownSR, deliveredBreakdownSM);
+  
+  // Accurate Kit Calculation for Delivered Orders
+  const allDeliveredOrders = [...deliveredBreakdownSR, ...deliveredBreakdownSM];
+  let newDeliveredCount = 0;
+  let oldDeliveredCount = 0;
+  
+  if (allDeliveredOrders.length > 0) {
+    const dLeadIds = allDeliveredOrders.map(o => o.lead_id).filter(Boolean);
+    const [allPastOrders, allPastSmOrders, oldLeads] = await Promise.all([
+      Order.find({ lead_id: { $in: dLeadIds } }).select('_id lead_id createdAt').lean(),
+      ShipmaxxOrder.find({ lead_id: { $in: dLeadIds } }).select('_id lead_id createdAt').lean(),
+      Lead.find({ _id: { $in: dLeadIds }, $or: [{ status: 'old' }, { pending_reorder_source: { $exists: true, $ne: null } }] }).distinct('_id')
+    ]);
+    const oldLeadsSet = new Set(oldLeads.map(id => String(id)));
+    const combinedPast = [...allPastOrders, ...allPastSmOrders].sort((a,b) => new Date(a.createdAt) - new Date(b.createdAt));
+    
+    const leadOrderCount = {};
+    const kitMap = {};
+    for (const oc of combinedPast) {
+      if (!oc.lead_id) continue;
+      const lId = String(oc.lead_id);
+      if (!leadOrderCount[lId]) leadOrderCount[lId] = 0;
+      leadOrderCount[lId]++;
+      kitMap[String(oc._id)] = (leadOrderCount[lId] >= 2 || (leadOrderCount[lId] === 1 && oldLeadsSet.has(lId))) ? 'old' : 'new';
+    }
+    
+    for (const o of allDeliveredOrders) {
+      const type = kitMap[String(o._id)] || 'new';
+      if (type === 'old') oldDeliveredCount++;
+      else newDeliveredCount++;
+    }
+  }
+
+  // Duplicated mergeBreakdown removed
   const deliveredRevenueTotal = (deliveredRevenueResultSR[0]?.total || 0) + (deliveredRevenueResultSM[0]?.total || 0);
 
   const newOrdersCount = orderBreakdown.find(b => b._id === 'new')?.count || 0;
   const oldOrdersCount = orderBreakdown.find(b => b._id === 'old')?.count || 0;
-  const newDeliveredCount = deliveredBreakdown.find(b => b._id === 'new')?.count || 0;
-  const oldDeliveredCount = deliveredBreakdown.find(b => b._id === 'old')?.count || 0;
   const deliveredCount = newDeliveredCount + oldDeliveredCount;
   const departmentLeads = {
     migraine: migraineLeadCount,
@@ -982,31 +914,73 @@ export const getStaffCommission = async (userId, month, year) => {
 
   const basePay = override?.manualBasePay ?? Math.round((user.baseSalary || 0) * (workingDays / Math.max(billableDays, 1)));
 
+  let leadOrCreated;
+  if (user.role === 'sales') {
+    leadOrCreated = [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: userId }];
+  } else if (user.role === 'support') {
+    // Support gets credit for all 2nd-kit (or higher) orders
+    const OrderModel = (await import('../shiprocket/models/order.model.js')).Order;
+    const ShipmaxxOrderModel = (await import('../shipmaxx/models/shipmaxxOrder.model.js')).ShipmaxxOrder;
+
+    const allOrders = await OrderModel.find({ source_order_id: null }).select('_id lead_id createdAt').sort({ createdAt: 1 }).lean();
+    const allSmOrders = await ShipmaxxOrderModel.find({ source_order_id: null }).select('_id lead_id createdAt').sort({ createdAt: 1 }).lean();
+    const combinedOrders = [...allOrders, ...allSmOrders].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    const LeadModel = (await import('../lead/lead.model.js')).default;
+    const oldLeads = await LeadModel.find({
+      $or: [
+        { status: 'old' },
+        { pending_reorder_source: { $exists: true, $ne: null } }
+      ],
+      isDeleted: { $ne: true }
+    }).distinct('_id');
+    const oldLeadsSet = new Set(oldLeads.map(id => String(id)));
+
+    const leadOrderCount = {};
+    const secondKitOrderIds = [];
+    for (const oc of combinedOrders) {
+      if (!oc.lead_id) continue;
+      const lId = String(oc.lead_id);
+      if (!leadOrderCount[lId]) leadOrderCount[lId] = 0;
+      leadOrderCount[lId]++;
+      if (leadOrderCount[lId] >= 2 || (leadOrderCount[lId] === 1 && oldLeadsSet.has(lId))) {
+        secondKitOrderIds.push(oc._id);
+      }
+    }
+    
+    // In case there are also specific orders verified by the support user
+    leadOrCreated = [{ _id: { $in: secondKitOrderIds } }, { verified_by: userId }];
+  } else {
+    leadOrCreated = [{ lead_id: { $in: staffLeads } }];
+  }
+
   const deliveryQuerySR = {
-    lead_id: { $in: staffLeads },
     source_order_id: null,
     status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-    $or: [
-      { delivered_at: { $gte: monthStart, $lte: monthEnd } },
-      { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
-      { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
-    ],
+    $and: [
+      { $or: leadOrCreated },
+      { $or: [
+          { delivered_at: { $gte: monthStart, $lte: monthEnd } },
+          { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
+          { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
+        ]
+      }
+    ]
   };
 
   const deliveryQuerySM = {
     source_order_id: null,
-    lead_id: { $in: staffLeads },
     status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+    $and: [
+      { $or: leadOrCreated },
+      { $or: [
+          { delivered_at: { $gte: monthStart, $lte: monthEnd } },
+          { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
+          { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
+        ]
+      }
+    ]
   };
-  deliveryQuerySM.$and = [
-    {
-      $or: [
-        { delivered_at: { $gte: monthStart, $lte: monthEnd } },
-        { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
-        { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
-      ]
-    }
-  ];
 
   const [deliveredCountSR, deliveredCountSM] = await Promise.all([
     Order.countDocuments(deliveryQuerySR),
@@ -1027,7 +1001,9 @@ export const getStaffCommission = async (userId, month, year) => {
 
   const totalRevenue = (revenueResultSR[0]?.total || 0) + (revenueResultSM[0]?.total || 0);
   const reorderTotal = reorderComms.reduce((acc, c) => acc + (c.commission_amount || 0), 0);
-  const revenueCommission = Math.round(totalRevenue * ((user.commissionRate || 5) / 100));
+  const revenueCommission = user.role === 'support' 
+    ? deliveredCount * 50 
+    : Math.round(totalRevenue * ((user.commissionRate || 5) / 100));
   
   const totalCommission = override?.manualCommission ?? (revenueCommission + reorderTotal);
   const totalPay = basePay + totalCommission;
@@ -1042,7 +1018,8 @@ export const getStaffCommission = async (userId, month, year) => {
     reorderCommission: reorderTotal,
     totalCommission, 
     basePay, 
-    totalPay 
+    totalPay,
+    isManualCommission: override?.manualCommission != null
   };
 };
 
@@ -1163,5 +1140,83 @@ export const getRevenueChart = async (userRole, userId, period = 'monthly') => {
   });
 
   return final.slice(0, 12);
+};
+
+export const getUnassignedOrders = async (month, year) => {
+  const User = (await import('../user/user.model.js')).default;
+  const Order = (await import('../shiprocket/models/order.model.js')).Order;
+  const ShipmaxxOrder = (await import('../shipmaxx/models/shipmaxxOrder.model.js')).ShipmaxxOrder;
+
+  const validStaff = await User.find({ role: { $in: ['sales', 'manager', 'admin', 'staff', 'logistics', 'support'] }, isDeleted: false }).lean();
+  
+  const monthStart = new Date(year, month, 1);
+  const monthEnd = new Date(year, month + 1, 0, 23, 59, 59);
+
+  const query = { 
+    status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+    $or: [
+      { delivered_at: { $gte: monthStart, $lte: monthEnd } },
+      { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
+      { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } }
+    ]
+  };
+
+  const [o1, o2] = await Promise.all([
+    Order.find(query).populate('created_by lead_id').lean(),
+    ShipmaxxOrder.find(query).populate('created_by lead_id').lean()
+  ]);
+
+  const allOrders = [...o1, ...o2];
+  const unassigned = [];
+  
+  for (const o of allOrders) {
+    const leadOwnerId = o.lead_id?.assignedTo?.toString();
+    const createdById = o.created_by?._id?.toString();
+    
+    // Check if it's assigned via lead
+    let assigned = false;
+    if (leadOwnerId && validStaff.some(s => s._id.toString() === leadOwnerId)) {
+      assigned = true;
+    } else if (!o.lead_id && createdById && o.created_by?.role === 'sales' && validStaff.some(s => s._id.toString() === createdById)) {
+      assigned = true;
+    }
+    
+    if (!assigned) {
+      unassigned.push({
+        _id: o._id,
+        platform: o.platform || (o.shiprocket_order_id ? 'shiprocket' : 'shipmaxx'),
+        billing_customer_name: o.billing_customer_name,
+        sub_total: o.sub_total || o.total,
+        order_date: o.createdAt,
+        delivered_at: o.delivered_at || o.status_updated_at,
+        created_by_name: o.created_by?.name,
+        tracking_id: o.awb_code
+      });
+    }
+  }
+  
+  return unassigned.sort((a,b) => new Date(b.delivered_at) - new Date(a.delivered_at));
+};
+
+export const assignOrder = async (orderId, staffId, platform) => {
+  const User = (await import('../user/user.model.js')).default;
+  const staff = await User.findById(staffId);
+  if (!staff) throw new Error('Staff not found');
+
+  let OrderModel;
+  if (platform === 'shipmaxx') {
+    OrderModel = (await import('../shipmaxx/models/shipmaxxOrder.model.js')).ShipmaxxOrder;
+  } else {
+    OrderModel = (await import('../shiprocket/models/order.model.js')).Order;
+  }
+
+  const order = await OrderModel.findById(orderId);
+  if (!order) throw new Error('Order not found');
+
+  // Assign by changing created_by to the staff member so it counts for them
+  // (We enforce role=sales to get manual order credit, so staff must be sales)
+  order.created_by = staffId;
+  await order.save();
+  return { success: true };
 };
 

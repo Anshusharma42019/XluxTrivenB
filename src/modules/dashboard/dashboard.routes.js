@@ -19,5 +19,7 @@ router.get('/all-staff-stats', auth('admin', 'manager'), departmentFilter, dashb
 router.get('/staff-commission', auth('admin', 'manager', 'sales', 'support', 'logistics'), dashboardController.getStaffCommission);
 router.get('/all-staff-commissions', auth('admin', 'manager'), dashboardController.getAllStaffCommissions);
 router.post('/save-commission-override', auth('admin', 'manager'), dashboardController.saveCommissionOverride);
+router.get('/unassigned-orders', auth('admin', 'manager'), dashboardController.getUnassignedOrders);
+router.post('/assign-order', auth('admin', 'manager'), dashboardController.assignOrder);
 
 export default router;
