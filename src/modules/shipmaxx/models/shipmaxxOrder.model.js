@@ -73,6 +73,9 @@ const shipmaxxOrderSchema = new mongoose.Schema({
   raw_response: mongoose.Schema.Types.Mixed,
 }, { timestamps: true });
 
+shipmaxxOrderSchema.index({ status: 1, createdAt: -1 });
+shipmaxxOrderSchema.index({ status: 1, delivered_at: -1 });
+shipmaxxOrderSchema.index({ lead_id: 1, createdAt: -1 });
 shipmaxxOrderSchema.statics.updateWithTransaction = async function (query, update, options = {}) {
   const session = await mongoose.startSession();
   session.startTransaction();

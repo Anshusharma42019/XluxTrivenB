@@ -64,6 +64,10 @@ const leadSchema = new mongoose.Schema(
 leadSchema.index({ status: 1, assignedTo: 1, createdAt: -1 });
 leadSchema.index({ name: 'text', phone: 'text', email: 'text' });
 leadSchema.index({ department: 1, status: 1 });
+leadSchema.index({ assignedTo: 1, createdAt: -1 });
+leadSchema.index({ assignedTo: 1, updatedAt: -1 });
+leadSchema.index({ department: 1, createdAt: -1 });
+leadSchema.index({ department: 1, updatedAt: -1 });
 
 leadSchema.set('toJSON', {
   transform: (doc, ret) => { delete ret.__v; return ret; },

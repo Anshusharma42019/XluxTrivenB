@@ -37,5 +37,9 @@ const readyToShipmentSchema = new mongoose.Schema(
 
 readyToShipmentSchema.index({ sentToShiprocket: 1, task: 1 });
 readyToShipmentSchema.index({ createdAt: -1 });
+readyToShipmentSchema.index({ sentToShiprocket: 1, createdAt: -1 });
+readyToShipmentSchema.index({ sentToShiprocket: 1, state: 1, createdAt: -1 });
+readyToShipmentSchema.index({ sentToShiprocket: 1, pincode: 1, createdAt: -1 });
+readyToShipmentSchema.index({ department: 1, sentToShiprocket: 1, createdAt: -1 });
 
 export default mongoose.model('ReadyToShipment', readyToShipmentSchema);

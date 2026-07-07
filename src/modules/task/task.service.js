@@ -138,10 +138,8 @@ export const createTask = async (data, createdBy, creatorRole, userDepartments =
 
 export const getTasks = async (filter, userRole, userId, userDepartments = []) => {
   const query = { isDeleted: false };
-  // Sales staff always see only their own tasks
   if (userRole === 'sales') {
     query.assignedTo = new mongoose.Types.ObjectId(String(userId));
-    // Removed department filter here so they can see tasks assigned to them even if department is null
   } else {
     if (filter.assignedTo) query.assignedTo = new mongoose.Types.ObjectId(String(filter.assignedTo));
     if (filter.department) {
@@ -156,13 +154,8 @@ export const getTasks = async (filter, userRole, userId, userDepartments = []) =
     query.status = { $nin: hiddenTaskStatuses };
   }
   if (filter.type) query.type = filter.type;
-  if (filter.lead) query.lead = filter.lead;
-  if (!filter.status && !filter.lead) {
-    const hiddenLeadIds = await Lead.distinct('_id', { status: { $in: hiddenTaskLeadStatuses }, isDeleted: { $ne: true } });
-    if (hiddenLeadIds.length) query.lead = { $nin: hiddenLeadIds };
-  }
+  if (filter.lead) query.lead = new mongoose.Types.ObjectId(String(filter.lead));
 
-  // console.log('[GET-TASKS] query:', JSON.stringify(query), 'role:', userRole, 'userId:', userId);
   if (filter.date) {
     const start = new Date(filter.date);
     start.setHours(0, 0, 0, 0);
@@ -171,13 +164,40 @@ export const getTasks = async (filter, userRole, userId, userDepartments = []) =
     query.dueDate = { $gte: start, $lte: end };
   }
 
-  // Auto-mark overdue (only pending tasks)
   await Task.updateMany(
     { status: 'pending', dueDate: { $lt: new Date() }, isDeleted: false },
     { status: 'overdue' }
   );
 
-  return Task.find(query)
+  const pipeline = [ { $match: query } ];
+
+  if (!filter.status && !filter.lead) {
+    pipeline.push({
+      $lookup: {
+        from: 'leads',
+        localField: 'lead',
+        foreignField: '_id',
+        as: 'leadDoc'
+      }
+    });
+    // If a task has no lead, or the lead's status is not in hiddenTaskLeadStatuses, we keep it
+    pipeline.push({
+      $match: {
+        $or: [
+          { 'leadDoc': { $size: 0 } },
+          { 'leadDoc.status': { $nin: hiddenTaskLeadStatuses }, 'leadDoc.isDeleted': { $ne: true } }
+        ]
+      }
+    });
+    pipeline.push({ $project: { _id: 1 } });
+  } else {
+    pipeline.push({ $project: { _id: 1 } });
+  }
+
+  const result = await Task.aggregate(pipeline);
+  const taskIds = result.map(r => r._id);
+
+  return Task.find({ _id: { $in: taskIds } })
     .populate('assignedTo', 'name email')
     .populate('lead', 'name phone status')
     .sort({ createdAt: -1 });
@@ -276,7 +296,6 @@ export const getDailyTasks = async (filter, userId, userRole, userDepartments = 
   
   if (userRole === 'sales') {
     query.assignedTo = new mongoose.Types.ObjectId(String(userId));
-    // Removed department filter here so they can see tasks assigned to them even if department is null
   } else {
     if (filter.assignedTo) query.assignedTo = new mongoose.Types.ObjectId(String(filter.assignedTo));
     if (filter.department) {
@@ -285,11 +304,32 @@ export const getDailyTasks = async (filter, userId, userRole, userDepartments = 
       query.department = { $in: userDepartments };
     }
   }
-  const hiddenLeadIds = await Lead.distinct('_id', { status: { $in: hiddenTaskLeadStatuses }, isDeleted: { $ne: true } });
-  if (hiddenLeadIds.length) query.lead = { $nin: hiddenLeadIds };
 
-  return Task.find(query)
+  const pipeline = [ { $match: query } ];
+  pipeline.push({
+    $lookup: {
+      from: 'leads',
+      localField: 'lead',
+      foreignField: '_id',
+      as: 'leadDoc'
+    }
+  });
+  pipeline.push({
+    $match: {
+      $or: [
+        { 'leadDoc': { $size: 0 } },
+        { 'leadDoc.status': { $nin: hiddenTaskLeadStatuses }, 'leadDoc.isDeleted': { $ne: true } }
+      ]
+    }
+  });
+  pipeline.push({ $project: { _id: 1 } });
+
+  const result = await Task.aggregate(pipeline);
+  const taskIds = result.map(r => r._id);
+
+  return Task.find({ _id: { $in: taskIds } })
     .populate('lead', 'name phone status')
     .populate('assignedTo', 'name email')
     .sort({ priority: -1, dueDate: 1 });
 };
+

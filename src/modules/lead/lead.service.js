@@ -383,27 +383,24 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
     query.$and.push({
       $or: [
         { 'notes.direction': 'outbound' },
-        { 'notes.text': /\[Interakt Message\]|\[Attached Media/ },
-        { problem: /\[Interakt Message\]/ },
+        { 'notes.text': /[Interakt Message]|\[Attached Media/ },
+        { problem: /[Interakt Message]/ },
         { source: 'social_media' }
       ]
     });
   }
 
-  // Sales can see all leads for shared statuses (interested, closed_lost, on_hold)
   const sharedStatuses = ['interested', 'closed_lost', 'on_hold'];
   const isSharedStatus = filter.status && sharedStatuses.includes(filter.status);
   
   if (userRole === 'sales') {
-    if (!isSharedStatus) query.assignedTo = userId;
-    // Removed department filter here so sales can always see leads assigned to them even if department is null
+    if (!isSharedStatus) query.assignedTo = new mongoose.Types.ObjectId(userId);
   } else if (filter.department) {
     query.department = filter.department;
   } else if (userDepartments && userDepartments.length > 0) {
     query.department = { $in: userDepartments };
   }
 
-  // Export mode: skip all status/pipeline filters, return everything
   const isExport = filter.export === 'true';
   const isWhatsapp = filter.whatsappOnly === 'true' || filter.whatsappOnly === true;
 
@@ -416,63 +413,10 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
       query.status = { $nin: ['closed_won', 'closed_lost', 'interested', 'follow_up', 'on_hold'] };
     }
   }
+  
   if (filter.source) query.source = filter.source;
-  if (filter.assignedTo && userRole !== 'sales') query.assignedTo = filter.assignedTo;
+  if (filter.assignedTo && userRole !== 'sales') query.assignedTo = new mongoose.Types.ObjectId(filter.assignedTo);
   if (filter.cnp === 'true') query.cnp = true;
-
-  // Always exclude leads that are in verification/shipment pipeline (unless fetching CNP list or exporting)
-  if (!filter.cnp && !isExport && !isWhatsapp) {
-    const isOnHold = filter.status === 'on_hold';
-    const isInterested = filter.status === 'interested';
-
-    // For on_hold: get lead IDs that have a verification record with on_hold status (these SHOULD show)
-    const verificationOnHoldLeadIds = isOnHold
-      ? (await Verification.distinct('lead', { status: 'on_hold', lead: { $ne: null } })).map(String)
-      : [];
-
-    // Remove cnp leads from whitelist
-    const cnpLeadIds = isOnHold && verificationOnHoldLeadIds.length
-      ? (await Lead.find({ _id: { $in: verificationOnHoldLeadIds }, cnp: true }, '_id').lean()).map(l => String(l._id))
-      : [];
-    const safeWhitelist = verificationOnHoldLeadIds.filter(id => !cnpLeadIds.includes(id));
-
-    // Optimize exclusion list: Only lookup tasks/cnp/verification for the current user's leads (or departments) to drastically reduce array sizes
-    const matchFilter = { lead: { $ne: null } };
-    if (userRole === 'sales') {
-      matchFilter.assignedTo = userId;
-    } else if (filter.department) {
-      matchFilter.department = filter.department;
-    }
-    matchFilter.isDeleted = false;
-
-    const [excludeByTask, excludeByCnpCollection, excludeByVerification] = await Promise.all([
-      isInterested
-        ? Task.distinct('lead', { ...matchFilter, status: { $in: ['pending', 'overdue', 'verification', 'ready_to_shipment'] } })
-        : isOnHold
-          ? Task.distinct('lead', { ...matchFilter, status: { $in: ['verification', 'ready_to_shipment', 'interested'] } })
-          : Task.distinct('lead', { ...matchFilter, status: { $in: ['cnp', 'verification', 'ready_to_shipment', 'interested'] } }),
-      isOnHold ? Promise.resolve([]) : Cnp.distinct('lead', { lead: { $ne: null }, ...(userRole === 'sales' ? { assignedTo: userId } : {}) }),
-      isOnHold
-        ? Promise.resolve([])
-        : Verification.distinct('lead', { lead: { $exists: true, $ne: null }, status: { $nin: ['on_hold'] } }),
-    ]);
-
-    // Use a Set for faster lookups instead of .includes() on a massive array
-    const excludeSet = new Set([
-      ...excludeByTask.map(String),
-      ...excludeByCnpCollection.map(String),
-      ...excludeByVerification.map(String)
-    ]);
-    
-    safeWhitelist.forEach(id => excludeSet.delete(id));
-
-    if (excludeSet.size > 0) {
-      const allExcludeIds = Array.from(excludeSet).map(id => new mongoose.Types.ObjectId(id));
-      query._id = query._id
-        ? { $nin: [...(query._id.$nin || []), ...allExcludeIds] }
-        : { $nin: allExcludeIds };
-    }
-  }
 
   if (filter.search) {
     query.$or = [
@@ -481,6 +425,7 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
       { email: { $regex: filter.search, $options: 'i' } },
     ];
   }
+  
   if (filter.dateFrom || filter.dateTo) {
     query.createdAt = {};
     if (filter.dateFrom) query.createdAt.$gte = new Date(filter.dateFrom);
@@ -494,20 +439,152 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
   const page = parseInt(options.page) || 1;
   const limit = parseInt(options.limit) || 20;
   const skip = (page - 1) * limit;
-
   const sortCriteria = isWhatsapp ? { updatedAt: -1 } : { createdAt: -1 };
 
-  const [leads, total] = await Promise.all([
-    Lead.find(query)
+  const pipeline = [ { $match: query } ];
+
+  if (!filter.cnp && !isExport && !isWhatsapp) {
+    const isOnHold = filter.status === 'on_hold';
+    const isInterested = filter.status === 'interested';
+
+    const taskStatuses = isInterested 
+      ? ['pending', 'overdue', 'verification', 'ready_to_shipment']
+      : isOnHold 
+        ? ['verification', 'ready_to_shipment', 'interested']
+        : ['cnp', 'verification', 'ready_to_shipment', 'interested'];
+
+    const matchFilterBase = {};
+    if (userRole === 'sales') matchFilterBase.assignedTo = new mongoose.Types.ObjectId(userId);
+    else if (filter.department) matchFilterBase.department = filter.department;
+
+    pipeline.push({
+      $lookup: {
+        from: 'tasks',
+        let: { leadId: '$_id' },
+        pipeline: [
+          { $match: { 
+              $expr: { $eq: ['$lead', '$$leadId'] },
+              status: { $in: taskStatuses },
+              isDeleted: false,
+              ...matchFilterBase
+          }},
+          { $limit: 1 },
+          { $project: { _id: 1 } }
+        ],
+        as: 'activeTasks'
+      }
+    });
+
+    if (!isOnHold) {
+      pipeline.push({
+        $lookup: {
+          from: 'cnps',
+          let: { leadId: '$_id' },
+          pipeline: [
+            { $match: { 
+                $expr: { $eq: ['$lead', '$$leadId'] },
+                ...matchFilterBase
+            }},
+            { $limit: 1 },
+            { $project: { _id: 1 } }
+          ],
+          as: 'activeCnps'
+        }
+      });
+      pipeline.push({
+        $lookup: {
+          from: 'verifications',
+          let: { leadId: '$_id' },
+          pipeline: [
+            { $match: { 
+                $expr: { $eq: ['$lead', '$$leadId'] },
+                status: { $ne: 'on_hold' }
+            }},
+            { $limit: 1 },
+            { $project: { _id: 1 } }
+          ],
+          as: 'activeVerifications'
+        }
+      });
+      
+      pipeline.push({ 
+        $match: { 
+          activeTasks: { $size: 0 },
+          activeCnps: { $size: 0 },
+          activeVerifications: { $size: 0 }
+        } 
+      });
+    } else {
+      // For on_hold: exclude activeTasks, UNLESS it has an on_hold verification and is not CNP
+      pipeline.push({
+        $lookup: {
+          from: 'verifications',
+          let: { leadId: '$_id' },
+          pipeline: [
+            { $match: { 
+                $expr: { $eq: ['$lead', '$$leadId'] },
+                status: 'on_hold'
+            }},
+            { $limit: 1 },
+            { $project: { _id: 1 } }
+          ],
+          as: 'onHoldVerifications'
+        }
+      });
+      
+      pipeline.push({
+        $match: {
+          $or: [
+            { activeTasks: { $size: 0 } },
+            { $and: [
+                { onHoldVerifications: { $not: { $size: 0 } } },
+                { cnp: { $ne: true } }
+            ]}
+          ]
+        }
+      });
+    }
+  }
+
+  pipeline.push({ $sort: sortCriteria });
+
+  if (!isExport) {
+    pipeline.push({
+      $facet: {
+        paginatedResults: [
+          { $skip: skip },
+          { $limit: limit },
+          { $project: { _id: 1 } }
+        ],
+        totalCount: [
+          { $count: 'count' }
+        ]
+      }
+    });
+
+    const result = await Lead.aggregate(pipeline);
+    const paginatedIds = result[0].paginatedResults.map(r => r._id);
+    const total = result[0].totalCount[0] ? result[0].totalCount[0].count : 0;
+
+    const leads = await Lead.find({ _id: { $in: paginatedIds } })
       .populate('assignedTo', 'name email role')
       .populate('createdBy', 'name email')
-      .sort(sortCriteria)
-      .skip(skip)
-      .limit(limit),
-    Lead.countDocuments(query),
-  ]);
+      .sort(sortCriteria);
 
-  return { leads, total, page, limit, totalPages: Math.ceil(total / limit) };
+    return { leads, total, page, limit, totalPages: Math.ceil(total / limit) };
+  } else {
+    // Export mode: just find all matching
+    pipeline.push({ $project: { _id: 1 } });
+    const result = await Lead.aggregate(pipeline);
+    const allIds = result.map(r => r._id);
+    
+    const leads = await Lead.find({ _id: { $in: allIds } })
+      .populate('assignedTo', 'name email role')
+      .populate('createdBy', 'name email')
+      .sort(sortCriteria);
+
+    return { leads, total: leads.length, page: 1, limit: leads.length, totalPages: 1 };
+  }
 };
 
 export const getLeadById = async (id, userRole, userId, userDepartments = []) => {

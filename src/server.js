@@ -10,16 +10,16 @@ import dns from 'dns';
 dns.setServers(['8.8.8.8', '8.8.4.4']);
 
 // Vercel serverless: connect DB on each cold start, then export app
-const initPromise = connectDB().then(async () => {
+const initPromise = connectDB().then(() => {
   initAttendanceCron();
   initShipmaxxCron();
   initLeadCron();
-  try {
-    await smx.login();
-    console.log('[ShipMaxx] Token pre-loaded on startup ✓');
-  } catch (err) {
-    console.warn('[ShipMaxx] Startup pre-login failed (will retry on first request):', err.message);
-  }
+
+  smx.login()
+    .then(() => console.log('[ShipMaxx] Token pre-loaded in background'))
+    .catch((err) => {
+      console.warn('[ShipMaxx] Background pre-login failed (will retry on first request):', err.message);
+    });
 });
 
 // Wrap app so DB is always ready before handling requests

@@ -317,212 +317,176 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
   const User = (await import('../user/user.model.js')).default;
   const Appointment = (await import('../appointment/appointment.model.js')).default;
   const Attendance = (await import('../attendance/attendance.model.js')).default;
+  const Lead = (await import('../lead/lead.model.js')).default;
+  const Verification = (await import('../verification/verification.model.js')).default;
+  const Task = (await import('../task/task.model.js')).default;
+  const StaffTarget = (await import('./staffTarget.model.js')).default;
+  const Cnp = (await import('../cnp/cnp.model.js')).default;
+  const CallAgain = (await import('../callagain/callagain.model.js')).default;
+  const { Order } = await import('../shiprocket/models/order.model.js');
+  const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
+
   const allUsers = await User.find({ role: { $in: ['sales', 'manager', 'doctor', 'support'] }, isDeleted: false }).select('_id name phone role').lean();
-
-  const stats = await Promise.all(allUsers.map(async (u) => {
-    const uid = new mongoose.Types.ObjectId(u._id);
-    const attendances = await Attendance.find({ user: uid, date: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('checkIn checkOut workingHours').lean();
-    const workingHours = attendances.reduce((acc, curr) => {
-      let liveHours = 0;
-      if (curr.checkIn && !curr.checkOut) {
-        liveHours = (Date.now() - new Date(curr.checkIn).getTime()) / (1000 * 60 * 60);
-      }
-      return acc + (curr.workingHours || 0) + liveHours;
-    }, 0);
-    const expectedHours = 9 * Math.max(attendances.length, 1);
-    const workingPercentage = Math.min(Math.round((workingHours / expectedHours) * 100), 100);
-
-    if (u.role === 'doctor') {
-      const docRegex = new RegExp(u.name.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&'), 'i');
-      const [totalAppointments, completedAppointments, cancelledAppointments] = await Promise.all([
-        Appointment.countDocuments({ doctorName: docRegex, appointmentDate: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }),
-        Appointment.countDocuments({ doctorName: docRegex, appointmentDate: { $gte: startOfDay, $lte: endOfDay }, status: 'completed', isDeleted: false }),
-        Appointment.countDocuments({ doctorName: docRegex, appointmentDate: { $gte: startOfDay, $lte: endOfDay }, status: 'cancelled', isDeleted: false })
-      ]);
-      return {
-        user: u,
-        todayVerifications: 0,
-        monthVerifications: 0,
-        pendingTasks: 0,
-        todayTarget: 0,
-        todayCnp: 0,
-        todayCallAgain: 0,
-        todayInterested: 0,
-        todayNotInterested: 0,
-        todayClosedLost: 0,
-        leadsAdded: 0,
-        verifiedCount: 0,
-        onHoldCount: 0,
-        readyToShipmentCount: 0,
-        deliveredCount: 0,
-        rtoCount: 0,
-        totalAppointments,
-        completedAppointments,
-        cancelledAppointments,
-        workingHours,
-        workingPercentage
-      };
-    }
-    
-    // For delivered orders, we need lead IDs assigned to this staff
-    const staffLeads = await Lead.find({ assignedTo: uid, isDeleted: { $ne: true } }).distinct('_id');
-    // For verification metrics on sales, we only want leads added in the current period
-    const staffLeadsPeriod = await Lead.find({ 
-      assignedTo: uid, 
-      ...(isAllTime ? {} : { createdAt: { $gte: startOfDay, $lte: endOfDay } }),
-      isDeleted: { $ne: true } 
-    }).distinct('_id');
-
-    const [
-      todayVerifications, 
-      monthVerifications, 
-      pendingTasks, 
-      targetDoc,
-      todayCnp, 
-      todayCallAgain, 
-      todayInterested, 
-      todayNotInterested,
-      todayClosedLost,
-      leadsAdded,
-      verifiedCount,
-      onHoldCount,
-      readyToShipmentCount,
-      deliveredCount,
-      rtoCount,
-      monthDispatchedCount,
-      monthDeliveredCount,
-      monthRtoCount,
-      assignedVerifications
-    ] = await Promise.all([
-      Verification.countDocuments({ assignedTo: uid, ...(isAllTime ? {} : { createdAt: { $gte: startOfDay, $lte: endOfDay } }) }),
-      Verification.countDocuments({ assignedTo: uid, ...(isAllTime ? {} : { createdAt: { $gte: monthStart, $lte: monthEnd } }) }),
-      Task.countDocuments({ assignedTo: uid, status: 'pending', isDeleted: false }),
-      StaffTarget.find({ user: uid, date: { $gte: fromDate || dateStr, $lte: toDate || dateStr } }).lean(),
-      Cnp.countDocuments({ assignedTo: uid, ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }),
-      CallAgain.countDocuments({ assignedTo: uid, ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }),
-      Task.countDocuments({ assignedTo: uid, status: 'interested', isDeleted: false, ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }),
-      Task.countDocuments({ assignedTo: uid, status: 'cancel_call', isDeleted: false, ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }),
-      Lead.countDocuments({ assignedTo: uid, status: 'closed_lost', ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }),
-      Lead.countDocuments({ assignedTo: uid, ...(isAllTime ? {} : { createdAt: { $gte: startOfDay, $lte: endOfDay } }) }),
-      // VR: verifications this person completed today (they are set as assignedTo when they verify)
-      Verification.countDocuments({ 
-        assignedTo: uid,
-        status: { $in: ['verified', 'rejected'] },
-        ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
-      }),
-      Verification.countDocuments({ 
-        assignedTo: uid,
-        status: 'on_hold',
-        ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
-      }),
-      // DR denominator: total orders (Shiprocket + Shipmaxx) for this person's leads in the period (dispatched)
-      Promise.all([
-        Order.countDocuments({ 
-          lead_id: { $in: staffLeads },
-          status: { $not: /^(new|pending|cancelled)$/i },
-          ...(isAllTime ? {} : { createdAt: { $gte: startOfDay, $lte: endOfDay } })
-        }),
-        ShipmaxxOrder.countDocuments({
-          $or: [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }],
-          status: { $not: /^(new|pending|cancelled)$/i },
-          ...(isAllTime ? {} : { createdAt: { $gte: startOfDay, $lte: endOfDay } })
-        })
-      ]).then(([a, b]) => a + b),
-      // Daily actuals: how many were delivered TODAY
-      Promise.all([
-        Order.countDocuments({ 
-          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
-          status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-          ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
-        }),
-        ShipmaxxOrder.countDocuments({
-          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
-          status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-          ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
-        })
-      ]).then(([a, b]) => a + b),
-      // Daily actuals: how many were RTO TODAY
-      Promise.all([
-        Order.countDocuments({
-          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
-          status: { $regex: /^rto/i },
-          ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
-        }),
-        ShipmaxxOrder.countDocuments({
-          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
-          status: { $regex: /^rto/i },
-          ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } })
-        })
-      ]).then(([a, b]) => a + b),
-      // Monthly cohort for DR/RTO always
-      Promise.all([
-        Order.countDocuments({ 
-          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
-          status: { $not: /^(new|pending|cancelled)$/i },
-          createdAt: { $gte: monthStart, $lte: monthEnd }
-        }),
-        ShipmaxxOrder.countDocuments({
-          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
-          status: { $not: /^(new|pending|cancelled)$/i },
-          createdAt: { $gte: monthStart, $lte: monthEnd }
-        })
-      ]).then(([a, b]) => a + b),
-      Promise.all([
-        Order.countDocuments({ 
-          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
-          status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-          createdAt: { $gte: monthStart, $lte: monthEnd }
-        }),
-        ShipmaxxOrder.countDocuments({
-          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
-          status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-          createdAt: { $gte: monthStart, $lte: monthEnd }
-        })
-      ]).then(([a, b]) => a + b),
-      Promise.all([
-        Order.countDocuments({
-          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
-          status: { $regex: /^rto/i },
-          createdAt: { $gte: monthStart, $lte: monthEnd }
-        }),
-        ShipmaxxOrder.countDocuments({
-          $or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }],
-          status: { $regex: /^rto/i },
-          createdAt: { $gte: monthStart, $lte: monthEnd }
-        })
-      ]).then(([a, b]) => a + b),
-      // For Support: total verifications ever assigned to them (their queue)
-      Verification.countDocuments({ assignedTo: uid, isDeleted: { $ne: true } })
-    ]);
-    // console.log(`[getAllStaffStats] Staff: ${u.name}, Ready: ${readyToShipmentCount}, Delivered: ${deliveredCount}`);
-    return {
+  
+  const statsMap = {};
+  for (const u of allUsers) {
+    statsMap[String(u._id)] = {
       user: u,
-      todayVerifications,
-      monthVerifications,
-      pendingTasks,
-      todayTarget: Array.isArray(targetDoc) ? targetDoc.reduce((sum, t) => sum + (t.target || 0), 0) : 0,
-      todayCnp,
-      todayCallAgain,
-      todayInterested,
-      todayNotInterested,
-      todayClosedLost,
-      leadsAdded,
-      verifiedCount,
-      onHoldCount,
-      readyToShipmentCount,
-      deliveredCount,
-      rtoCount,
-      monthDispatchedCount,
-      monthDeliveredCount,
-      monthRtoCount,
-      assignedVerifications,
-      workingHours,
-      workingPercentage
+      todayVerifications: 0, monthVerifications: 0, pendingTasks: 0, todayTarget: 0,
+      todayCnp: 0, todayCallAgain: 0, todayInterested: 0, todayNotInterested: 0, todayClosedLost: 0,
+      leadsAdded: 0, verifiedCount: 0, onHoldCount: 0, readyToShipmentCount: 0, deliveredCount: 0,
+      rtoCount: 0, monthDispatchedCount: 0, monthDeliveredCount: 0, monthRtoCount: 0,
+      assignedVerifications: 0, workingHours: 0, workingPercentage: 0,
+      totalAppointments: 0, completedAppointments: 0, cancelledAppointments: 0
     };
-  }));
+  }
 
-  return stats;
+  // 1. Fetch Mapping Data
+  const allLeadsMap = new Map();
+  const allLeads = await Lead.find({ isDeleted: { $ne: true } }).select('_id assignedTo').lean();
+  for (const l of allLeads) {
+    if (l.assignedTo) allLeadsMap.set(String(l._id), String(l.assignedTo));
+  }
+
+  // 2. Fetch Bulk Data in parallel
+  const [
+    allAttendances, allAppointments, allTargets, allVerifications, allTasks, 
+    allCnps, allCallAgains, allLeadsData, allOrdersSR, allOrdersSM
+  ] = await Promise.all([
+    Attendance.find({ date: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('user checkIn checkOut workingHours').lean(),
+    Appointment.find({ appointmentDate: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('doctorName status').lean(),
+    StaffTarget.find({ date: { $gte: fromDate || dateStr, $lte: toDate || dateStr } }).lean(),
+    Verification.find({ isDeleted: { $ne: true } }).select('assignedTo status createdAt updatedAt').lean(),
+    Task.find({ isDeleted: false, $or: [{ status: 'pending' }, { status: { $in: ['interested', 'cancel_call'] } }] }).select('assignedTo status updatedAt').lean(),
+    Cnp.find({ ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }).select('assignedTo').lean(),
+    CallAgain.find({ ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }).select('assignedTo').lean(),
+    Lead.find({ ...(isAllTime ? {} : { $or: [{ createdAt: { $gte: startOfDay, $lte: endOfDay } }, { updatedAt: { $gte: startOfDay, $lte: endOfDay } }] }) }).select('assignedTo status createdAt updatedAt').lean(),
+    Order.find({ status: { $not: /^(new|pending|cancelled)$/i } }).select('lead_id created_by status createdAt updatedAt').lean(),
+    ShipmaxxOrder.find({ status: { $not: /^(new|pending|cancelled)$/i } }).select('lead_id created_by status createdAt updatedAt').lean()
+  ]);
+
+  // Helper to check date range
+  const isToday = (date) => isAllTime || (new Date(date) >= startOfDay && new Date(date) <= endOfDay);
+  const isMonth = (date) => new Date(date) >= monthStart && new Date(date) <= monthEnd;
+
+  // Process Attendances
+  for (const a of allAttendances) {
+    const uid = String(a.user);
+    if (statsMap[uid]) {
+      let liveHours = 0;
+      if (a.checkIn && !a.checkOut) liveHours = (Date.now() - new Date(a.checkIn).getTime()) / (1000 * 60 * 60);
+      statsMap[uid].workingHours += (a.workingHours || 0) + liveHours;
+    }
+  }
+
+  // Finalize attendance workingPercentage and doctor appointments
+  for (const uid in statsMap) {
+    const expectedHours = 9; // Max 1 attendance per day per user assumed in loop
+    statsMap[uid].workingPercentage = Math.min(Math.round((statsMap[uid].workingHours / expectedHours) * 100), 100);
+    
+    if (statsMap[uid].user.role === 'doctor') {
+      const docRegex = new RegExp(statsMap[uid].user.name.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&'), 'i');
+      for (const app of allAppointments) {
+        if (docRegex.test(app.doctorName)) {
+          statsMap[uid].totalAppointments++;
+          if (app.status === 'completed') statsMap[uid].completedAppointments++;
+          if (app.status === 'cancelled') statsMap[uid].cancelledAppointments++;
+        }
+      }
+    }
+  }
+
+  // Process Targets
+  for (const t of allTargets) {
+    const uid = String(t.user);
+    if (statsMap[uid]) statsMap[uid].todayTarget += (t.target || 0);
+  }
+
+  // Process Verifications
+  for (const v of allVerifications) {
+    const uid = String(v.assignedTo);
+    if (statsMap[uid] && statsMap[uid].user.role !== 'doctor') {
+      statsMap[uid].assignedVerifications++;
+      if (isToday(v.createdAt)) statsMap[uid].todayVerifications++;
+      if (isMonth(v.createdAt)) statsMap[uid].monthVerifications++;
+      if (isToday(v.updatedAt)) {
+        if (v.status === 'verified' || v.status === 'rejected') statsMap[uid].verifiedCount++;
+        if (v.status === 'on_hold') statsMap[uid].onHoldCount++;
+      }
+    }
+  }
+
+  // Process Tasks
+  for (const t of allTasks) {
+    const uid = String(t.assignedTo);
+    if (statsMap[uid] && statsMap[uid].user.role !== 'doctor') {
+      if (t.status === 'pending') statsMap[uid].pendingTasks++;
+      if (isToday(t.updatedAt)) {
+        if (t.status === 'interested') statsMap[uid].todayInterested++;
+        if (t.status === 'cancel_call') statsMap[uid].todayNotInterested++;
+      }
+    }
+  }
+
+  // Process Cnp & CallAgain
+  for (const c of allCnps) {
+    const uid = String(c.assignedTo);
+    if (statsMap[uid]) statsMap[uid].todayCnp++;
+  }
+  for (const c of allCallAgains) {
+    const uid = String(c.assignedTo);
+    if (statsMap[uid]) statsMap[uid].todayCallAgain++;
+  }
+
+  // Process Leads (added & closed_lost today)
+  for (const l of allLeadsData) {
+    const uid = String(l.assignedTo);
+    if (statsMap[uid] && statsMap[uid].user.role !== 'doctor') {
+      if (isToday(l.createdAt)) statsMap[uid].leadsAdded++;
+      if (l.status === 'closed_lost' && isToday(l.updatedAt)) statsMap[uid].todayClosedLost++;
+    }
+  }
+
+  // Process Orders (SR and SM)
+  const processOrder = (o) => {
+    let uid = o.lead_id ? allLeadsMap.get(String(o.lead_id)) : null;
+    
+    // Check if we should fallback to created_by for sales
+    if (!uid && o.created_by) {
+      const createdByUid = String(o.created_by);
+      if (statsMap[createdByUid] && statsMap[createdByUid].user.role === 'sales') {
+        uid = createdByUid;
+      }
+    } else if (uid && statsMap[uid] && statsMap[uid].user.role === 'sales' && o.created_by) {
+      // In old logic: "$or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }]"
+      // So if it has lead_id, it counts. If it doesn't, it counts if created_by. We did that above.
+    }
+
+    if (uid && statsMap[uid] && statsMap[uid].user.role !== 'doctor') {
+      // DR denominator (dispatched)
+      if (isToday(o.createdAt)) statsMap[uid].readyToShipmentCount++; // This is what the old code did! (Order.countDocuments { createdAt: today })
+      if (isMonth(o.createdAt)) statsMap[uid].monthDispatchedCount++;
+      
+      // Deliveries
+      if (['DELIVERED', 'Delivered', 'delivered'].includes(o.status)) {
+        if (isToday(o.updatedAt)) statsMap[uid].deliveredCount++;
+        if (isMonth(o.createdAt)) statsMap[uid].monthDeliveredCount++;
+      }
+      
+      // RTOs
+      if (/^rto/i.test(o.status)) {
+        if (isToday(o.updatedAt)) statsMap[uid].rtoCount++;
+        if (isMonth(o.createdAt)) statsMap[uid].monthRtoCount++;
+      }
+    }
+  };
+
+  for (const o of allOrdersSR) processOrder(o);
+  for (const o of allOrdersSM) processOrder(o);
+
+  return Object.values(statsMap);
 };
+
 
 export const getDashboardStats = async (userRole, userId, targetDate, from, to, userDepartments = []) => {
   // For countDocuments - plugin auto-adds isDeleted:false
@@ -865,166 +829,15 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
   };
 };
 
-export const getStaffCommission = async (userId, month, year) => {
+export const getAllStaffCommissions = async (month, year) => {
   const User = (await import('../user/user.model.js')).default;
   const Attendance = (await import('../attendance/attendance.model.js')).default;
   const CommissionOverride = (await import('../commission/commissionOverride.model.js')).default;
+  const ReorderCommission = (await import('../commission/reorderCommission.model.js')).default;
+  const Lead = (await import('../lead/lead.model.js')).default;
+  const { Order } = await import('../shiprocket/models/order.model.js');
+  const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
 
-  const user = await User.findById(userId).lean();
-  if (!user) return null;
-
-  const IST_OFFSET = 5.5 * 60 * 60 * 1000;
-  const monthStart = new Date(Date.UTC(year, month, 1) - IST_OFFSET);
-  const monthEnd = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
-
-  const [attendanceRecords, staffLeads, override, reorderComms] = await Promise.all([
-    Attendance.find({ user: userId, date: { $gte: monthStart, $lte: monthEnd }, isDeleted: false }).lean(),
-    Lead.find({ assignedTo: userId, isDeleted: { $ne: true } }).distinct('_id'),
-    CommissionOverride.findOne({ user: userId, month, year }).lean(),
-    ReorderCommission.find({ staff_id: userId, month, year }).lean(),
-  ]);
-
-  const attendance = { present: 0, absent: 0, half_day: 0, late: 0 };
-  attendanceRecords.forEach(r => { if (attendance[r.status] !== undefined) attendance[r.status]++; });
-
-  const workingDays = attendance.present + attendance.late + attendance.half_day;
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-
-  // Joining date aware base pay calculation:
-  // Agar staff is month mein join kiya, toh sirf joining date ke baad ke billable days count karein
-  // joiningDate na ho toh createdAt use karein fallback ke roop mein
-  const joiningDate = user.joiningDate ? new Date(user.joiningDate) : new Date(user.createdAt);
-  const joiningYear = joiningDate.getFullYear();
-  const joiningMonth = joiningDate.getMonth();
-  const joiningDay = joiningDate.getDate();
-
-  if (joiningYear > year || (joiningYear === year && joiningMonth > month)) {
-    // Staff has not joined yet in this month
-    return null;
-  }
-
-  let billableDays;
-  if (joiningYear === year && joiningMonth === month) {
-    // Staff is month mein join kiya — joining day se month end tak ke din
-    billableDays = daysInMonth - joiningDay + 1;
-  } else {
-    // Staff pehle join kar chuka hai — puri month billable hai
-    billableDays = daysInMonth;
-  }
-
-  const basePay = override?.manualBasePay ?? Math.round((user.baseSalary || 0) * (workingDays / Math.max(billableDays, 1)));
-
-  let leadOrCreated;
-  if (user.role === 'sales') {
-    leadOrCreated = [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: userId }];
-  } else if (user.role === 'support') {
-    // Support gets credit for all 2nd-kit (or higher) orders
-    const OrderModel = (await import('../shiprocket/models/order.model.js')).Order;
-    const ShipmaxxOrderModel = (await import('../shipmaxx/models/shipmaxxOrder.model.js')).ShipmaxxOrder;
-
-    const allOrders = await OrderModel.find({ source_order_id: null }).select('_id lead_id createdAt').sort({ createdAt: 1 }).lean();
-    const allSmOrders = await ShipmaxxOrderModel.find({ source_order_id: null }).select('_id lead_id createdAt').sort({ createdAt: 1 }).lean();
-    const combinedOrders = [...allOrders, ...allSmOrders].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-
-    const LeadModel = (await import('../lead/lead.model.js')).default;
-    const oldLeads = await LeadModel.find({
-      $or: [
-        { status: 'old' },
-        { pending_reorder_source: { $exists: true, $ne: null } }
-      ],
-      isDeleted: { $ne: true }
-    }).distinct('_id');
-    const oldLeadsSet = new Set(oldLeads.map(id => String(id)));
-
-    const leadOrderCount = {};
-    const secondKitOrderIds = [];
-    for (const oc of combinedOrders) {
-      if (!oc.lead_id) continue;
-      const lId = String(oc.lead_id);
-      if (!leadOrderCount[lId]) leadOrderCount[lId] = 0;
-      leadOrderCount[lId]++;
-      if (leadOrderCount[lId] >= 2 || (leadOrderCount[lId] === 1 && oldLeadsSet.has(lId))) {
-        secondKitOrderIds.push(oc._id);
-      }
-    }
-    
-    // In case there are also specific orders verified by the support user
-    leadOrCreated = [{ _id: { $in: secondKitOrderIds } }, { verified_by: userId }];
-  } else {
-    leadOrCreated = [{ lead_id: { $in: staffLeads } }];
-  }
-
-  const deliveryQuerySR = {
-    source_order_id: null,
-    status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-    $and: [
-      { $or: leadOrCreated },
-      { $or: [
-          { delivered_at: { $gte: monthStart, $lte: monthEnd } },
-          { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
-          { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
-        ]
-      }
-    ]
-  };
-
-  const deliveryQuerySM = {
-    source_order_id: null,
-    status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-    $and: [
-      { $or: leadOrCreated },
-      { $or: [
-          { delivered_at: { $gte: monthStart, $lte: monthEnd } },
-          { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
-          { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
-        ]
-      }
-    ]
-  };
-
-  const [deliveredCountSR, deliveredCountSM] = await Promise.all([
-    Order.countDocuments(deliveryQuerySR),
-    ShipmaxxOrder.countDocuments(deliveryQuerySM)
-  ]);
-  const deliveredCount = deliveredCountSR + deliveredCountSM;
-
-  const [revenueResultSR, revenueResultSM] = await Promise.all([
-    Order.aggregate([
-      { $match: deliveryQuerySR },
-      { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } },
-    ]),
-    ShipmaxxOrder.aggregate([
-      { $match: deliveryQuerySM },
-      { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } },
-    ])
-  ]);
-
-  const totalRevenue = (revenueResultSR[0]?.total || 0) + (revenueResultSM[0]?.total || 0);
-  const reorderTotal = reorderComms.reduce((acc, c) => acc + (c.commission_amount || 0), 0);
-  const revenueCommission = user.role === 'support' 
-    ? deliveredCount * 50 
-    : Math.round(totalRevenue * ((user.commissionRate || 5) / 100));
-  
-  const totalCommission = override?.manualCommission ?? (revenueCommission + reorderTotal);
-  const totalPay = basePay + totalCommission;
-
-  return { 
-    user, 
-    attendance, 
-    totalDeliveries: deliveredCount, 
-    totalRevenue, 
-    revenueCommission,
-    commissionRate: user.commissionRate || 5,
-    reorderCommission: reorderTotal,
-    totalCommission, 
-    basePay, 
-    totalPay,
-    isManualCommission: override?.manualCommission != null
-  };
-};
-
-export const getAllStaffCommissions = async (month, year) => {
-  const User = (await import('../user/user.model.js')).default;
   const allUsers = await User.find({ role: { $in: ['sales', 'manager', 'staff', 'support', 'logistics'] }, isDeleted: false })
     .select('_id name role baseSalary commissionRate joiningDate createdAt').lean();
 
@@ -1032,60 +845,143 @@ export const getAllStaffCommissions = async (month, year) => {
   const monthStart = new Date(Date.UTC(year, month, 1) - IST_OFFSET);
   const monthEnd = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
 
-  const staff = await Promise.all(allUsers.map(u => getStaffCommission(u._id, month, year)));
-  const validStaff = staff.filter(Boolean);
+  const statsMap = {};
+  for (const u of allUsers) {
+    // Check joining date constraint
+    const joiningDate = u.joiningDate ? new Date(u.joiningDate) : new Date(u.createdAt);
+    if (joiningDate.getFullYear() > year || (joiningDate.getFullYear() === year && joiningDate.getMonth() > month)) {
+      continue;
+    }
+    
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    let billableDays = daysInMonth;
+    if (joiningDate.getFullYear() === year && joiningDate.getMonth() === month) {
+      billableDays = daysInMonth - joiningDate.getDate() + 1;
+    }
 
-  const allDeliveryQuerySR = {
-    source_order_id: null,
-    status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-    $or: [
-      { delivered_at: { $gte: monthStart, $lte: monthEnd } },
-      { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
-      { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
-    ],
+    statsMap[String(u._id)] = {
+      user: u,
+      attendance: { present: 0, absent: 0, half_day: 0, late: 0 },
+      totalDeliveries: 0,
+      totalRevenue: 0,
+      revenueCommission: 0,
+      commissionRate: u.commissionRate || 5,
+      reorderCommission: 0,
+      totalCommission: 0,
+      basePay: 0,
+      totalPay: 0,
+      isManualCommission: false,
+      workingDays: 0,
+      billableDays: Math.max(billableDays, 1),
+      override: null
+    };
+  }
+
+  const allLeadsMap = new Map();
+  const allLeads = await Lead.find({ isDeleted: { $ne: true } }).select('_id assignedTo').lean();
+  for (const l of allLeads) {
+    if (l.assignedTo) allLeadsMap.set(String(l._id), String(l.assignedTo));
+  }
+
+  const [allAttendances, allOverrides, allReorders, allOrdersSR, allOrdersSM] = await Promise.all([
+    Attendance.find({ date: { $gte: monthStart, $lte: monthEnd }, isDeleted: false }).select('user status').lean(),
+    CommissionOverride.find({ month, year }).lean(),
+    ReorderCommission.find({ month, year }).lean(),
+    Order.find({
+      status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+      $or: [
+        { delivered_at: { $gte: monthStart, $lte: monthEnd } },
+        { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
+        { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
+      ]
+    }).select('lead_id created_by verified_by source_order_id sub_total total').lean(),
+    ShipmaxxOrder.find({
+      status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+      $or: [
+        { delivered_at: { $gte: monthStart, $lte: monthEnd } },
+        { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
+        { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
+      ]
+    }).select('lead_id created_by verified_by source_order_id sub_total total').lean()
+  ]);
+
+  for (const a of allAttendances) {
+    const uid = String(a.user);
+    if (statsMap[uid]) {
+      if (statsMap[uid].attendance[a.status] !== undefined) statsMap[uid].attendance[a.status]++;
+    }
+  }
+
+  for (const o of allOverrides) {
+    const uid = String(o.user);
+    if (statsMap[uid]) statsMap[uid].override = o;
+  }
+
+  for (const r of allReorders) {
+    const uid = String(r.staff_id);
+    if (statsMap[uid]) statsMap[uid].reorderCommission += (r.commission_amount || 0);
+  }
+
+  const SUB_TOTAL_AMOUNT = (o) => Number(o.sub_total) || Number(o.total) || 0;
+
+  const processOrder = (o) => {
+    let uid = null;
+    
+    if (o.source_order_id) {
+      uid = o.verified_by ? String(o.verified_by) : null;
+    } else {
+      uid = o.lead_id ? allLeadsMap.get(String(o.lead_id)) : null;
+      if (!uid && o.created_by) uid = String(o.created_by);
+    }
+    
+    if (uid && statsMap[uid]) {
+      statsMap[uid].totalDeliveries++;
+      statsMap[uid].totalRevenue += SUB_TOTAL_AMOUNT(o);
+    }
   };
 
-  const allDeliveryQuerySM = {
-    source_order_id: null,
-    status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-    $or: [
-      { delivered_at: { $gte: monthStart, $lte: monthEnd } },
-      { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
-      { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
-    ],
-  };
+  for (const o of allOrdersSR) processOrder(o);
+  for (const o of allOrdersSM) processOrder(o);
 
-  const [totalDeliveriesSR, totalDeliveriesSM] = await Promise.all([
-    Order.countDocuments(allDeliveryQuerySR),
-    ShipmaxxOrder.countDocuments(allDeliveryQuerySM)
-  ]);
-  const totalDeliveries = totalDeliveriesSR + totalDeliveriesSM;
+  let grandTotalDeliveries = allOrdersSR.length + allOrdersSM.length;
+  let grandTotalRevenue = 0;
+  for (const o of allOrdersSR) grandTotalRevenue += SUB_TOTAL_AMOUNT(o);
+  for (const o of allOrdersSM) grandTotalRevenue += SUB_TOTAL_AMOUNT(o);
 
-  const [totalRevenueResultSR, totalRevenueResultSM] = await Promise.all([
-    Order.aggregate([
-      { $match: allDeliveryQuerySR },
-      { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } },
-    ]),
-    ShipmaxxOrder.aggregate([
-      { $match: allDeliveryQuerySM },
-      { $group: { _id: null, total: { $sum: SUB_TOTAL_AMOUNT } } },
-    ])
-  ]);
+  let staffDeliveriesSum = 0;
+  let staffRevenueSum = 0;
 
-  const grandTotalRevenue = (totalRevenueResultSR[0]?.total || 0) + (totalRevenueResultSM[0]?.total || 0);
-  const staffDeliveriesSum = validStaff.reduce((s, x) => s + (x.totalDeliveries || 0), 0);
-  const staffRevenueSum = validStaff.reduce((s, x) => s + (x.totalRevenue || 0), 0);
+  const validStaff = [];
+
+  for (const uid in statsMap) {
+    const s = statsMap[uid];
+    s.workingDays = s.attendance.present + s.attendance.late + s.attendance.half_day;
+    s.basePay = s.override?.manualBasePay ?? Math.round((s.user.baseSalary || 0) * (s.workingDays / s.billableDays));
+    
+    s.revenueCommission = s.user.role === 'support'
+      ? s.totalDeliveries * 50
+      : Math.round(s.totalRevenue * ((s.commissionRate || 5) / 100));
+      
+    s.totalCommission = s.override?.manualCommission ?? (s.revenueCommission + s.reorderCommission);
+    s.totalPay = s.basePay + s.totalCommission;
+    s.isManualCommission = s.override?.manualCommission != null;
+
+    staffDeliveriesSum += s.totalDeliveries;
+    staffRevenueSum += s.totalRevenue;
+    validStaff.push(s);
+  }
 
   return {
     staff: validStaff,
-    grandTotalDeliveries: totalDeliveries, // Show company-wide total
-    grandTotalRevenue, // Show company-wide total
+    grandTotalDeliveries,
+    grandTotalRevenue,
     grandTotalCommission: validStaff.reduce((s, x) => s + (x.totalCommission || 0), 0),
     grandTotalPay: validStaff.reduce((s, x) => s + (x.totalPay || 0), 0),
-    unassignedDeliveries: Math.max(0, totalDeliveries - staffDeliveriesSum),
+    unassignedDeliveries: Math.max(0, grandTotalDeliveries - staffDeliveriesSum),
     unassignedRevenue: Math.max(0, grandTotalRevenue - staffRevenueSum),
   };
 };
+
 
 export const saveCommissionOverride = async ({ userId, month, year, manualCommission, manualBasePay }) => {
   const CommissionOverride = (await import('../commission/commissionOverride.model.js')).default;

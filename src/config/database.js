@@ -6,7 +6,9 @@ const connectDB = async () => {
   try {
     const conn = await mongoose.connect(config.mongoose.url, config.mongoose.options);
     console.log(`MongoDB Connected: ${conn.connection.host}`);
-    await conn.connection.collection('users').dropIndex('email_1').catch(() => {});
+    if (config.env === 'development') {
+      await conn.connection.collection('users').dropIndex('email_1').catch(() => {});
+    }
   } catch (error) {
     console.error(`Error connecting to MongoDB: ${error.message}`);
     process.exit(1);

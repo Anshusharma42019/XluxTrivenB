@@ -747,6 +747,7 @@ export const getStatusOrders = catchAsync(async (req, res) => {
 
   const orders = await Order.find(match)
     .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
+    .populate('verified_by', 'name role')
     .populate('comments.createdBy', 'name role')
     .sort({ status_updated_at: -1, delivered_at: -1, createdAt: -1, _id: -1 })
     .limit(Math.min(Number(limit) || 50, 500)).lean();
@@ -784,6 +785,11 @@ export const getStatusOrders = catchAsync(async (req, res) => {
     Object.keys(pinCount).forEach(p => { if (pinCount[p] > 1) delete byPin[p]; });
 
     orders.forEach(o => {
+      if (o.source_order_id && o.verified_by) {
+        o.staff_name = o.verified_by.name || '';
+        o.staff_role = o.verified_by.role || '';
+        return;
+      }
       const staff = o.lead_id?.assignedTo;
       if (staff) {
         o.staff_name = staff.name || '';
@@ -807,8 +813,13 @@ export const getStatusOrders = catchAsync(async (req, res) => {
     });
   } else {
     orders.forEach(o => {
-      o.staff_name = o.lead_id?.assignedTo?.name || '';
-      o.staff_role = o.lead_id?.assignedTo?.role || '';
+      if (o.source_order_id && o.verified_by) {
+        o.staff_name = o.verified_by.name || '';
+        o.staff_role = o.verified_by.role || '';
+      } else {
+        o.staff_name = o.lead_id?.assignedTo?.name || '';
+        o.staff_role = o.lead_id?.assignedTo?.role || '';
+      }
     });
   }
 
@@ -1192,6 +1203,7 @@ export const getOrders = catchAsync(async (req, res) => {
   const [orders, total] = await Promise.all([
     Order.find(match)
       .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
+      .populate('verified_by', 'name role')
       .populate('comments.createdBy', 'name role')
       .sort({ createdAt: -1, _id: -1 })
       .skip((pg - 1) * lim)
@@ -1201,8 +1213,13 @@ export const getOrders = catchAsync(async (req, res) => {
   ]);
 
   orders.forEach(o => {
-    o.staff_name = o.lead_id?.assignedTo?.name || '';
-    o.staff_role = o.lead_id?.assignedTo?.role || '';
+    if (o.source_order_id && o.verified_by) {
+      o.staff_name = o.verified_by.name || '';
+      o.staff_role = o.verified_by.role || '';
+    } else {
+      o.staff_name = o.lead_id?.assignedTo?.name || '';
+      o.staff_role = o.lead_id?.assignedTo?.role || '';
+    }
   });
 
   res.json(new ApiResponse(200, { data: orders, total }, 'Orders fetched successfully'));
@@ -1231,13 +1248,19 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
   const [orders, total] = await Promise.all([
     Order.find(match)
       .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
+      .populate('verified_by', 'name role')
       .sort({ delivered_at: -1, createdAt: -1, _id: -1 })
       .skip(skip).limit(Number(per_page)).lean(),
     Order.countDocuments(match),
   ]);
   orders.forEach(o => {
-    o.staff_name = o.lead_id?.assignedTo?.name || '';
-    o.staff_role = o.lead_id?.assignedTo?.role || '';
+    if (o.source_order_id && o.verified_by) {
+      o.staff_name = o.verified_by.name || '';
+      o.staff_role = o.verified_by.role || '';
+    } else {
+      o.staff_name = o.lead_id?.assignedTo?.name || '';
+      o.staff_role = o.lead_id?.assignedTo?.role || '';
+    }
   });
   res.json(new ApiResponse(200, { data: orders, total }, 'Delivered orders fetched'));
 });
