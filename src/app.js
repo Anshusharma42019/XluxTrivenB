@@ -1,7 +1,6 @@
 import express from "express";
 import helmet from "helmet";
 import cors from "cors";
-import morgan from "morgan";
 import { config } from "./config/config.js";
 import { errorConverter, errorHandler } from "./middleware/error.js";
 import ApiError from "./utils/ApiError.js";
@@ -10,15 +9,6 @@ import { webhook } from "./modules/shiprocket/shiprocket.controller.js";
 import { cacheInvalidatorMiddleware } from "./middleware/cache.js";
 
 const app = express();
-
-app.use((req, res, next) => {
-  const start = Date.now();
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    console.log(`[API] ${req.method} ${req.originalUrl} - ${res.statusCode} (${duration}ms)`);
-  });
-  next();
-});
 
 // set security HTTP headers
 app.use(helmet({ referrerPolicy: { policy: "no-referrer-when-downgrade" } }));
@@ -94,7 +84,6 @@ app.get("/api/v1/pincode/:pin", async (req, res) => {
 
 // send back a 404 error for any unknown api request
 app.use((req, res, next) => {
-  console.warn(`[404] ${req.method} ${req.originalUrl}`);
   next(new ApiError(404, "Not found"));
 });
 
