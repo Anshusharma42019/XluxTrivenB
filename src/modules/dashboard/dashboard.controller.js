@@ -3,6 +3,19 @@ import catchAsync from '../../utils/catchAsync.js';
 import ApiResponse from '../../utils/ApiResponse.js';
 import * as dashboardService from './dashboard.service.js';
 
+const cache = new Map();
+const CACHE_TTL = 30000; // 30 seconds
+
+const withCache = async (key, fetchFn) => {
+  const cached = cache.get(key);
+  if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
+    return cached.data;
+  }
+  const data = await fetchFn();
+  cache.set(key, { data, timestamp: Date.now() });
+  return data;
+};
+
 export const debugDeliveries = catchAsync(async (req, res) => {
   const month = new Date().getMonth();
   const year = new Date().getFullYear();
@@ -13,12 +26,16 @@ export const debugDeliveries = catchAsync(async (req, res) => {
 const getStats = catchAsync(async (req, res) => {
   const { date, from, to, department } = req.query;
   const userDepts = ['sales', 'support', 'logistics'].includes(req.user.role) ? req.userDepartments : (department ? [department] : []);
-  const stats = await dashboardService.getDashboardStats(req.user.role, req.user._id, date, from, to, userDepts);
+  
+  const cacheKey = `stats_${req.user.role}_${req.user._id}_${date}_${from}_${to}_${userDepts.join(',')}`;
+  const stats = await withCache(cacheKey, () => dashboardService.getDashboardStats(req.user.role, req.user._id, date, from, to, userDepts));
+  
   res.json(new ApiResponse(httpStatus.OK, stats, 'Dashboard stats fetched'));
 });
 
 const getRevenueChart = catchAsync(async (req, res) => {
-  const data = await dashboardService.getRevenueChart(req.user.role, req.user._id, req.query.period);
+  const cacheKey = `revChart_${req.user.role}_${req.user._id}_${req.query.period}`;
+  const data = await withCache(cacheKey, () => dashboardService.getRevenueChart(req.user.role, req.user._id, req.query.period));
   res.json(new ApiResponse(httpStatus.OK, data, 'Revenue chart data fetched'));
 });
 
@@ -57,19 +74,26 @@ const getStaffVerifications = catchAsync(async (req, res) => {
 const getStaffTodayLists = catchAsync(async (req, res) => {
   const { date, staffId, from, to, department } = req.query;
   const userDepts = ['sales', 'support', 'logistics'].includes(req.user.role) ? req.userDepartments : (department ? [department] : []);
-  const data = await dashboardService.getStaffTodayLists(req.user.role, req.user._id, date, staffId, from, to, userDepts);
+  
+  const cacheKey = `todayLists_${req.user.role}_${req.user._id}_${date}_${staffId}_${from}_${to}_${userDepts.join(',')}`;
+  const data = await withCache(cacheKey, () => dashboardService.getStaffTodayLists(req.user.role, req.user._id, date, staffId, from, to, userDepts));
+  
   res.json(new ApiResponse(httpStatus.OK, data, 'Staff today lists fetched'));
 });
 
 const getStaffMonthlyChart = catchAsync(async (req, res) => {
   const targetId = (req.user.role === 'admin' || req.user.role === 'manager') ? null : req.user._id;
-  const data = await dashboardService.getStaffMonthlyChart(targetId);
+  
+  const cacheKey = `monthlyChart_${targetId}`;
+  const data = await withCache(cacheKey, () => dashboardService.getStaffMonthlyChart(targetId));
+  
   res.json(new ApiResponse(httpStatus.OK, data, 'Monthly chart fetched'));
 });
 
 const getAllStaffStats = catchAsync(async (req, res) => {
   const { date, from, to } = req.query;
-  const data = await dashboardService.getAllStaffStats(date, from, to);
+  const cacheKey = `allStaffStats_${date}_${from}_${to}`;
+  const data = await withCache(cacheKey, () => dashboardService.getAllStaffStats(date, from, to));
   res.json(new ApiResponse(httpStatus.OK, data, 'All staff stats fetched'));
 });
 

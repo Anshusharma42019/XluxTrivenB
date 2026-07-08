@@ -457,116 +457,36 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
     if (userRole === 'sales') matchFilterBase.assignedTo = new mongoose.Types.ObjectId(userId);
     else if (filter.department) matchFilterBase.department = filter.department;
 
-    pipeline.push({
-      $lookup: {
-        from: 'tasks',
-        let: { leadId: '$_id' },
-        pipeline: [
-          { $match: { 
-              $expr: { $eq: ['$lead', '$$leadId'] },
-              status: { $in: taskStatuses },
-              isDeleted: false,
-              ...matchFilterBase
-          }},
-          { $limit: 1 },
-          { $project: { _id: 1 } }
-        ],
-        as: 'activeTasks'
-      }
-    });
+    const [activeTaskLeads, activeCnpLeads, activeVerLeads] = await Promise.all([
+      Task.distinct('lead', { status: { $in: taskStatuses }, isDeleted: false, ...matchFilterBase }),
+      !isOnHold ? Cnp.distinct('lead', { ...matchFilterBase }) : Promise.resolve([]),
+      Verification.distinct('lead', { status: isOnHold ? 'on_hold' : { $ne: 'on_hold' } })
+    ]);
 
-    if (!isOnHold) {
-      pipeline.push({
-        $lookup: {
-          from: 'cnps',
-          let: { leadId: '$_id' },
-          pipeline: [
-            { $match: { 
-                $expr: { $eq: ['$lead', '$$leadId'] },
-                ...matchFilterBase
-            }},
-            { $limit: 1 },
-            { $project: { _id: 1 } }
-          ],
-          as: 'activeCnps'
-        }
-      });
-      pipeline.push({
-        $lookup: {
-          from: 'verifications',
-          let: { leadId: '$_id' },
-          pipeline: [
-            { $match: { 
-                $expr: { $eq: ['$lead', '$$leadId'] },
-                status: { $ne: 'on_hold' }
-            }},
-            { $limit: 1 },
-            { $project: { _id: 1 } }
-          ],
-          as: 'activeVerifications'
-        }
-      });
+    const excludeLeadIds = [...new Set([...activeTaskLeads, ...activeCnpLeads, ...activeVerLeads].map(id => String(id)))]
+      .map(id => new mongoose.Types.ObjectId(id));
       
-      pipeline.push({ 
-        $match: { 
-          activeTasks: { $size: 0 },
-          activeCnps: { $size: 0 },
-          activeVerifications: { $size: 0 }
-        } 
-      });
+    if (isOnHold) {
+       query.$or = [
+         { _id: { $nin: [...new Set(activeTaskLeads.map(id => String(id)))].map(id => new mongoose.Types.ObjectId(id)) } },
+         { _id: { $in: activeVerLeads.map(id => new mongoose.Types.ObjectId(String(id))) }, cnp: { $ne: true } }
+       ];
     } else {
-      // For on_hold: exclude activeTasks, UNLESS it has an on_hold verification and is not CNP
-      pipeline.push({
-        $lookup: {
-          from: 'verifications',
-          let: { leadId: '$_id' },
-          pipeline: [
-            { $match: { 
-                $expr: { $eq: ['$lead', '$$leadId'] },
-                status: 'on_hold'
-            }},
-            { $limit: 1 },
-            { $project: { _id: 1 } }
-          ],
-          as: 'onHoldVerifications'
-        }
-      });
-      
-      pipeline.push({
-        $match: {
-          $or: [
-            { activeTasks: { $size: 0 } },
-            { $and: [
-                { onHoldVerifications: { $not: { $size: 0 } } },
-                { cnp: { $ne: true } }
-            ]}
-          ]
-        }
-      });
+       query._id = { $nin: excludeLeadIds };
     }
+    
+    pipeline[0].$match = query;
   }
 
   pipeline.push({ $sort: sortCriteria });
 
   if (!isExport) {
-    const dataPipeline = [
-      ...pipeline,
-      { $skip: skip },
-      { $limit: limit },
-      { $project: { _id: 1 } }
-    ];
-    const countPipeline = [
-      ...pipeline,
-      { $count: 'count' }
-    ];
-
-    const [dataResult, countResult] = await Promise.all([
-      Lead.aggregate(dataPipeline),
-      Lead.aggregate(countPipeline)
+    const [paginatedDocs, total] = await Promise.all([
+      Lead.find(pipeline[0].$match).sort(sortCriteria).skip(skip).limit(limit).select('_id'),
+      Lead.countDocuments(pipeline[0].$match)
     ]);
 
-    const paginatedIds = dataResult.map(r => r._id);
-    const total = countResult[0] ? countResult[0].count : 0;
+    const paginatedIds = paginatedDocs.map(r => r._id);
 
     const leads = await Lead.find({ _id: { $in: paginatedIds } })
       .populate('assignedTo', 'name email role')
@@ -576,9 +496,8 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
     return { leads, total, page, limit, totalPages: Math.ceil(total / limit) };
   } else {
     // Export mode: just find all matching
-    pipeline.push({ $project: { _id: 1 } });
-    const result = await Lead.aggregate(pipeline);
-    const allIds = result.map(r => r._id);
+    const allDocs = await Lead.find(pipeline[0].$match).select('_id');
+    const allIds = allDocs.map(r => r._id);
     
     const leads = await Lead.find({ _id: { $in: allIds } })
       .populate('assignedTo', 'name email role')
@@ -637,6 +556,15 @@ export const updateLead = async (id, data, userRole, userId, userDepartments = [
     await CallAgain.deleteMany({ lead: leadObjId });
     await Task.updateMany(
       { lead: leadObjId, status: { $in: ['pending', 'overdue', 'cnp'] }, isDeleted: false },
+      { isDeleted: true }
+    );
+  }
+
+  // When moving to closed_lost or follow_up, clean up active tasks
+  if (data.status === 'closed_lost' || data.status === 'follow_up') {
+    const leadObjId = new mongoose.Types.ObjectId(String(id));
+    await Task.updateMany(
+      { lead: leadObjId, status: { $in: ['pending', 'overdue', 'cnp', 'verification'] }, isDeleted: false },
       { isDeleted: true }
     );
   }

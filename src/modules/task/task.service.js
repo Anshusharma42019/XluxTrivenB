@@ -10,6 +10,8 @@ import ReadyToShipment from '../readytoshipment/readytoshipment.model.js';
 import User from '../user/user.model.js';
 import { sendVerificationConfirmation } from '../interakt/interakt.service.js';
 
+let lastOverdueCheck = 0;
+
 const notifyAdmins = async (data) => {
   const admins = await User.find({ role: { $in: ['admin', 'manager'] }, isDeleted: false }, '_id');
   await Promise.all(admins.map(a => createNotification({ ...data, user: a._id }).catch(() => {})));
@@ -164,11 +166,15 @@ export const getTasks = async (filter, userRole, userId, userDepartments = []) =
     query.dueDate = { $gte: start, $lte: end };
   }
 
-  // Run overdue update in background to avoid blocking the query response
-  Task.updateMany(
-    { status: 'pending', dueDate: { $lt: new Date() }, isDeleted: false },
-    { status: 'overdue' }
-  ).catch(err => console.error('[Task] Overdue check error:', err.message));
+  // Run overdue update in background at most once per minute
+  const now = Date.now();
+  if (now - lastOverdueCheck > 60000) {
+    lastOverdueCheck = now;
+    Task.updateMany(
+      { status: 'pending', dueDate: { $lt: new Date() }, isDeleted: false },
+      { status: 'overdue' }
+    ).catch(err => console.error('[Task] Overdue check error:', err.message));
+  }
 
   const page = parseInt(filter.page) || 1;
   const limit = parseInt(filter.limit) || 20;
@@ -176,25 +182,6 @@ export const getTasks = async (filter, userRole, userId, userDepartments = []) =
 
   const pipeline = [ { $match: query } ];
 
-  if (!filter.status && !filter.lead) {
-    pipeline.push({
-      $lookup: {
-        from: 'leads',
-        localField: 'lead',
-        foreignField: '_id',
-        as: 'leadDoc'
-      }
-    });
-    // If a task has no lead, or the lead's status is not in hiddenTaskLeadStatuses, we keep it
-    pipeline.push({
-      $match: {
-        $or: [
-          { 'leadDoc': { $size: 0 } },
-          { 'leadDoc.status': { $nin: hiddenTaskLeadStatuses }, 'leadDoc.isDeleted': { $ne: true } }
-        ]
-      }
-    });
-  }
 
   pipeline.push({ $sort: { createdAt: -1 } });
   
@@ -328,29 +315,7 @@ export const getDailyTasks = async (filter, userId, userRole, userDepartments = 
     }
   }
 
-  const pipeline = [ { $match: query } ];
-  pipeline.push({
-    $lookup: {
-      from: 'leads',
-      localField: 'lead',
-      foreignField: '_id',
-      as: 'leadDoc'
-    }
-  });
-  pipeline.push({
-    $match: {
-      $or: [
-        { 'leadDoc': { $size: 0 } },
-        { 'leadDoc.status': { $nin: hiddenTaskLeadStatuses }, 'leadDoc.isDeleted': { $ne: true } }
-      ]
-    }
-  });
-  pipeline.push({ $project: { _id: 1 } });
-
-  const result = await Task.aggregate(pipeline);
-  const taskIds = result.map(r => r._id);
-
-  return Task.find({ _id: { $in: taskIds } })
+  return Task.find(query)
     .populate('lead', 'name phone status')
     .populate('assignedTo', 'name email')
     .sort({ priority: -1, dueDate: 1 });
