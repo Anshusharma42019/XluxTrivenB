@@ -34,6 +34,10 @@ export const config = {
     url: envVars.data.MONGODB_URL + (envVars.data.NODE_ENV === 'test' ? '-test' : ''),
     options: {
       tlsAllowInvalidCertificates: true,
+      maxPoolSize: 20,        // allow up to 20 concurrent DB connections
+      minPoolSize: 5,         // keep 5 connections warm
+      serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 45000,
     },
   },
   jwt: {

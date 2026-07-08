@@ -53,9 +53,9 @@ export const getStaffStats = async (userId, targetDate, from, to, userDepartment
     leadsAdded,
     verifiedCount,
     onHoldCount,
-    todayClosedLost
+    todayClosedLost,
+    todayVerifications
   ] = await Promise.all([
-    // monthVerifications = verifications created/in-queue this month (for reference)
     Verification.countDocuments({ ...filter, ...monthDateFilter }),
     Task.countDocuments({ ...filter, status: 'pending', isDeleted: false }),
     StaffTarget.findOne({ user: uid, date: dateStr }),
@@ -64,14 +64,11 @@ export const getStaffStats = async (userId, targetDate, from, to, userDepartment
     Task.countDocuments({ ...filter, status: 'interested', isDeleted: false, ...updateDateFilter }),
     Task.countDocuments({ ...filter, status: 'cancel_call', isDeleted: false, ...updateDateFilter }),
     Lead.countDocuments({ ...filter, ...dateFilter }),
-    // verifiedCount = verifications actually COMPLETED (status: verified or rejected) in the selected period
     Verification.countDocuments({ ...filter, status: { $in: ['verified', 'rejected'] }, ...updateDateFilter }),
     Verification.countDocuments({ ...filter, status: 'on_hold', ...updateDateFilter }),
     Lead.countDocuments({ ...filter, status: 'closed_lost', ...updateDateFilter }),
+    Verification.countDocuments({ ...filter, ...dateFilter }),
   ]);
-
-  // todayVerifications = verifications assigned/created today (sent to verification)
-  const todayVerifications = await Verification.countDocuments({ ...filter, ...dateFilter });
 
   return {
     todayVerifications,
@@ -685,50 +682,64 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
     totalStaff: totalStaffCount
   };
 
+  // Per-department conversion: Verification records marked 'verified' for each department in the period
+  const verifDeptFilter = (dept) => {
+    if (countFilter.department && countFilter.department['$in'] && !countFilter.department['$in'].includes(dept)) {
+      return { ...countFilter, department: '__none__', status: 'verified', isDeleted: false, ...updateDateFilter };
+    }
+    return { ...countFilter, department: dept, status: 'verified', isDeleted: false, ...updateDateFilter };
+  };
+
+  const [todayClosedLost, migraineConverted, pilesConverted] = await Promise.all([
+    Lead.countDocuments({ ...countFilter, status: 'closed_lost', ...updateDateFilter }),
+    Verification.countDocuments(verifDeptFilter('migraine')),
+    Verification.countDocuments(verifDeptFilter('piles')),
+  ]);
+
   const activityStats = {
     todayCnp,
     todayCallAgain,
     todayInterested,
     todayNotInterested,
-    todayClosedLost: await Lead.countDocuments({ ...countFilter, status: 'closed_lost', ...updateDateFilter }),
+    todayClosedLost,
   };
 
-  const staffLeads = await Lead.find(countFilter).distinct('_id');
+  // Build order match using $lookup aggregation to avoid loading all lead IDs into memory
+  const buildOrderMatch = () => isAllTime ? {} : { createdAt: { $gte: start, $lte: end } };
 
-  // New/Old Orders: count ALL orders created in the period (not just delivered)
-  const allOrderFilter = isAllTime ? {} : {
-    createdAt: { $gte: start, $lte: end }
-  };
-  const allOrderFilterSM = { ...allOrderFilter };
-  if (userRole === 'sales' || (userDepartments && userDepartments.length > 0)) {
-    allOrderFilter.lead_id = { $in: staffLeads };
-    allOrderFilterSM.$or = [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: userId }];
-  }
-
-  // Delivered stats: count orders delivered in the period
-  const deliveredFilter = {
-    status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-    ...(isAllTime ? {} : {
-      $or: [
+  const buildDeliveredMatch = () => {
+    const base = { status: { $in: ['DELIVERED', 'Delivered', 'delivered'] } };
+    if (!isAllTime) {
+      base.$or = [
         { delivered_at: { $gte: start, $lte: end } },
         { delivered_at: null, status_updated_at: { $gte: start, $lte: end } },
         { delivered_at: null, status_updated_at: null, createdAt: { $gte: start, $lte: end } },
-      ]
-    })
+      ];
+    }
+    return base;
   };
+
+  const needsLeadFilter = userRole === 'sales' || (userDepartments && userDepartments.length > 0);
+  const leadMatchStage = needsLeadFilter ? [
+    { $lookup: { from: 'leads', localField: 'lead_id', foreignField: '_id', as: '_lead' } },
+    { $match: { $or: [
+      ...(userRole === 'sales' ? [{ lead_id: null, created_by: new mongoose.Types.ObjectId(userId) }] : []),
+      { '_lead.assignedTo': new mongoose.Types.ObjectId(userId), ...(userDepartments?.length > 0 ? { '_lead.department': { $in: userDepartments } } : {}) },
+    ]}},
+  ] : [];
+
+  const allOrderFilter = buildOrderMatch();
+  const allOrderFilterSM = { ...allOrderFilter };
+  const deliveredFilter = buildDeliveredMatch();
   const deliveredFilterSM = { ...deliveredFilter };
-  if (userRole === 'sales' || (userDepartments && userDepartments.length > 0)) {
-    deliveredFilter.lead_id = { $in: staffLeads };
-    deliveredFilterSM.lead_id = { $in: staffLeads };
-  }
 
   const [orderBreakdownSR, deliveredBreakdownSR, deliveredRevenueResultSR, orderBreakdownSM, deliveredBreakdownSM, deliveredRevenueResultSM] = await Promise.all([
     Order.aggregate([
       { $match: allOrderFilter },
+      ...leadMatchStage,
       { $lookup: { from: 'leads', localField: 'lead_id', foreignField: '_id', as: 'leadDoc' } },
       { $group: { _id: { $cond: [ { $or: [ { $ifNull: ['$source_order_id', false] }, { $eq: [{ $arrayElemAt: ['$leadDoc.status', 0] }, 'old'] } ] }, 'old', 'new' ] }, count: { $sum: 1 } } }
     ]),
-    // We will compute delivered counts manually below to ensure accurate 2-kit tracking
     Order.find(deliveredFilter).select('_id lead_id createdAt status_updated_at delivered_at').lean(),
     Order.aggregate([
       { $match: deliveredFilter },
@@ -736,6 +747,7 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
     ]),
     ShipmaxxOrder.aggregate([
       { $match: allOrderFilterSM },
+      ...leadMatchStage,
       { $lookup: { from: 'leads', localField: 'lead_id', foreignField: '_id', as: 'leadDoc' } },
       { $group: { _id: { $cond: [ { $or: [ { $ifNull: ['$source_order_id', false] }, { $eq: [{ $arrayElemAt: ['$leadDoc.status', 0] }, 'old'] } ] }, 'old', 'new' ] }, count: { $sum: 1 } } }
     ]),
@@ -799,17 +811,6 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
     total: migraineLeadCount + pilesLeadCount,
   };
 
-  // Per-department conversion: Verification records marked 'verified' for each department in the period
-  const verifDeptFilter = (dept) => {
-    if (countFilter.department && countFilter.department['$in'] && !countFilter.department['$in'].includes(dept)) {
-      return { ...countFilter, department: '__none__', status: 'verified', isDeleted: false, ...updateDateFilter };
-    }
-    return { ...countFilter, department: dept, status: 'verified', isDeleted: false, ...updateDateFilter };
-  };
-  const [migraineConverted, pilesConverted] = await Promise.all([
-    Verification.countDocuments(verifDeptFilter('migraine')),
-    Verification.countDocuments(verifDeptFilter('piles')),
-  ]);
   const migraineConversionRate = migraineLeadCount > 0 ? Math.round((migraineConverted / migraineLeadCount) * 100) : 0;
   const pilesConversionRate = pilesLeadCount > 0 ? Math.round((pilesConverted / pilesLeadCount) * 100) : 0;
 

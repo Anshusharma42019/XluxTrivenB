@@ -27,7 +27,7 @@ const auth = (...requiredRoles) => catchAsync(async (req, res, next) => {
     throw new ApiError(403, 'Forbidden');
   }
 
-  req.user = { _id: decoded.sub, role: decoded.role };
+  req.user = { _id: decoded.sub, role: decoded.role, departments: decoded.departments || [] };
   next();
 });
 

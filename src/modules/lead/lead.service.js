@@ -460,7 +460,7 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
     const [activeTaskLeads, activeCnpLeads, activeVerLeads] = await Promise.all([
       Task.distinct('lead', { status: { $in: taskStatuses }, isDeleted: false, ...matchFilterBase }),
       !isOnHold ? Cnp.distinct('lead', { ...matchFilterBase }) : Promise.resolve([]),
-      Verification.distinct('lead', { status: isOnHold ? 'on_hold' : { $ne: 'on_hold' } })
+      Verification.distinct('lead', { status: isOnHold ? 'on_hold' : { $ne: 'on_hold' }, ...matchFilterBase })
     ]);
 
     const toObjectIds = (arr) => [...new Set(arr.filter(Boolean).map(id => String(id)))]
@@ -470,10 +470,13 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
     const excludeLeadIds = toObjectIds([...activeTaskLeads, ...activeCnpLeads, ...activeVerLeads]);
       
     if (isOnHold) {
-       query.$or = [
-         { _id: { $nin: toObjectIds(activeTaskLeads) } },
-         { _id: { $in: toObjectIds(activeVerLeads) }, cnp: { $ne: true } }
-       ];
+       query.$and = query.$and || [];
+       query.$and.push({
+         $or: [
+           { _id: { $nin: toObjectIds(activeTaskLeads) } },
+           { _id: { $in: toObjectIds(activeVerLeads) }, cnp: { $ne: true } }
+         ]
+       });
     } else {
        query._id = { $nin: excludeLeadIds };
     }
@@ -484,29 +487,21 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
   pipeline.push({ $sort: sortCriteria });
 
   if (!isExport) {
-    const [paginatedDocs, total] = await Promise.all([
-      Lead.find(pipeline[0].$match).sort(sortCriteria).skip(skip).limit(limit).select('_id'),
+    const [leads, total] = await Promise.all([
+      Lead.find(pipeline[0].$match)
+        .sort(sortCriteria).skip(skip).limit(limit)
+        .populate('assignedTo', 'name email role')
+        .populate('createdBy', 'name email')
+        .lean(),
       Lead.countDocuments(pipeline[0].$match)
     ]);
-
-    const paginatedIds = paginatedDocs.map(r => r._id);
-
-    const leads = await Lead.find({ _id: { $in: paginatedIds } })
-      .populate('assignedTo', 'name email role')
-      .populate('createdBy', 'name email')
-      .sort(sortCriteria);
-
     return { leads, total, page, limit, totalPages: Math.ceil(total / limit) };
   } else {
-    // Export mode: just find all matching
-    const allDocs = await Lead.find(pipeline[0].$match).select('_id');
-    const allIds = allDocs.map(r => r._id);
-    
-    const leads = await Lead.find({ _id: { $in: allIds } })
+    const leads = await Lead.find(pipeline[0].$match)
       .populate('assignedTo', 'name email role')
       .populate('createdBy', 'name email')
-      .sort(sortCriteria);
-
+      .sort(sortCriteria)
+      .lean();
     return { leads, total: leads.length, page: 1, limit: leads.length, totalPages: 1 };
   }
 };

@@ -4,7 +4,7 @@ import ApiResponse from '../../utils/ApiResponse.js';
 import * as dashboardService from './dashboard.service.js';
 
 const cache = new Map();
-const CACHE_TTL = 30000; // 30 seconds
+const CACHE_TTL = 120000; // 2 minutes — dashboard data doesn't need sub-minute freshness
 
 const withCache = async (key, fetchFn) => {
   const cached = cache.get(key);
