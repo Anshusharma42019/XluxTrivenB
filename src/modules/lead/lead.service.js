@@ -463,13 +463,16 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
       Verification.distinct('lead', { status: isOnHold ? 'on_hold' : { $ne: 'on_hold' } })
     ]);
 
-    const excludeLeadIds = [...new Set([...activeTaskLeads, ...activeCnpLeads, ...activeVerLeads].map(id => String(id)))]
+    const toObjectIds = (arr) => [...new Set(arr.filter(Boolean).map(id => String(id)))]
+      .filter(id => id !== 'null' && id !== 'undefined' && mongoose.isValidObjectId(id))
       .map(id => new mongoose.Types.ObjectId(id));
+
+    const excludeLeadIds = toObjectIds([...activeTaskLeads, ...activeCnpLeads, ...activeVerLeads]);
       
     if (isOnHold) {
        query.$or = [
-         { _id: { $nin: [...new Set(activeTaskLeads.map(id => String(id)))].map(id => new mongoose.Types.ObjectId(id)) } },
-         { _id: { $in: activeVerLeads.map(id => new mongoose.Types.ObjectId(String(id))) }, cnp: { $ne: true } }
+         { _id: { $nin: toObjectIds(activeTaskLeads) } },
+         { _id: { $in: toObjectIds(activeVerLeads) }, cnp: { $ne: true } }
        ];
     } else {
        query._id = { $nin: excludeLeadIds };
