@@ -743,8 +743,6 @@ export const getStatusOrders = catchAsync(async (req, res) => {
     // Active/in-progress statuses: NO date filter — show all current orders in that status
   }
 
-  console.log('[DEBUG] getStatusOrders match query:', JSON.stringify(match, null, 2));
-
   const orders = await Order.find(match)
     .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
     .populate('verified_by', 'name role')
