@@ -16,15 +16,18 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
     const User = (await import('../user/user.model.js')).default;
 
     const query = { status: { $nin: ['verified', 'on_hold'] }, isDeleted: { $ne: true } };
-    if (['sales', 'support', 'logistics'].includes(req.user.role)) {
+    if (req.query.department) {
+      query.department = req.query.department;
+      if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+        if (!req.userDepartments.includes(req.query.department)) query.department = "NOT_ALLOWED";
+      }
+    } else if (['sales', 'support', 'logistics'].includes(req.user.role)) {
       if (req.userDepartments && req.userDepartments.length > 0) {
         query.$or = [
           { department: { $in: req.userDepartments } },
           { department: null }
         ];
       }
-    } else if (req.query.department) {
-      query.department = req.query.department;
     }
 
     // Apply day preset filter
@@ -392,15 +395,18 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
     const Lead = (await import('../lead/lead.model.js')).default;
 
     const query = { status: 'on_hold', isDeleted: { $ne: true } };
-    if (['sales', 'support', 'logistics'].includes(req.user.role)) {
+    if (req.query.department) {
+      query.department = req.query.department;
+      if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+        if (!req.userDepartments.includes(req.query.department)) query.department = "NOT_ALLOWED";
+      }
+    } else if (['sales', 'support', 'logistics'].includes(req.user.role)) {
       if (req.userDepartments && req.userDepartments.length > 0) {
         query.$or = [
           { department: { $in: req.userDepartments } },
           { department: null }
         ];
       }
-    } else if (req.query.department) {
-      query.department = req.query.department;
     }
 
     // Get verification on-hold records
@@ -435,12 +441,15 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
       isDeleted: false,
       _id: { $nin: [...verificationLeadIds].map(id => new mongoose.Types.ObjectId(id)) },
     };
-    if (['sales', 'support', 'logistics'].includes(req.user.role)) {
+    if (req.query.department) {
+      leadQuery.department = req.query.department;
+      if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+        if (!req.userDepartments.includes(req.query.department)) leadQuery.department = "NOT_ALLOWED";
+      }
+    } else if (['sales', 'support', 'logistics'].includes(req.user.role)) {
       if (req.userDepartments && req.userDepartments.length > 0) {
         leadQuery.department = { $in: req.userDepartments };
       }
-    } else if (req.query.department) {
-      leadQuery.department = req.query.department;
     }
     // Get pipeline on-hold leads NOT in verification
     const pipelineOnHoldLeads = await Lead.find(leadQuery)

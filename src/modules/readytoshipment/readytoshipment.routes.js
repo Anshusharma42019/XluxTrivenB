@@ -11,12 +11,13 @@ const router = express.Router();
 router.get('/stats', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter, async (req, res) => {
   try {
     const taskQuery = { status: 'ready_to_shipment', isDeleted: false };
-    if (['sales', 'support', 'logistics'].includes(req.user.role)) {
-      if (req.userDepartments && req.userDepartments.length > 0) {
-        taskQuery.department = { $in: req.userDepartments };
-      }
-    } else if (req.query.department) {
+    if (req.query.department) {
       taskQuery.department = req.query.department;
+      if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+        if (!req.userDepartments.includes(req.query.department)) taskQuery.department = "NOT_ALLOWED";
+      }
+    } else if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+      taskQuery.department = { $in: req.userDepartments };
     }
     const validTaskIds = await Task.distinct('_id', taskQuery);
 
@@ -152,12 +153,13 @@ router.get('/stats', auth('admin', 'manager', 'sales', 'logistics'), departmentF
 router.get('/', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter, async (req, res) => {
   try {
     const taskQuery = { status: 'ready_to_shipment', isDeleted: false };
-    if (['sales', 'support', 'logistics'].includes(req.user.role)) {
-      if (req.userDepartments && req.userDepartments.length > 0) {
-        taskQuery.department = { $in: req.userDepartments };
-      }
-    } else if (req.query.department) {
+    if (req.query.department) {
       taskQuery.department = req.query.department;
+      if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+        if (!req.userDepartments.includes(req.query.department)) taskQuery.department = "NOT_ALLOWED";
+      }
+    } else if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+      taskQuery.department = { $in: req.userDepartments };
     }
     const validTaskIds = await Task.distinct('_id', taskQuery);
 
@@ -273,12 +275,13 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'logistics'), departmentF
     const Verification = (await import('../verification/verification.model.js')).default;
 
     const taskQuery = { status: 'ready_to_shipment', isDeleted: false };
-    if (['sales', 'support', 'logistics'].includes(req.user.role)) {
-      if (req.userDepartments && req.userDepartments.length > 0) {
-        taskQuery.department = { $in: req.userDepartments };
-      }
-    } else if (req.query.department) {
+    if (req.query.department) {
       taskQuery.department = req.query.department;
+      if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+        if (!req.userDepartments.includes(req.query.department)) taskQuery.department = "NOT_ALLOWED";
+      }
+    } else if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+      taskQuery.department = { $in: req.userDepartments };
     }
 
     const [verifiedStuck, tasks] = await Promise.all([

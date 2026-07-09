@@ -44,7 +44,7 @@ export const createAppointment = async (body, userId) => {
 };
 
 export const getAppointments = async (query) => {
-  const { page = 1, limit = 20, search, dateFrom, dateTo, status, excludeStatus, doctorName } = query;
+  const { page = 1, limit = 20, search, dateFrom, dateTo, status, excludeStatus, doctorName, department, userDepartments } = query;
   const filter = { isDeleted: false };
 
   if (status) filter.status = status;
@@ -53,6 +53,13 @@ export const getAppointments = async (query) => {
     filter.status = { $nin: excluded };
   }
   if (doctorName) filter.doctorName = new RegExp(doctorName, 'i');
+  
+  if (userDepartments && userDepartments.length > 0) {
+    filter.department = { $in: [...userDepartments, null] }; // include null for old records without department
+  }
+  
+  if (department) filter.department = department;
+
   if (dateFrom || dateTo) {
     filter.appointmentDate = {};
     if (dateFrom) filter.appointmentDate.$gte = new Date(dateFrom + 'T00:00:00.000Z');

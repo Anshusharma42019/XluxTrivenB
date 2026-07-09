@@ -8,6 +8,10 @@ const appointmentSchema = new mongoose.Schema(
     doctorName: { type: String, required: true, trim: true },
     appointmentDate: { type: Date, required: true },
     timeSlot: { type: String, required: true },
+    department: {
+      type: String,
+      enum: ['migraine', 'piles'],
+    },
     type: {
       type: String,
       enum: ['consultation', 'follow_up', 'panchakarma', 'ayurveda', 'other'],

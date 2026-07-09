@@ -31,18 +31,14 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
         query.createdAt = { $gte: new Date(now.getFullYear(), now.getMonth(), 1) };
       }
     }
-    const limitVal = parseInt(req.query.limit) || 100;
+    if (req.query.month !== undefined) {
+      const m = parseInt(req.query.month);
+      const now = new Date();
+      query.createdAt = { $gte: new Date(now.getFullYear(), m, 1), $lt: new Date(now.getFullYear(), m + 1, 1) };
+    }
+    const limitVal = parseInt(req.query.limit) || 200;
     const records = await CallAgain.find(query)
-      .populate({
-        path: 'lead',
-        select: 'name phone problem email address houseNo cityVillage postOffice landmark district state pincode source status type revenue assignedTo createdBy cnpCount cnpAt notes follow_ups next_follow_up note createdAt department',
-        options: {
-          projection: {
-            notes: { $slice: -5 },
-            follow_ups: { $slice: -5 }
-          }
-        }
-      })
+      .populate('lead', 'name phone problem email address houseNo cityVillage postOffice landmark district state pincode source status type revenue cnpCount cnpAt note createdAt department')
       .populate('assignedTo', 'name email')
       .populate('createdBy', 'name email')
       .sort({ createdAt: -1 })

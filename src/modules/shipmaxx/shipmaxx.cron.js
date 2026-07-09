@@ -11,7 +11,7 @@ const initShipmaxxCron = () => {
     try {
       // Find orders that are NOT delivered/cancelled/RTO, created in last 14 days
       const twoWeeksAgo = new Date();
-      twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+      twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 30);
 
       // 1. Fetch new shipments from ShipMaxx (Auto-sync new orders)
       try {

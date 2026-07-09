@@ -1096,10 +1096,13 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
 
   // --- Department Filtering Logic ---
   let leadQuery = { isDeleted: { $ne: true } };
-  if (['sales', 'logistics'].includes(req.user.role) && req.userDepartments && req.userDepartments.length > 0) {
-    leadQuery.department = { $in: req.userDepartments };
-  } else if (req.query.department) {
+  if (req.query.department) {
     leadQuery.department = req.query.department;
+    if (['sales', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+      if (!req.userDepartments.includes(req.query.department)) leadQuery.department = "NOT_ALLOWED";
+    }
+  } else if (['sales', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+    leadQuery.department = { $in: req.userDepartments };
   }
   let validLeadIds = null;
   if (leadQuery.department) {
@@ -1221,10 +1224,13 @@ export const getCompletedFollowUps = catchAsync(async (req, res) => {
   const { search, page = 1, per_page = 20 } = req.query;
   // --- Department Filtering Logic ---
   let leadQuery = { isDeleted: { $ne: true } };
-  if (['sales', 'logistics'].includes(req.user.role) && req.userDepartments && req.userDepartments.length > 0) {
-    leadQuery.department = { $in: req.userDepartments };
-  } else if (req.query.department) {
+  if (req.query.department) {
     leadQuery.department = req.query.department;
+    if (['sales', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+      if (!req.userDepartments.includes(req.query.department)) leadQuery.department = "NOT_ALLOWED";
+    }
+  } else if (['sales', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+    leadQuery.department = { $in: req.userDepartments };
   }
   let validLeadIds = null;
   if (leadQuery.department) {

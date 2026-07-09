@@ -11,15 +11,18 @@ const router = express.Router();
 router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, async (req, res) => {
   try {
     const query = {};
-    if (['sales', 'support', 'logistics'].includes(req.user.role)) {
+    if (req.query.department) {
+      query.department = req.query.department;
+      if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+        if (!req.userDepartments.includes(req.query.department)) query.department = "NOT_ALLOWED";
+      }
+    } else if (['sales', 'support', 'logistics'].includes(req.user.role)) {
       if (req.userDepartments && req.userDepartments.length > 0) {
         query.$or = [
           { department: { $in: req.userDepartments } },
           { department: null }
         ];
       }
-    } else if (req.query.department) {
-      query.department = req.query.department;
     }
     const { filter } = req.query;
     if (filter) {
@@ -38,19 +41,15 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
         query.createdAt = { $gte: new Date(now.getFullYear(), now.getMonth(), 1) };
       }
     }
-    const limitVal = parseInt(req.query.limit) || 100;
+    if (req.query.month !== undefined) {
+      const m = parseInt(req.query.month);
+      const now = new Date();
+      query.createdAt = { $gte: new Date(now.getFullYear(), m, 1), $lt: new Date(now.getFullYear(), m + 1, 1) };
+    }
+    const limitVal = parseInt(req.query.limit) || 200;
     const records = await Cnp.find(query)
       .populate('assignedTo', 'name email departments')
-      .populate({
-        path: 'lead',
-        select: 'name phone status problem address houseNo cityVillage postOffice landmark district state pincode notes follow_ups next_follow_up department',
-        options: {
-          projection: {
-            notes: { $slice: -5 },
-            follow_ups: { $slice: -5 }
-          }
-        }
-      })
+      .populate('lead', 'name phone status problem address houseNo cityVillage postOffice landmark district state pincode department')
       .sort({ createdAt: -1 })
       .limit(limitVal);
 

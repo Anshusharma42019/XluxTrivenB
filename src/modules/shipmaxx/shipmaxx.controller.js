@@ -169,7 +169,25 @@ export const setPassword = catchAsync(async (req, res) => {
 
 // ── Orders ────────────────────────────────────────────────────────────────────
 export const getOrder = catchAsync(async (req, res) => {
-  const data = await smx.getOrder(req.params.order_id);
+  const { order_id } = req.params;
+
+  // Try local DB first (frontend passes MongoDB _id)
+  const localOrder = await Order.findOne({
+    platform: 'shipmaxx',
+    $or: [{ _id: order_id.match(/^[a-f\d]{24}$/i) ? order_id : null }, { order_id: order_id }],
+  })
+    .populate({ path: 'lead_id', select: 'assignedTo createdBy status problem note', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'createdBy', select: 'name role' }] })
+    .populate('created_by', 'name role')
+    .populate('comments.createdBy', 'name role')
+    .lean();
+
+  if (localOrder) {
+    const followups = await Followup.find({ order_id: localOrder._id }).sort({ followup_number: 1 }).lean();
+    return res.json(new ApiResponse(200, { ...localOrder, followups }, 'Order fetched'));
+  }
+
+  // Fallback: fetch from ShipMaxx external API (only for numeric order IDs)
+  const data = await smx.getOrder(order_id);
   res.json(new ApiResponse(200, data, 'Order fetched'));
 });
 
@@ -649,10 +667,13 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
     // Active/in-progress statuses (OUT_FOR_DELIVERY, IN_TRANSIT, UNDELIVERED_*, etc.)
     // always show because they represent the current live state of the order.
     match.$or = [
-      // DELIVERED orders: filter by delivered_at first, then status_updated_at, then createdAt
-      { status: { $in: [/^delivered$/i, /^rto_delivered$/i, /^DEL$/i, /^RTO$/i, /^RTD$/i] }, delivered_at: dateFilter },
-      { status: { $in: [/^delivered$/i, /^rto_delivered$/i, /^DEL$/i, /^RTO$/i, /^RTD$/i] }, delivered_at: { $exists: false }, status_updated_at: dateFilter },
-      { status: { $in: [/^delivered$/i, /^rto_delivered$/i, /^DEL$/i, /^RTO$/i, /^RTD$/i] }, delivered_at: null, status_updated_at: dateFilter },
+      // DELIVERED orders only
+      { status: /^delivered$/i, delivered_at: dateFilter },
+      // RTO_DELIVERED orders separately
+      { status: /^rto_delivered$/i, delivered_at: dateFilter },
+      // Short codes
+      { status: /^DEL$/i, delivered_at: dateFilter },
+      { status: /^RTD$/i, delivered_at: dateFilter },
       // CANCELLED orders: date-filter by status_updated_at or createdAt
       { status: /^cancell?ed$/i, status_updated_at: dateFilter },
       { status: /^cancell?ed$/i, status_updated_at: { $exists: false }, createdAt: dateFilter },
@@ -662,8 +683,15 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
     ];
   }
 
+  // Build a clean DELIVERED-only date query (independent of the main match $or)
+  const deliveredOnlyMatch = { platform: 'shipmaxx', status: /^delivered$/i };
+  if (from && to) {
+    const dateFilter = { $gte: new Date(from + 'T00:00:00.000+05:30'), $lte: new Date(to + 'T23:59:59.999+05:30') };
+    deliveredOnlyMatch.delivered_at = dateFilter;
+  }
+
   const [deliveredCountResult, statusBreakdown, revenueAggregation] = await Promise.all([
-    Order.countDocuments({ status: /^delivered$/i, ...match }),
+    Order.countDocuments(deliveredOnlyMatch),
     Order.aggregate([
       { $match: match },
       { $group: { _id: '$status', count: { $sum: 1 }, revenue: { $sum: '$sub_total' } } },
@@ -724,14 +752,8 @@ export const getStatusOrders = catchAsync(async (req, res) => {
     };
     
     if (/^(delivered|rto_delivered|DEL|RTO|RTD)$/i.test(queryStatus)) {
-      // Terminal status: apply date filter
-      match.$or = [
-        { delivered_at: dateFilter },
-        { delivered_at: { $exists: false }, status_updated_at: dateFilter },
-        { delivered_at: null, status_updated_at: dateFilter },
-        { delivered_at: { $exists: false }, status_updated_at: { $exists: false }, createdAt: dateFilter },
-        { delivered_at: null, status_updated_at: null, createdAt: dateFilter },
-      ];
+      // Terminal status: apply date filter on delivered_at only
+      match.delivered_at = dateFilter;
     } else if (/^cancell?ed$/i.test(queryStatus)) {
       // Cancelled: apply date filter
       match.$or = [
@@ -1129,9 +1151,9 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
           if (tracking.history?.length > 0) update.status_updated_at = extractStatusUpdatedAt(tracking, status);
           if (status === 'DELIVERED') {
             let delAt = null;
-            if (tracking.history) { const de = tracking.history.find(h => h.system_status_code === 'DEL' || (h.system_status_name || '').toLowerCase() === 'delivered' || (h.status || '').toLowerCase() === 'delivered'); if (de?.timestamp) delAt = parseShipMaxxDate(de.timestamp); }
+            if (tracking.history) { const de = tracking.history.find(h => h.system_status_code === 'DEL' || (h.system_status_name || '').toLowerCase() === 'delivered' || (h.status || '').toLowerCase() === 'delivered'); if (de?.date || de?.timestamp) delAt = parseShipMaxxDate(de.date || de.timestamp); }
             if (delAt) { update.delivered_at = delAt; update.status_updated_at = delAt; }
-            else { const dd = await Order.findOne({ _id: o._id }).select('delivered_at').lean(); if (!dd?.delivered_at) { update.delivered_at = new Date(); update.status_updated_at = new Date(); } else { update.status_updated_at = new Date(); } }
+            else { const dd = await Order.findOne({ _id: o._id }).select('delivered_at status_updated_at').lean(); if (!dd?.delivered_at) { update.delivered_at = dd?.status_updated_at || update.status_updated_at || o.status_updated_at || null; } }
             if (o.lead_id) await Lead.findByIdAndUpdate(o.lead_id, { status: 'follow_up' }).catch(() => {});
           }
           await Order.updateWithTransaction({ _id: o._id }, { $set: update });

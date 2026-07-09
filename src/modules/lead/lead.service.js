@@ -395,9 +395,14 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
   
   if (userRole === 'sales') {
     if (!isSharedStatus) query.assignedTo = new mongoose.Types.ObjectId(userId);
-  } else if (filter.department) {
+  }
+  
+  if (filter.department) {
     query.department = filter.department;
-  } else if (userDepartments && userDepartments.length > 0) {
+    if (userRole !== 'admin' && userRole !== 'manager' && userDepartments && userDepartments.length > 0) {
+      if (!userDepartments.includes(filter.department)) query.department = "NOT_ALLOWED";
+    }
+  } else if (userRole !== 'admin' && userRole !== 'manager' && userDepartments && userDepartments.length > 0) {
     query.department = { $in: userDepartments };
   }
 
@@ -436,6 +441,12 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
     }
   }
 
+  if (filter.month !== undefined && filter.month !== null && filter.month !== '' && !filter.dateFrom && !filter.dateTo) {
+    const m = parseInt(filter.month);
+    const yr = new Date().getFullYear();
+    query.createdAt = { $gte: new Date(yr, m, 1), $lt: new Date(yr, m + 1, 1) };
+  }
+
   const page = parseInt(options.page) || 1;
   const limit = parseInt(options.limit) || 20;
   const skip = (page - 1) * limit;
@@ -443,7 +454,7 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
 
   const pipeline = [ { $match: query } ];
 
-  if (!filter.cnp && !isExport && !isWhatsapp) {
+  if (!filter.cnp && !isExport && !isWhatsapp && filter.month === undefined) {
     const isOnHold = filter.status === 'on_hold';
     const isInterested = filter.status === 'interested';
 
@@ -490,6 +501,7 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
     const [leads, total] = await Promise.all([
       Lead.find(pipeline[0].$match)
         .sort(sortCriteria).skip(skip).limit(limit)
+        .select('-notes -follow_ups')
         .populate('assignedTo', 'name email role')
         .populate('createdBy', 'name email')
         .lean(),
@@ -789,3 +801,4 @@ export const assignLead = async (leadId, assignedTo) => {
 
   return lead;
 };
+

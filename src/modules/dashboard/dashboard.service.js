@@ -710,11 +710,7 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
   const buildDeliveredMatch = () => {
     const base = { status: { $in: ['DELIVERED', 'Delivered', 'delivered'] } };
     if (!isAllTime) {
-      base.$or = [
-        { delivered_at: { $gte: start, $lte: end } },
-        { delivered_at: null, status_updated_at: { $gte: start, $lte: end } },
-        { delivered_at: null, status_updated_at: null, createdAt: { $gte: start, $lte: end } },
-      ];
+      base.delivered_at = { $gte: start, $lte: end };
     }
     return base;
   };
@@ -881,7 +877,7 @@ export const getAllStaffCommissions = async (month, year) => {
       totalDeliveries: 0,
       totalRevenue: 0,
       revenueCommission: 0,
-      commissionRate: u.commissionRate || 5,
+      commissionRate: u.commissionRate ?? 5,
       reorderCommission: 0,
       totalCommission: 0,
       basePay: 0,
@@ -899,21 +895,13 @@ export const getAllStaffCommissions = async (month, year) => {
     ReorderCommission.find({ month, year }).lean(),
     Order.find({
       status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-      $or: [
-        { delivered_at: { $gte: monthStart, $lte: monthEnd } },
-        { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
-        { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
-      ]
+      delivered_at: { $gte: monthStart, $lte: monthEnd }
     }).select('lead_id created_by verified_by source_order_id sub_total total')
       .populate('lead_id', 'assignedTo')
       .lean(),
     ShipmaxxOrder.find({
       status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-      $or: [
-        { delivered_at: { $gte: monthStart, $lte: monthEnd } },
-        { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
-        { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } },
-      ]
+      delivered_at: { $gte: monthStart, $lte: monthEnd }
     }).select('lead_id created_by verified_by source_order_id sub_total total')
       .populate('lead_id', 'assignedTo')
       .lean()
@@ -940,17 +928,24 @@ export const getAllStaffCommissions = async (month, year) => {
 
   const processOrder = (o) => {
     let uid = null;
+    let isReorder = false;
     
     if (o.source_order_id) {
       uid = o.verified_by ? String(o.verified_by) : null;
+      isReorder = true;
     } else {
       uid = o.lead_id && typeof o.lead_id === 'object' ? String(o.lead_id.assignedTo) : null;
       if (!uid && o.created_by) uid = String(o.created_by);
+      if (o.lead_id && typeof o.lead_id === 'object' && o.lead_id.status === 'old') {
+        isReorder = true;
+      }
     }
     
     if (uid && statsMap[uid]) {
       statsMap[uid].totalDeliveries++;
-      statsMap[uid].totalRevenue += SUB_TOTAL_AMOUNT(o);
+      if (!isReorder) {
+        statsMap[uid].totalRevenue += SUB_TOTAL_AMOUNT(o);
+      }
     }
   };
 
@@ -974,7 +969,7 @@ export const getAllStaffCommissions = async (month, year) => {
     
     s.revenueCommission = s.user.role === 'support'
       ? s.totalDeliveries * 50
-      : Math.round(s.totalRevenue * ((s.commissionRate || 5) / 100));
+      : Math.round(s.totalRevenue * ((s.commissionRate ?? 5) / 100));
       
     s.totalCommission = s.override?.manualCommission ?? (s.revenueCommission + s.reorderCommission);
     s.totalPay = s.basePay + s.totalCommission;
@@ -996,6 +991,12 @@ export const getAllStaffCommissions = async (month, year) => {
   };
 };
 
+
+export const getStaffCommission = async (userId, month, year) => {
+  const all = await getAllStaffCommissions(month, year);
+  const staffData = all.staff.find(s => String(s.user._id) === String(userId));
+  return staffData || { totalPay: 0, basePay: 0, totalCommission: 0, totalRevenue: 0 };
+};
 
 export const saveCommissionOverride = async ({ userId, month, year, manualCommission, manualBasePay }) => {
   const CommissionOverride = (await import('../commission/commissionOverride.model.js')).default;

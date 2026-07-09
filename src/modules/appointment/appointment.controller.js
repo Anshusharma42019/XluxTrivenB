@@ -9,7 +9,8 @@ const createAppointment = catchAsync(async (req, res) => {
 });
 
 const getAppointments = catchAsync(async (req, res) => {
-  const result = await appointmentService.getAppointments(req.query);
+  const query = { ...req.query, userDepartments: req.userDepartments };
+  const result = await appointmentService.getAppointments(query);
   res.json(new ApiResponse(httpStatus.OK, result, 'Appointments fetched'));
 });
 

@@ -58,5 +58,6 @@ export const getLeads = {
     dateFrom: z.string().optional(),
     dateTo: z.string().optional(),
     department: z.string().optional(),
+    month: z.string().optional(),
   }),
 };

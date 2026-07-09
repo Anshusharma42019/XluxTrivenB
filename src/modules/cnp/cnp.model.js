@@ -33,5 +33,8 @@ cnpSchema.index({ assignedTo: 1, updatedAt: -1 });
 cnpSchema.index({ department: 1, updatedAt: -1 });
 cnpSchema.index({ assignedTo: 1, department: 1, updatedAt: -1 });
 cnpSchema.index({ lead: 1 });
+cnpSchema.index({ createdAt: -1 });
+cnpSchema.index({ department: 1, createdAt: -1 });
+cnpSchema.index({ assignedTo: 1, createdAt: -1 });
 
 export default mongoose.model('Cnp', cnpSchema);
