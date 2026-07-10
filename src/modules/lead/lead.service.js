@@ -522,7 +522,8 @@ export const getLeadById = async (id, userRole, userId, userDepartments = []) =>
   const lead = await Lead.findOne({ _id: id, isDeleted: false })
     .populate('assignedTo', 'name email role')
     .populate('createdBy', 'name email')
-    .populate('notes.createdBy', 'name');
+    .populate('notes.createdBy', 'name')
+    .populate('follow_ups.createdBy', 'name');
   if (!lead) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
   // Sales can view shared-status leads (interested, closed_lost, on_hold) from all staff
   const sharedStatuses = ['interested', 'closed_lost', 'on_hold'];
