@@ -525,13 +525,26 @@ export const getLeadById = async (id, userRole, userId, userDepartments = []) =>
     .populate('notes.createdBy', 'name')
     .populate('follow_ups.createdBy', 'name');
   if (!lead) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
-  // Sales can view shared-status leads (interested, closed_lost, on_hold) from all staff
-  const sharedStatuses = ['interested', 'closed_lost', 'on_hold'];
+  // Sales can view shared-status leads (interested, closed_lost, on_hold, cnp) from all staff
+  const sharedStatuses = ['interested', 'closed_lost', 'on_hold', 'cnp'];
   
   if (userRole === 'sales') {
     // Removed department restriction so sales can view leads assigned to them
     if (!sharedStatuses.includes(lead.status) && String(lead.assignedTo?._id) !== String(userId)) {
-      throw new ApiError(httpStatus.FORBIDDEN, 'Access denied');
+      // Allow access if there is a CNP task for this lead in the user's department
+      const hasCnpAccess = await Cnp.exists({
+        lead: lead._id,
+        $or: [ { department: { $in: userDepartments || [] } }, { department: null } ]
+      });
+      // Allow access if there is a Call Again task for this lead in the user's department
+      const hasCallAgainAccess = await CallAgain.exists({
+        lead: lead._id,
+        $or: [ { department: { $in: userDepartments || [] } }, { department: null } ]
+      });
+      
+      if (!hasCnpAccess && !hasCallAgainAccess) {
+        throw new ApiError(httpStatus.FORBIDDEN, 'Access denied');
+      }
     }
   }
   return lead;
