@@ -266,7 +266,10 @@ export const updateTask = async (id, data, userRole, userId, userDepartments = [
     await Cnp.findOneAndUpdate({ task: task._id }, { ...record, lastCnpAt: new Date(), $inc: { cnpCount: 1 }, $push: { cnpHistory: { clickedAt: new Date() } } }, { upsert: true, returnDocument: 'after' });
     await Verification.deleteOne({ task: task._id });
     await ReadyToShipment.deleteOne({ task: task._id });
-    if (task.lead) await Lead.findByIdAndUpdate(task.lead, { cnp: true }).catch(() => {});
+    if (task.lead) {
+      const leadId = task.lead._id || task.lead;
+      await Lead.findByIdAndUpdate(leadId, { cnp: true }).catch(() => {});
+    }
   } else if (data.status === 'verification') {
     await handleVerificationSync(task, userId);
   } else if (data.status === 'ready_to_shipment') {

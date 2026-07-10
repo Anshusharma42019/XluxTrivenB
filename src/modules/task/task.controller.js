@@ -37,6 +37,15 @@ const addNote = catchAsync(async (req, res) => {
   const task = await taskService.getTaskById(req.params.taskId, req.user.role, req.user._id, req.userDepartments);
   task.notes.push({ text: req.body.text });
   await task.save();
+
+  if (task.lead) {
+    const leadId = task.lead._id || task.lead;
+    const Lead = (await import('../lead/lead.model.js')).default;
+    await Lead.findByIdAndUpdate(leadId, {
+      $push: { notes: { text: req.body.text, createdBy: req.user._id } }
+    });
+  }
+
   res.json(new ApiResponse(httpStatus.OK, task, 'Note added'));
 });
 
