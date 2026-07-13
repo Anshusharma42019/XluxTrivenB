@@ -28,8 +28,10 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
           { department: null }
         ];
       }
-      // Staff only see their own verification records
-      query.assignedTo = req.user._id;
+      // Staff only see their own verification records (support and sales see all)
+      if (!['support', 'sales'].includes(req.user.role)) {
+        query.assignedTo = req.user._id;
+      }
     }
 
     // Apply day preset filter
@@ -409,8 +411,10 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
           { department: null }
         ];
       }
-      // Staff only see their own verification records
-      query.assignedTo = req.user._id;
+      // Staff only see their own verification records (support and sales see all)
+      if (!['support', 'sales'].includes(req.user.role)) {
+        query.assignedTo = req.user._id;
+      }
     }
 
     // Get verification on-hold records
