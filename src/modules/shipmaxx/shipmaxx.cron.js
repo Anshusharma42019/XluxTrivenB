@@ -9,9 +9,11 @@ const initShipmaxxCron = () => {
   cron.schedule('*/15 * * * *', async () => {
     console.log('[Cron] Running ShipMaxx auto-sync for recent in-transit orders...');
     try {
-      // Find orders that are NOT delivered/cancelled/RTO, created in last 14 days
-      const twoWeeksAgo = new Date();
-      twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 30);
+      // Find active orders created since the start of the previous month
+      const trackingLimit = new Date();
+      trackingLimit.setMonth(trackingLimit.getMonth() - 1);
+      trackingLimit.setDate(1);
+      trackingLimit.setHours(0, 0, 0, 0);
 
       // 1. Fetch new shipments from ShipMaxx (Auto-sync new orders)
       try {
@@ -64,7 +66,7 @@ const initShipmaxxCron = () => {
       // 2. Track existing active orders
       const activeOrders = await Order.find({
         platform: 'shipmaxx',
-        createdAt: { $gte: twoWeeksAgo },
+        createdAt: { $gte: trackingLimit },
         $or: [
           { status: { $not: /^(delivered|rto_delivered|cancelled|canceled)/i } },
           { status: /^(delivered|rto_delivered)/i, delivered_at: { $exists: false } },

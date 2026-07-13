@@ -70,15 +70,15 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     ),
     Appointment.find({ isDeleted: false, $or: [{ patientName: regex }, { phone: regex }] }).populate('createdBy', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
     
-    ShiprocketOrder.find(orderMatch).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShiprocketInTransitOrder') || ShiprocketOrder).find(orderMatch).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShiprocketRtoOrder') || ShiprocketOrder).find(orderMatch).sort({ updatedAt: -1 }).limit(limit).lean(),
+    ShiprocketOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).populate({ path: 'verification_id', populate: { path: 'assignedTo', select: 'name' } }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).populate('verification_staff_id', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShiprocketInTransitOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShiprocketRtoOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).sort({ updatedAt: -1 }).limit(limit).lean(),
     
-    ShipmaxxOrder.find(orderMatch).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShipmaxxInTransitOrder') || ShipmaxxOrder).find(orderMatch).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShipmaxxRtoOrder') || ShipmaxxOrder).find(orderMatch).sort({ updatedAt: -1 }).limit(limit).lean(),
+    ShipmaxxOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).populate('verified_by', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).populate('verification_staff_id', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShipmaxxInTransitOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShipmaxxRtoOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).sort({ updatedAt: -1 }).limit(limit).lean(),
   ]);
 
   const allResults = [];
@@ -198,7 +198,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
          link = `/follow-up?openId=${o._id}`;
       }
       
-      addResult(o, 'order', moduleName, o.billing_phone, o.billing_customer_name, o.status, link, null, latestNote);
+      addResult(o, 'order', moduleName, o.billing_phone, o.billing_customer_name, o.status, link, o.verification_id?.assignedTo?.name || o.verification_staff_id?.name || o.lead_id?.assignedTo?.name, latestNote);
     });
   };
   processShiprocket(shiprocketOrders);
@@ -221,7 +221,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
          link = `/shipmaxx/followup?openId=${o._id}`;
       }
       
-      addResult(o, 'shipmaxx', moduleName, o.billing_phone, o.billing_customer_name, o.status, link, null, latestNote);
+      addResult(o, 'shipmaxx', moduleName, o.billing_phone, o.billing_customer_name, o.status, link, o.verification_staff_id?.name || o.verified_by?.name || o.lead_id?.assignedTo?.name, latestNote);
     });
   };
   processShipmaxx(shipmaxxOrders);
@@ -295,6 +295,9 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
         latestStatus.pincode = group.pincode;
       }
     }
+
+    const recentAssigned = history.find(r => r.assignedTo);
+    latestStatus.assignedTo = latestStatus.assignedTo || (recentAssigned ? recentAssigned.assignedTo : null);
 
     return {
       customerName: group.customerName,

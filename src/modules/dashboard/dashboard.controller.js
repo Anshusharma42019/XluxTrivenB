@@ -2,6 +2,7 @@ import httpStatus from 'http-status';
 import catchAsync from '../../utils/catchAsync.js';
 import ApiResponse from '../../utils/ApiResponse.js';
 import * as dashboardService from './dashboard.service.js';
+import { getStaffDeliveryStats } from './dashboard.service.js';
 
 const cache = new Map();
 const CACHE_TTL = 120000; // 2 minutes — dashboard data doesn't need sub-minute freshness
@@ -126,4 +127,16 @@ const assignOrder = catchAsync(async (req, res) => {
   res.json(new ApiResponse(httpStatus.OK, data, 'Order assigned successfully'));
 });
 
-export default { debugDeliveries, getStats, getRevenueChart, getStaffStats, setStaffTarget, getTargetHistory, getStaffVerifications, getStaffTodayLists, getStaffMonthlyChart, getAllStaffStats, getStaffCommission, getAllStaffCommissions, saveCommissionOverride, getUnassignedOrders, assignOrder };
+const getStaffDeliveryStatsHandler = catchAsync(async (req, res) => {
+  const { month, year } = req.query;
+  const data = await getStaffDeliveryStats(Number(month), Number(year));
+  res.json(new ApiResponse(httpStatus.OK, data, 'Staff delivery stats fetched'));
+});
+
+const getMyDeliveryStats = catchAsync(async (req, res) => {
+  const { month, year } = req.query;
+  const data = await getStaffDeliveryStats(Number(month), Number(year), req.user._id);
+  res.json(new ApiResponse(httpStatus.OK, data, 'My delivery stats fetched'));
+});
+
+export default { debugDeliveries, getStats, getRevenueChart, getStaffStats, setStaffTarget, getTargetHistory, getStaffVerifications, getStaffTodayLists, getStaffMonthlyChart, getAllStaffStats, getStaffCommission, getAllStaffCommissions, saveCommissionOverride, getUnassignedOrders, assignOrder, getStaffDeliveryStats: getStaffDeliveryStatsHandler, getMyDeliveryStats };

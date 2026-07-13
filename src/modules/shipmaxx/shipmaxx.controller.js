@@ -243,7 +243,18 @@ export const createOrder = catchAsync(async (req, res) => {
     }
 
     const subTotal = (products || []).reduce((sum, p) => sum + (Number(p.price) * (Number(p.quantity) || 1)), 0) + (Number(other_charges) || 0) - (Number(total_discount) || 0);
-    await Order.create({
+    // Find verified_by and verification_id from Verification record for this lead
+    let verifiedBy = req.user?._id;
+    let verificationId = null;
+    if (matchedLeadId) {
+      const verDoc = await Verification.findOne({ lead: matchedLeadId, isDeleted: { $ne: true } }).sort({ createdAt: -1 }).lean();
+      if (verDoc) {
+        verifiedBy = verDoc.verifiedBy || verDoc.assignedTo || req.user?._id;
+        verificationId = verDoc._id; // Lock verification_id on order permanently
+      }
+    }
+
+    const savedOrder = await Order.create({
       order_id: String(oid),
       status: 'NEW',
       billing_customer_name: customer.name,
@@ -258,9 +269,23 @@ export const createOrder = catchAsync(async (req, res) => {
       order_items: (products || []).map(p => ({ name: p.name, sku: p.sku, units: p.quantity, selling_price: p.price })),
       platform: 'shipmaxx',
       created_by: req.user?._id,
+      verified_by: verifiedBy,
+      verification_id: verificationId, // Permanently links order to the Closer's verification record
       lead_id: matchedLeadId,
       raw_response: smxRes,
     });
+
+    // If this lead had a pending re-order source (from follow-up cycle), link it and clear the flag
+    if (matchedLeadId && savedOrder) {
+      const lead = await Lead.findById(matchedLeadId).select('pending_reorder_source pending_reorder_staff').lean();
+      if (lead?.pending_reorder_source) {
+        await Order.findByIdAndUpdate(savedOrder._id, {
+          source_order_id: lead.pending_reorder_source,
+          verified_by: lead.pending_reorder_staff || req.user?._id,
+        });
+        await Lead.findByIdAndUpdate(matchedLeadId, { $unset: { pending_reorder_source: 1, pending_reorder_staff: 1 } });
+      }
+    }
   } catch (err) {
     console.error('[ShipMaxx Create Order Log Error]', err.message);
   }
@@ -320,7 +345,18 @@ export const createOrderAndShipment = catchAsync(async (req, res) => {
     }
 
     const subTotal = (products || []).reduce((sum, p) => sum + (Number(p.price) * (Number(p.quantity) || 1)), 0) + (Number(other_charges) || 0) - (Number(total_discount) || 0);
-    await Order.create({
+    // Find verified_by and verification_id from Verification record for this lead
+    let verifiedBy = req.user?._id;
+    let verificationId = null;
+    if (matchedLeadId) {
+      const verDoc = await Verification.findOne({ lead: matchedLeadId, isDeleted: { $ne: true } }).sort({ createdAt: -1 }).lean();
+      if (verDoc) {
+        verifiedBy = verDoc.verifiedBy || verDoc.assignedTo || req.user?._id;
+        verificationId = verDoc._id; // Lock verification_id on order permanently
+      }
+    }
+
+    const savedOrder = await Order.create({
       order_id: String(oid),
       status: 'NEW',
       billing_customer_name: customer.name,
@@ -335,9 +371,23 @@ export const createOrderAndShipment = catchAsync(async (req, res) => {
       order_items: (products || []).map(p => ({ name: p.name, sku: p.sku, units: p.quantity, selling_price: p.price })),
       platform: 'shipmaxx',
       created_by: req.user?._id,
+      verified_by: verifiedBy,
+      verification_id: verificationId, // Permanently links order to the Closer's verification record
       lead_id: matchedLeadId,
       raw_response: smxRes,
     });
+
+    // If this lead had a pending re-order source (from follow-up cycle), link it and clear the flag
+    if (matchedLeadId && savedOrder) {
+      const lead = await Lead.findById(matchedLeadId).select('pending_reorder_source pending_reorder_staff').lean();
+      if (lead?.pending_reorder_source) {
+        await Order.findByIdAndUpdate(savedOrder._id, {
+          source_order_id: lead.pending_reorder_source,
+          verified_by: lead.pending_reorder_staff || req.user?._id,
+        });
+        await Lead.findByIdAndUpdate(matchedLeadId, { $unset: { pending_reorder_source: 1, pending_reorder_staff: 1 } });
+      }
+    }
   } catch (err) {
     console.error('[ShipMaxx Create Order Log Error]', err.message);
   }
@@ -765,12 +815,39 @@ export const getStatusOrders = catchAsync(async (req, res) => {
     // Active/in-progress statuses: NO date filter — show all current orders in that status
   }
 
+  // For staff roles (non-admin), filter DELIVERED/RTO_DELIVERED by verified_by = current user
+  const isDeliveredStatus = /^(delivered|rto_delivered|DEL|RTO|RTD)$/i.test(queryStatus);
+  const userRole = req.user?.role;
+  const isStaff = userRole && !['admin', 'superadmin', 'super_admin', 'manager'].includes(userRole.toLowerCase());
+  if (isDeliveredStatus && isStaff && req.user?._id) {
+    match.verified_by = req.user._id;
+  }
+
   const orders = await Order.find(match)
-    .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
+    .populate({ path: 'lead_id', select: 'name phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
     .populate('verified_by', 'name role')
+    .populate('created_by', 'name role')
     .populate('comments.createdBy', 'name role')
     .sort({ status_updated_at: -1, delivered_at: -1, createdAt: -1, _id: -1 })
     .limit(Math.min(Number(limit) || 50, 500)).lean();
+
+  // Backfill missing customer data from raw_response or lead_id
+  for (const o of orders) {
+    if (!o.billing_customer_name || !o.billing_phone) {
+      const raw = o.raw_response;
+      if (raw) {
+        const c = raw.customer || raw;
+        if (!o.billing_customer_name) o.billing_customer_name = c.name || raw.billing_customer_name || raw.customer_name || '';
+        if (!o.billing_phone) o.billing_phone = c.phone || raw.billing_phone || raw.phone || '';
+        if (!o.billing_city) o.billing_city = c.city || raw.billing_city || raw.city || '';
+        if (!o.billing_state) o.billing_state = c.state || raw.billing_state || raw.state || '';
+        if (!o.billing_pincode) o.billing_pincode = c.pincode || raw.billing_pincode || raw.pincode || '';
+      }
+      // Also try lead_id populated name/phone
+      if (!o.billing_customer_name && o.lead_id?.name) o.billing_customer_name = o.lead_id.name;
+      if (!o.billing_phone && o.lead_id?.phone) o.billing_phone = o.lead_id.phone;
+    }
+  }
 
   const unlinked = orders.filter(o => !o.lead_id || !o.lead_id.assignedTo);
   
@@ -805,40 +882,39 @@ export const getStatusOrders = catchAsync(async (req, res) => {
     Object.keys(pinCount).forEach(p => { if (pinCount[p] > 1) delete byPin[p]; });
 
     orders.forEach(o => {
-      if (o.source_order_id && o.verified_by) {
-        o.staff_name = o.verified_by.name || '';
-        o.staff_role = o.verified_by.role || '';
-        return;
-      }
-      const staff = o.lead_id?.assignedTo;
-      if (staff) {
-        o.staff_name = staff.name || '';
-        o.staff_role = staff.role || '';
-        return;
+      let staffName = o.verified_by?.name || o.lead_id?.assignedTo?.name || '';
+      let staffRole = o.verified_by?.role || o.lead_id?.assignedTo?.role || '';
+      let lead = o.lead_id || null;
+
+      if (!staffName) {
+        const cleanPhone = String(o.billing_phone || '').replace(/\D/g, '');
+        const matchedLead = (cleanPhone.length >= 10 && byPhone[cleanPhone]) ||
+          byName[(o.billing_customer_name || '').toLowerCase().trim()] ||
+          byPin[String(o.billing_pincode || '').trim()];
+        if (matchedLead) {
+          staffName = matchedLead.assignedTo?.name || '';
+          staffRole = matchedLead.assignedTo?.role || '';
+          if (!lead) lead = matchedLead;
+        }
       }
 
-      const cleanPhone = String(o.billing_phone || '').replace(/\D/g, '');
-      const lead = (cleanPhone.length >= 10 && byPhone[cleanPhone]) || 
-                   byName[(o.billing_customer_name || '').toLowerCase().trim()] || 
-                   byPin[String(o.billing_pincode || '').trim()];
+      o.staff_name = staffName;
+      o.staff_role = staffRole;
+      if (!o.sub_total && o.raw_response) { const r = o.raw_response; o.sub_total = Number(r.total_amount || r.sub_total || r.amount || r.total_price || 0); }
 
       if (lead) {
-        o.staff_name = lead.assignedTo?.name || '';
-        o.staff_role = lead.assignedTo?.role || '';
-        if (!o.billing_phone || /^x+$/i.test(o.billing_phone)) o.billing_phone = lead.phone;
-      } else {
-        o.staff_name = '';
-        o.staff_role = '';
+        if (!o.billing_customer_name || o.billing_customer_name === '-') o.billing_customer_name = lead.name;
+        if (!o.billing_phone || /^x+$/i.test(o.billing_phone) || o.billing_phone === '-') o.billing_phone = lead.phone;
       }
     });
   } else {
     orders.forEach(o => {
-      if (o.source_order_id && o.verified_by) {
-        o.staff_name = o.verified_by.name || '';
-        o.staff_role = o.verified_by.role || '';
-      } else {
-        o.staff_name = o.lead_id?.assignedTo?.name || '';
-        o.staff_role = o.lead_id?.assignedTo?.role || '';
+      o.staff_name = o.verified_by?.name || o.lead_id?.assignedTo?.name || '';
+      o.staff_role = o.verified_by?.role || o.lead_id?.assignedTo?.role || '';
+      const lead = o.lead_id;
+      if (lead) {
+        if (!o.billing_customer_name || o.billing_customer_name === '-') o.billing_customer_name = lead.name;
+        if (!o.billing_phone || /^x+$/i.test(o.billing_phone) || o.billing_phone === '-') o.billing_phone = lead.phone;
       }
     });
   }
@@ -1274,13 +1350,22 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
     Order.countDocuments(match),
   ]);
   orders.forEach(o => {
-    if (o.source_order_id && o.verified_by) {
-      o.staff_name = o.verified_by.name || '';
+    let staffName = undefined;
+    let staffId = undefined;
+    if (o.verified_by) {
+      staffName = o.verified_by.name;
+      staffId = o.verified_by._id || o.verified_by.id;
+    }
+    
+    if (o.verified_by) {
+      o.staff_name = staffName || '';
       o.staff_role = o.verified_by.role || '';
     } else {
       o.staff_name = o.lead_id?.assignedTo?.name || '';
       o.staff_role = o.lead_id?.assignedTo?.role || '';
     }
+    o.verification_staff_id = staffId;
+    o.verification_staff_name = staffName;
   });
   res.json(new ApiResponse(200, { data: orders, total }, 'Delivered orders fetched'));
 });
@@ -1290,11 +1375,11 @@ export const getDeliveredOrdersFromSchema = catchAsync(async (req, res) => {
 
   // Auto-sync delivered orders from Order collection
   const newDelivered = await Order.find({ platform: 'shipmaxx', status: /^delivered$/i })
-    .select('order_id billing_customer_name billing_phone billing_email billing_address billing_city billing_state billing_pincode awb_code courier_name payment_method sub_total order_items status lead_id delivered_at createdAt').lean();
+    .select('order_id billing_customer_name billing_phone billing_email billing_address billing_city billing_state billing_pincode awb_code courier_name payment_method sub_total order_items status lead_id delivered_at createdAt verified_by').lean();
   for (const o of newDelivered) {
     await DeliveredOrder.findOneAndUpdate(
       { order_id: o.order_id },
-      { $set: { order_id: o.order_id, billing_customer_name: o.billing_customer_name || '', billing_phone: o.billing_phone || '', billing_email: o.billing_email || '', billing_address: o.billing_address || '', billing_city: o.billing_city || '', billing_state: o.billing_state || '', billing_pincode: o.billing_pincode || '', awb_code: o.awb_code || '', courier_name: o.courier_name || '', payment_method: o.payment_method || '', sub_total: o.sub_total || 0, order_items: o.order_items || [], status: o.status, lead_id: o.lead_id || null, delivered_at: o.delivered_at || o.createdAt, order_date: o.createdAt } },
+      { $set: { order_id: o.order_id, billing_customer_name: o.billing_customer_name || '', billing_phone: o.billing_phone || '', billing_email: o.billing_email || '', billing_address: o.billing_address || '', billing_city: o.billing_city || '', billing_state: o.billing_state || '', billing_pincode: o.billing_pincode || '', awb_code: o.awb_code || '', courier_name: o.courier_name || '', payment_method: o.payment_method || '', sub_total: o.sub_total || 0, order_items: o.order_items || [], status: o.status, lead_id: o.lead_id || null, verification_staff_id: o.verified_by || null, delivered_at: o.delivered_at || o.createdAt, order_date: o.createdAt } },
       { upsert: true }
     ).catch(() => {});
   }
@@ -1312,10 +1397,27 @@ export const getDeliveredOrdersFromSchema = catchAsync(async (req, res) => {
     if (from) matchQ.delivered_at.$gte = new Date(from + 'T00:00:00.000+05:30');
     if (to)   matchQ.delivered_at.$lte = new Date(to + 'T23:59:59.999+05:30');
   }
-  const [data, total] = await Promise.all([
-    DeliveredOrder.find(matchQ).sort({ delivered_at: -1 }).skip(skip).limit(Number(per_page)).lean(),
+  let [data, total] = await Promise.all([
+    DeliveredOrder.find(matchQ).sort({ delivered_at: -1 }).skip(skip).limit(Number(per_page))
+      .populate('verification_staff_id', 'name customId id')
+      .lean(),
     DeliveredOrder.countDocuments(matchQ),
   ]);
+  
+  data = data.map(item => {
+    let staffName = undefined;
+    let staffId = undefined;
+    if (item.verification_staff_id) {
+      staffName = item.verification_staff_id.name;
+      staffId = item.verification_staff_id._id || item.verification_staff_id.id;
+    }
+    return {
+      ...item,
+      verification_staff_id: staffId || item.verification_staff_id,
+      verification_staff_name: staffName
+    };
+  });
+
   res.json(new ApiResponse(200, { data, total }, 'Delivered orders fetched from schema'));
 });
 
@@ -1754,7 +1856,7 @@ export const sendToVerification = catchAsync(async (req, res) => {
   const task = await Task.create({
     title: `Re-Verification for ${lead.name || order.billing_customer_name}`,
     lead: lead._id,
-    assignedTo: lead.assignedTo || req.user._id,
+    assignedTo: req.user._id,
     createdBy: req.user._id,
     status: 'verification',
     dueDate: new Date(),
@@ -1780,8 +1882,8 @@ export const sendToVerification = catchAsync(async (req, res) => {
     relief_percentage: lastRelief,
   });
 
-  await Order.findByIdAndUpdate(id, { followup_done: true, sent_to_verification: true, verified_by: task.assignedTo });
-  await Lead.findByIdAndUpdate(lead._id, { $set: { pending_reorder_source: id, pending_reorder_staff: task.assignedTo } });
+  await Order.findByIdAndUpdate(id, { followup_done: true, sent_to_verification: true, verified_by: req.user._id });
+  await Lead.findByIdAndUpdate(lead._id, { $set: { pending_reorder_source: id, pending_reorder_staff: req.user._id } });
 
   res.json(new ApiResponse(200, task, 'Order sent to verification successfully'));
 });

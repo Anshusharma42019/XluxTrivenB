@@ -39,13 +39,15 @@ router.get('/debug/run-cron', async (req, res) => {
   const smx = (await import('./shipmaxx.service.js')).default;
   const { normalizeShipmaxxStatus, parseShipMaxxDate, extractStatusUpdatedAt } = await import('./shipmaxx.controller.js');
   
-  const thirtyDaysAgo = new Date();
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  const trackingLimit = new Date();
+  trackingLimit.setMonth(trackingLimit.getMonth() - 1);
+  trackingLimit.setDate(1);
+  trackingLimit.setHours(0, 0, 0, 0);
 
   const activeOrders = await Order.find({
     platform: 'shipmaxx',
     status: { $not: /^(delivered|rto_delivered|cancelled|canceled)/i },
-    createdAt: { $gte: thirtyDaysAgo }
+    createdAt: { $gte: trackingLimit }
   }).lean();
 
   let updatedCount = 0;
@@ -300,7 +302,7 @@ router.post('/auth/set-password', auth(), c.setPassword);
 // ── Orders (specific routes BEFORE parameterized) ─────────────────────────────
 router.get('/orders', auth(), c.getOrders);
 router.get('/orders/stats', c.getDeliveredStats);
-router.get('/orders/status', c.getStatusOrders);
+router.get('/orders/status', auth(), c.getStatusOrders);
 router.get('/orders/delivered', c.getDeliveredOrders);
 router.get('/orders/delivered-schema', auth(), c.getDeliveredOrdersFromSchema);
 router.get('/orders/in-transit-schema', auth(), c.getInTransitOrdersFromSchema);

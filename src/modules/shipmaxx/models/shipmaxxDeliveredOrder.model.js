@@ -22,6 +22,7 @@ const shipmaxxDeliveredOrderSchema = new mongoose.Schema({
   order_items: [orderItemSchema],
   status: String,
   lead_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead', index: true },
+  verification_staff_id: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   delivered_at: { type: Date, index: true },
   order_date: { type: Date, index: true },
   problem: { type: String, default: '' },

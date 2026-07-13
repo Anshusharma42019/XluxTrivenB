@@ -17,6 +17,7 @@ import commissionRoute from '../modules/commission/commission.routes.js';
 import interaktRoute from '../modules/interakt/interakt.routes.js';
 import shipmaxxRoute from '../modules/shipmaxx/shipmaxx.routes.js';
 import integrationsRoute from '../modules/integrations/integrations.routes.js';
+import opsDashboardRoute from '../modules/ops-dashboard/opsDashboard.routes.js';
 
 const router = express.Router();
 // Define all the routes for the application
@@ -40,6 +41,7 @@ const defaultRoutes = [
   { path: '/interakt', route: interaktRoute },
   { path: '/shipmaxx', route: shipmaxxRoute },
   { path: '/integrations', route: integrationsRoute },
+  { path: '/ops-dashboard', route: opsDashboardRoute },
 ];
  
 defaultRoutes.forEach((route) => {

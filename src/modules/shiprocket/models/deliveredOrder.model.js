@@ -18,6 +18,7 @@ const deliveredOrderSchema = new mongoose.Schema({
   order_items: [{ name: String, sku: String, units: Number, selling_price: Number }],
   status: { type: String, default: 'DELIVERED' },
   lead_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead', default: null },
+  verification_staff_id: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   delivered_at: { type: Date, default: null },
   order_date: { type: Date, default: null },
 }, { timestamps: true });

@@ -22,6 +22,8 @@ router.get('/staff-commission', auth('admin', 'manager', 'sales', 'support', 'lo
 router.get('/all-staff-commissions', auth('admin', 'manager'), cacheMiddleware(300), dashboardController.getAllStaffCommissions);
 router.post('/save-commission-override', auth('admin', 'manager'), dashboardController.saveCommissionOverride);
 router.get('/unassigned-orders', auth('admin', 'manager'), cacheMiddleware(300), dashboardController.getUnassignedOrders);
+router.get('/staff-delivery-stats', auth('admin', 'manager'), dashboardController.getStaffDeliveryStats);
+router.get('/my-delivery-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), dashboardController.getMyDeliveryStats);
 router.post('/assign-order', auth('admin', 'manager'), dashboardController.assignOrder);
 
 router.get('/cache-stats', auth('admin', 'manager'), (req, res) => {

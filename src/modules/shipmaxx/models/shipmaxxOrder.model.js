@@ -46,6 +46,7 @@ const shipmaxxOrderSchema = new mongoose.Schema({
   platform: { type: String, default: 'shipmaxx', index: true },
   
   verified_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  verification_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Verification', default: null },
   commission_generated: { type: Boolean, default: false, index: true },
   commission_generated_at: Date,
   follow_ups: [{

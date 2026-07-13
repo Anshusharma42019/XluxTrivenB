@@ -37,7 +37,16 @@ const orderSchema = new mongoose.Schema({
   label_url: String,
   lead_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead', index: true },
   created_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
-  verified_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  verified_by: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+  },
+  verification_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Verification',
+    default: null,
+  },
   commission_generated: { type: Boolean, default: false, index: true },
   commission_generated_at: Date,
   follow_ups: [{

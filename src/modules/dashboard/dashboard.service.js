@@ -894,14 +894,22 @@ export const getAllStaffCommissions = async (month, year) => {
     CommissionOverride.find({ month, year }).lean(),
     ReorderCommission.find({ month, year }).lean(),
     Order.find({
-      status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-      delivered_at: { $gte: monthStart, $lte: monthEnd }
+      status: { $in: ['DELIVERED', 'Delivered', 'delivered', 'DEL'] },
+      $or: [
+        { delivered_at: { $gte: monthStart, $lte: monthEnd } },
+        { delivered_at: { $exists: false }, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
+        { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } }
+      ]
     }).select('lead_id created_by verified_by source_order_id sub_total total')
       .populate('lead_id', 'assignedTo')
       .lean(),
     ShipmaxxOrder.find({
-      status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
-      delivered_at: { $gte: monthStart, $lte: monthEnd }
+      status: { $in: ['DELIVERED', 'Delivered', 'delivered', 'DEL'] },
+      $or: [
+        { delivered_at: { $gte: monthStart, $lte: monthEnd } },
+        { delivered_at: { $exists: false }, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
+        { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } }
+      ]
     }).select('lead_id created_by verified_by source_order_id sub_total total')
       .populate('lead_id', 'assignedTo')
       .lean()
@@ -1057,16 +1065,16 @@ export const getUnassignedOrders = async (month, year) => {
   const User = (await import('../user/user.model.js')).default;
   const Order = (await import('../shiprocket/models/order.model.js')).Order;
   const ShipmaxxOrder = (await import('../shipmaxx/models/shipmaxxOrder.model.js')).ShipmaxxOrder;
-
-  const validStaff = await User.find({ role: { $in: ['sales', 'manager', 'admin', 'staff', 'logistics', 'support'] }, isDeleted: false }).lean();
+  const validStaff = await User.find({ role: { $in: ['sales', 'support'] }, isDeleted: false }).lean();
   
   const monthStart = new Date(year, month, 1);
   const monthEnd = new Date(year, month + 1, 0, 23, 59, 59);
 
   const query = { 
-    status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
+    status: { $in: ['DELIVERED', 'Delivered', 'delivered', 'DEL'] },
     $or: [
       { delivered_at: { $gte: monthStart, $lte: monthEnd } },
+      { delivered_at: { $exists: false }, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
       { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
       { delivered_at: null, status_updated_at: null, createdAt: { $gte: monthStart, $lte: monthEnd } }
     ]
@@ -1129,5 +1137,161 @@ export const assignOrder = async (orderId, staffId, platform) => {
   order.created_by = staffId;
   await order.save();
   return { success: true };
+};
+
+
+export const getStaffDeliveryStats = async (month, year, filterUserId = null) => {
+  const User = (await import('../user/user.model.js')).default;
+  const Lead = (await import('../lead/lead.model.js')).default;
+  const { Order } = await import('../shiprocket/models/order.model.js');
+  const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
+  const Verification = (await import('../verification/verification.model.js')).default;
+
+  const IST_OFFSET = 5.5 * 60 * 60 * 1000;
+  const monthStart = new Date(Date.UTC(year, month, 1) - IST_OFFSET);
+  const monthEnd = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
+
+  const allUsers = await User.find({ role: { $in: ['sales', 'support'] }, isDeleted: false })
+    .select('_id name role').lean();
+
+  const statsMap = {};
+  for (const u of allUsers) {
+    statsMap[String(u._id)] = { user: u, delivered: 0, rto: 0 };
+  }
+
+  const deliveredTimeFilter = {
+    $or: [
+      { delivered_at: { $gte: monthStart, $lte: monthEnd } },
+      { delivered_at: { $exists: false }, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
+      { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } }
+    ]
+  };
+
+  const rtoTimeFilter = {
+    $or: [
+      { delivered_at: { $gte: monthStart, $lte: monthEnd } },
+      { status_updated_at: { $gte: monthStart, $lte: monthEnd } }
+    ]
+  };
+
+  const [deliveredOrdersSM, deliveredOrdersSR, rtoOrdersSM, rtoOrdersSR] = await Promise.all([
+    ShipmaxxOrder.find({ status: { $in: ['DELIVERED', 'Delivered', 'delivered', 'DEL'] }, ...deliveredTimeFilter })
+      .select('_id lead_id createdAt source_order_id verified_by created_by').lean(),
+    Order.find({ status: { $in: ['DELIVERED', 'Delivered', 'delivered', 'DEL'] }, ...deliveredTimeFilter })
+      .select('_id lead_id createdAt source_order_id verified_by created_by').lean(),
+    ShipmaxxOrder.find({ status: { $regex: /^rto/i }, ...rtoTimeFilter })
+      .select('_id lead_id createdAt source_order_id verified_by created_by').lean(),
+    Order.find({ status: { $regex: /^rto/i }, ...rtoTimeFilter })
+      .select('_id lead_id createdAt source_order_id verified_by created_by').lean(),
+  ]);
+
+  const allOrders = [
+    ...deliveredOrdersSM.map(o => ({ ...o, type: 'delivered' })),
+    ...deliveredOrdersSR.map(o => ({ ...o, type: 'delivered' })),
+    ...rtoOrdersSM.map(o => ({ ...o, type: 'rto' })),
+    ...rtoOrdersSR.map(o => ({ ...o, type: 'rto' })),
+  ];
+
+  if (allOrders.length === 0) {
+    if (filterUserId) return { delivered: 0, rto: 0, deliveredOrders: [], rtoOrders: [] };
+    return { staff: [], unassignedDelivered: 0, unassignedRto: 0, totalDelivered: 0, totalRto: 0 };
+  }
+
+  const allLeadIds = [...new Set(allOrders.map(o => o.lead_id).filter(Boolean).map(String))];
+  
+  const leadAssignMap = {};
+  if (allLeadIds.length > 0) {
+    const leadDocs = await Lead.find({ _id: { $in: allLeadIds } }).select('_id assignedTo').lean();
+    for (const l of leadDocs) leadAssignMap[String(l._id)] = String(l.assignedTo);
+  }
+
+  let unassignedDelivered = 0;
+  let unassignedRto = 0;
+
+  for (const o of allOrders) {
+    const lId = o.lead_id ? String(o.lead_id) : null;
+    let uid = null;
+
+    if (o.source_order_id) {
+      // Re-order (Support / old kit)
+      uid = o.verified_by ? String(o.verified_by) : (o.created_by ? String(o.created_by) : null);
+    } else {
+      // Fresh order (Sales / new kit)
+      uid = o.verified_by ? String(o.verified_by) : (lId ? (leadAssignMap[lId] || null) : (o.created_by ? String(o.created_by) : null));
+    }
+
+    if (uid && statsMap[uid]) {
+      if (o.type === 'delivered') statsMap[uid].delivered++;
+      else statsMap[uid].rto++;
+    } else {
+      if (o.type === 'delivered') unassignedDelivered++;
+      else unassignedRto++;
+    }
+  }
+
+  // If personal request — return only this user's stats + order lists
+  if (filterUserId) {
+    const me = statsMap[String(filterUserId)];
+    if (!me) return { delivered: 0, rto: 0, deliveredOrders: [], rtoOrders: [] };
+
+    const myDeliveredIds = new Set();
+    const myRtoIds = new Set();
+
+    for (const o of allOrders) {
+      const lId = o.lead_id ? String(o.lead_id) : null;
+      let uid = null;
+
+      if (o.source_order_id) {
+        uid = o.verified_by ? String(o.verified_by) : (o.created_by ? String(o.created_by) : null);
+      } else {
+        uid = o.verified_by ? String(o.verified_by) : (lId ? (leadAssignMap[lId] || null) : (o.created_by ? String(o.created_by) : null));
+      }
+
+      if (uid === String(filterUserId)) {
+        if (o.type === 'delivered') myDeliveredIds.add(String(o._id));
+        else myRtoIds.add(String(o._id));
+      }
+    }
+
+    // Fetch full details for these orders
+    const allIds = [...myDeliveredIds, ...myRtoIds];
+    const [smFull, srFull] = await Promise.all([
+      ShipmaxxOrder.find({ _id: { $in: allIds } })
+        .select('_id billing_customer_name billing_phone awb_code sub_total total status delivered_at createdAt lead_id')
+        .populate('lead_id', 'name phone')
+        .lean(),
+      Order.find({ _id: { $in: allIds } })
+        .select('_id billing_customer_name billing_phone awb_code sub_total total status delivered_at createdAt lead_id')
+        .populate('lead_id', 'name phone')
+        .lean(),
+    ]);
+
+    const formatOrder = (o) => ({
+      _id: o._id,
+      name: o.lead_id?.name || o.billing_customer_name || '—',
+      phone: o.lead_id?.phone || o.billing_phone || '—',
+      awb: o.awb_code || '—',
+      amount: Number(o.sub_total) || Number(o.total) || 0,
+      status: o.status,
+      date: o.delivered_at || o.createdAt,
+    });
+
+    const allFull = [...smFull, ...srFull];
+    const deliveredOrders = allFull.filter(o => myDeliveredIds.has(String(o._id))).map(formatOrder)
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+    const rtoOrders = allFull.filter(o => myRtoIds.has(String(o._id))).map(formatOrder)
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    return { delivered: me.delivered, rto: me.rto, deliveredOrders, rtoOrders };
+  }
+
+  const staffList = Object.values(statsMap)
+    .filter(s => s.delivered > 0 || s.rto > 0)
+    .sort((a, b) => (b.delivered + b.rto) - (a.delivered + a.rto));
+
+  const totalDelivered = staffList.reduce((s, x) => s + x.delivered, 0) + unassignedDelivered;
+  const totalRto = staffList.reduce((s, x) => s + x.rto, 0) + unassignedRto;
+
+  return { staff: staffList, unassignedDelivered, unassignedRto, totalDelivered, totalRto };
 };
 

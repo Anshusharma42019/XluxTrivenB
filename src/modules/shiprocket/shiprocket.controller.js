@@ -121,7 +121,9 @@ export const generateReorderCommissions = async () => {
         staffB = order.lead_id.assignedTo || order.lead_id.createdBy;
       }
 
-      // ── Staff A: original order staff (created_by on source order or original lead creator) ─────────
+      // ── Staff A: original order staff — CLOSER who verified the original order ─────────
+      // verified_by pehle check karo (actual Sales Closer), created_by sirf fallback hai
+      // (created_by Dispatcher ka ho sakta hai — isliye pehle verified_by)
       let staffA = null;
       if (order.source_order_id) {
         let sourceOrder = null;
@@ -130,7 +132,7 @@ export const generateReorderCommissions = async () => {
         } else {
           sourceOrder = await Order.findById(order.source_order_id).select('created_by verified_by lead_id').lean();
         }
-        staffA = sourceOrder?.created_by || sourceOrder?.verified_by;
+        staffA = sourceOrder?.verified_by || sourceOrder?.created_by; // verified_by first = actual closer
         if (!staffA && sourceOrder?.lead_id) {
           const srcLead = await Lead.findById(sourceOrder.lead_id).select('assignedTo createdBy').lean();
           staffA = srcLead?.assignedTo || srcLead?.createdBy;
@@ -305,6 +307,17 @@ export const createOrder = catchAsync(async (req, res) => {
 
   const data = await sr.createOrder(payload);
 
+  // Find verified_by and verification_id from Verification record for this lead
+  let verifiedBy = null;
+  let verificationId = null;
+  if (body.lead_id) {
+    const verif = await mongoose.model('Verification').findOne({ lead: body.lead_id }).sort({ createdAt: -1 }).lean();
+    if (verif) {
+      verifiedBy = verif.verifiedBy || verif.assignedTo;
+      verificationId = verif._id; // Lock verification_id on order permanently
+    }
+  }
+
   // Persist to MongoDB
   const savedOrder = await Order.findOneAndUpdate(
     { order_id: payload.order_id },
@@ -316,6 +329,8 @@ export const createOrder = catchAsync(async (req, res) => {
       status_code: data?.status_code,
       lead_id: body.lead_id || undefined,
       created_by: req.user?._id,
+      verified_by: verifiedBy,
+      verification_id: verificationId, // Permanently links order to the Closer's verification record
       raw_response: data,
     },
     { upsert: true, returnDocument: 'after' }
@@ -643,7 +658,7 @@ export const syncShiprocket = catchAsync(async (req, res) => {
   // Sync delivered orders into DeliveredOrder collection
   try {
     const delivered = await Order.find({ status: /^delivered$/i })
-      .select('order_id shiprocket_order_id shiprocket_shipment_id billing_customer_name billing_phone billing_email billing_address billing_city billing_state billing_pincode awb_code courier_name payment_method sub_total order_items status lead_id delivered_at createdAt')
+      .select('order_id shiprocket_order_id shiprocket_shipment_id billing_customer_name billing_phone billing_email billing_address billing_city billing_state billing_pincode awb_code courier_name payment_method sub_total order_items status lead_id delivered_at createdAt verified_by')
       .lean();
     for (const o of delivered) {
       await DeliveredOrder.findOneAndUpdate(
@@ -666,6 +681,7 @@ export const syncShiprocket = catchAsync(async (req, res) => {
           order_items: o.order_items || [],
           status: o.status,
           lead_id: o.lead_id || null,
+          verification_staff_id: o.verified_by || null,
           delivered_at: o.delivered_at || o.createdAt,
           order_date: o.createdAt,
         }},
@@ -764,7 +780,7 @@ export const getDeliveredOrdersFromSchema = catchAsync(async (req, res) => {
 
   // Auto-sync delivered orders from Order collection
   const newDelivered = await Order.find({ status: /^delivered$/i })
-    .select('order_id shiprocket_order_id billing_customer_name billing_phone billing_email billing_address billing_city billing_state billing_pincode awb_code courier_name payment_method sub_total order_items status lead_id delivered_at createdAt')
+    .select('order_id shiprocket_order_id billing_customer_name billing_phone billing_email billing_address billing_city billing_state billing_pincode awb_code courier_name payment_method sub_total order_items status lead_id delivered_at createdAt verified_by')
     .lean();
   for (const o of newDelivered) {
     await DeliveredOrder.findOneAndUpdate(
@@ -786,6 +802,7 @@ export const getDeliveredOrdersFromSchema = catchAsync(async (req, res) => {
         order_items: o.order_items || [],
         status: o.status,
         lead_id: o.lead_id || null,
+        verification_staff_id: o.verified_by || null,
         delivered_at: o.delivered_at || o.createdAt,
         order_date: o.createdAt,
       }},
@@ -807,10 +824,26 @@ export const getDeliveredOrdersFromSchema = catchAsync(async (req, res) => {
     if (to) match.delivered_at.$lte = new Date(to + 'T23:59:59.999+05:30');
   }
 
-  const [data, total] = await Promise.all([
-    DeliveredOrder.find(match).sort({ delivered_at: -1 }).skip(skip).limit(Number(per_page)).lean(),
+  let [data, total] = await Promise.all([
+    DeliveredOrder.find(match).sort({ delivered_at: -1 }).skip(skip).limit(Number(per_page))
+      .populate('verification_staff_id', 'name customId id')
+      .lean(),
     DeliveredOrder.countDocuments(match),
   ]);
+
+  data = data.map(item => {
+    let staffName = undefined;
+    let staffId = undefined;
+    if (item.verification_staff_id) {
+      staffName = item.verification_staff_id.name;
+      staffId = item.verification_staff_id._id || item.verification_staff_id.id;
+    }
+    return {
+      ...item,
+      verification_staff_id: staffId || item.verification_staff_id,
+      verification_staff_name: staffName
+    };
+  });
 
   res.json(new ApiResponse(200, { data, total }, 'Delivered orders fetched from schema'));
 });
@@ -828,8 +861,8 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
     $or: [{ billing_customer_name: { $regex: search, $options: 'i' } }, { billing_phone: { $regex: search, $options: 'i' } }, { order_id: { $regex: search, $options: 'i' } }, { awb_code: { $regex: search, $options: 'i' } }],
   } : statusMatch;
   const skip = (Number(page) - 1) * Number(per_page);
-  const [orders, total] = await Promise.all([
-    Order.find(match).sort({ createdAt: -1 }).skip(skip).limit(Number(per_page)).populate('lead_id', 'phone email').lean(),
+  let [orders, total] = await Promise.all([
+    Order.find(match).sort({ createdAt: -1 }).skip(skip).limit(Number(per_page)).populate('lead_id', 'phone email').populate('verified_by', 'name customId id').lean(),
     Order.countDocuments(match),
   ]);
 
@@ -854,9 +887,16 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
   };
 
   const enriched = orders.map(o => {
-    if (o.lead_id?.phone) return { ...o, billing_phone: o.lead_id.phone };
+    let staffName = undefined;
+    let staffId = undefined;
+    if (o.verified_by) {
+      staffName = o.verified_by.name;
+      staffId = o.verified_by._id || o.verified_by.id;
+    }
+    
+    if (o.lead_id?.phone) return { ...o, billing_phone: o.lead_id.phone, verification_staff_id: staffId, verification_staff_name: staffName };
     const phone = getPhone(o.billing_customer_name, o.billing_pincode, o.billing_phone);
-    return { ...o, billing_phone: phone };
+    return { ...o, billing_phone: phone, verification_staff_id: staffId, verification_staff_name: staffName };
   });
   res.json(new ApiResponse(200, { data: enriched, total, page: Number(page), per_page: Number(per_page) }, 'Delivered orders fetched'));
 });
@@ -1437,8 +1477,14 @@ export const getStatusOrders = catchAsync(async (req, res) => {
   const statusVariant = status.replace(/[-_]/g, '[-_ ]');
   const statusQuery = { status: new RegExp(`^${statusVariant}$`, 'i') };
 
-  const orders = await Order.find({ ...statusQuery, ...dateMatch })
-    .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
+  // For staff roles (non-admin), filter DELIVERED by verified_by = current user
+  const userRole = req.user?.role;
+  const isStaff = userRole && !['admin', 'superadmin', 'super_admin', 'manager'].includes(userRole.toLowerCase());
+  const staffFilter = (isDelivered && isStaff && req.user?._id) ? { verified_by: req.user._id } : {};
+
+  const orders = await Order.find({ ...statusQuery, ...dateMatch, ...staffFilter })
+
+    .populate({ path: 'lead_id', select: 'name phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
     .populate('verified_by', 'name role')
     .populate('comments.createdBy', 'name role')
     .sort(/^delivered$/i.test(status) ? { delivered_at: -1, createdAt: -1 } : { createdAt: -1 })
@@ -1478,40 +1524,55 @@ export const getStatusOrders = catchAsync(async (req, res) => {
     Object.keys(pinCount).forEach(p => { if (pinCount[p] > 1) delete byPin[p]; });
 
     orders.forEach(o => {
-      if (o.source_order_id && o.verified_by) {
-        o.staff_name = o.verified_by.name || '';
-        o.staff_role = o.verified_by.role || '';
-        return;
-      }
-      const staff = o.lead_id?.assignedTo;
-      if (staff) {
-        o.staff_name = staff.name || '';
-        o.staff_role = staff.role || '';
-        return;
+      let staffName = '';
+      let staffRole = '';
+      let lead = null;
+
+      if (o.verified_by) {
+        staffName = o.verified_by.name || '';
+        staffRole = o.verified_by.role || '';
       }
 
-      const cleanPhone = String(o.billing_phone || '').replace(/\D/g, '');
-      const lead = (cleanPhone.length >= 10 && byPhone[cleanPhone]) || 
-                   byName[(o.billing_customer_name || '').toLowerCase().trim()] || 
-                   byPin[String(o.billing_pincode || '').trim()];
+      if (o.lead_id && o.lead_id.assignedTo) {
+        if (!staffName) {
+          staffName = o.lead_id.assignedTo.name || '';
+          staffRole = o.lead_id.assignedTo.role || '';
+        }
+        lead = o.lead_id;
+      } else {
+        const cleanPhone = String(o.billing_phone || '').replace(/\D/g, '');
+        lead = (cleanPhone.length >= 10 && byPhone[cleanPhone]) || 
+                     byName[(o.billing_customer_name || '').toLowerCase().trim()] || 
+                     byPin[String(o.billing_pincode || '').trim()];
+        
+        if (lead && !staffName) {
+          staffName = lead.assignedTo?.name || '';
+          staffRole = lead.assignedTo?.role || '';
+        }
+      }
+
+      o.staff_name = staffName;
+      o.staff_role = staffRole;
 
       if (lead) {
-        o.staff_name = lead.assignedTo?.name || '';
-        o.staff_role = lead.assignedTo?.role || '';
-        if (!o.billing_phone || /^x+$/i.test(o.billing_phone)) o.billing_phone = lead.phone;
-      } else {
-        o.staff_name = '';
-        o.staff_role = '';
+        if (!o.billing_customer_name || o.billing_customer_name === '-') o.billing_customer_name = lead.name;
+        if (!o.billing_phone || /^x+$/i.test(o.billing_phone) || o.billing_phone === '-') o.billing_phone = lead.phone;
       }
     });
   } else {
     orders.forEach(o => {
-      if (o.source_order_id && o.verified_by) {
+      if (o.verified_by) {
         o.staff_name = o.verified_by.name || '';
         o.staff_role = o.verified_by.role || '';
       } else {
         o.staff_name = o.lead_id?.assignedTo?.name || '';
         o.staff_role = o.lead_id?.assignedTo?.role || '';
+      }
+      
+      const lead = o.lead_id;
+      if (lead) {
+        if (!o.billing_customer_name || o.billing_customer_name === '-') o.billing_customer_name = lead.name;
+        if (!o.billing_phone || /^x+$/i.test(o.billing_phone) || o.billing_phone === '-') o.billing_phone = lead.phone;
       }
     });
   }
@@ -2117,7 +2178,7 @@ export const sendToVerification = catchAsync(async (req, res) => {
   const task = await Task.create({
     title: `Re-Verification for ${lead.name || order.billing_customer_name}`,
     lead: lead._id,
-    assignedTo: lead.assignedTo || req.user._id,
+    assignedTo: req.user._id,
     createdBy: req.user._id,
     status: 'verification',
     dueDate: new Date(),
@@ -2146,9 +2207,9 @@ export const sendToVerification = catchAsync(async (req, res) => {
     relief_percentage: lastRelief,
   });
   // Mark follow-up as done and flag as sent to verification, store this order's id on the lead for linking future re-orders
-  await Order.findByIdAndUpdate(id, { followup_done: true, sent_to_verification: true, verified_by: task.assignedTo });
+  await Order.findByIdAndUpdate(id, { followup_done: true, sent_to_verification: true, verified_by: req.user._id });
   // Store source_order_id on lead so new order created from this verification can be linked back
-  await Lead.findByIdAndUpdate(lead._id, { $set: { pending_reorder_source: id, pending_reorder_staff: task.assignedTo } });
+  await Lead.findByIdAndUpdate(lead._id, { $set: { pending_reorder_source: id, pending_reorder_staff: req.user._id } });
   await logOrderActivity({
     orderId: id,
     actor: req.user?._id,

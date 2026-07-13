@@ -28,6 +28,8 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
           { department: null }
         ];
       }
+      // Staff only see their own verification records
+      query.assignedTo = req.user._id;
     }
 
     // Apply day preset filter
@@ -407,6 +409,8 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
           { department: null }
         ];
       }
+      // Staff only see their own verification records
+      query.assignedTo = req.user._id;
     }
 
     // Get verification on-hold records
@@ -562,7 +566,15 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
     const update = { ...taskFields };
     if (status) {
       update.status = status;
-      if (!update.assignedTo) {
+      if (status === 'verified') {
+        // CLOSER RULE: Jo button dabaye — 100% credit usi ka!
+        // Chahe pehle kisi aur ka naam tha (Priti), ab jo verify kar raha hai (Sweety) uska hoga.
+        // On Hold se bhi agar koi verify kare — same rule applies.
+        update.verifiedBy = req.user._id;
+        update.assignedTo = req.user._id;
+      }
+      // For non-verified status changes: only assign if no owner exists yet
+      if (status !== 'verified' && !update.assignedTo) {
         if (!recordBefore.assignedTo) {
           update.assignedTo = req.user._id;
         }
@@ -609,6 +621,13 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
 
     if (status === 'verified' && record.task) {
       let rtsAssignedTo = record.assignedTo?._id || record.assignedTo;
+
+      // CLOSER RULE: Update lead.assignedTo to the Closer too, so Staff Dashboard matches Ops Dashboard
+      if (record.lead) {
+        const Lead = (await import('../lead/lead.model.js')).default;
+        const leadId = record.lead._id || record.lead;
+        await Lead.findByIdAndUpdate(leadId, { assignedTo: rtsAssignedTo });
+      }
 
       const taskUpdate = await Task.findByIdAndUpdate(
         record.task,

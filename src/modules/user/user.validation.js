@@ -21,6 +21,7 @@ export const getUser = {
 export const createUser = {
   body: z.object({
     name: z.string(),
+    employeeId: z.string().optional(),
     phone: z.string().min(7),
     password: z.string().min(8),
     role: z.enum(['admin', 'manager', 'sales', 'doctor', 'staff', 'logistics', 'support']).optional(),
@@ -36,6 +37,7 @@ export const updateUser = {
   params: paramsIdSchema,
   body: z.object({
     name: z.string().optional(),
+    employeeId: z.string().optional(),
     phone: z.string().min(7).optional(),
     email: z.string().email().optional(),
     password: z.string().min(8).optional(),
