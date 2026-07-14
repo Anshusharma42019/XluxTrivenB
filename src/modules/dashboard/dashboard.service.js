@@ -364,7 +364,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
         { updatedAt: { $gte: startOfDay, $lte: endOfDay } }
       ]
     }).select('lead_id created_by status createdAt updatedAt')
-      .populate('lead_id', 'assignedTo')
+      .populate('lead_id', 'assignedTo status')
       .lean(),
     ShipmaxxOrder.find({ 
       status: { $not: /^(new|pending|cancelled)$/i },
@@ -373,7 +373,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
         { updatedAt: { $gte: startOfDay, $lte: endOfDay } }
       ]
     }).select('lead_id created_by status createdAt updatedAt')
-      .populate('lead_id', 'assignedTo')
+      .populate('lead_id', 'assignedTo status')
       .lean()
   ]);
 
@@ -901,7 +901,7 @@ export const getAllStaffCommissions = async (month, year) => {
         { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } }
       ]
     }).select('lead_id created_by verified_by source_order_id sub_total total')
-      .populate('lead_id', 'assignedTo')
+      .populate('lead_id', 'assignedTo status')
       .lean(),
     ShipmaxxOrder.find({
       status: { $in: ['DELIVERED', 'Delivered', 'delivered', 'DEL'] },
@@ -911,7 +911,7 @@ export const getAllStaffCommissions = async (month, year) => {
         { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } }
       ]
     }).select('lead_id created_by verified_by source_order_id sub_total total')
-      .populate('lead_id', 'assignedTo')
+      .populate('lead_id', 'assignedTo status')
       .lean()
   ]);
 
@@ -939,15 +939,16 @@ export const getAllStaffCommissions = async (month, year) => {
     let isReorder = false;
     
     if (o.source_order_id) {
-      uid = o.verified_by ? String(o.verified_by) : null;
+      uid = o.verified_by ? String(o.verified_by) : (o.created_by ? String(o.created_by) : null);
       isReorder = true;
     } else {
-      uid = o.lead_id && typeof o.lead_id === 'object' ? String(o.lead_id.assignedTo) : null;
-      if (!uid && o.created_by) uid = String(o.created_by);
+      const lIdAssignedTo = o.lead_id && typeof o.lead_id === 'object' ? String(o.lead_id.assignedTo) : null;
+      uid = lIdAssignedTo ? lIdAssignedTo : (o.created_by ? String(o.created_by) : null);
       if (o.lead_id && typeof o.lead_id === 'object' && o.lead_id.status === 'old') {
         isReorder = true;
       }
     }
+
     
     if (uid && statsMap[uid]) {
       statsMap[uid].totalDeliveries++;
@@ -1217,7 +1218,7 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null) =>
       uid = o.verified_by ? String(o.verified_by) : (o.created_by ? String(o.created_by) : null);
     } else {
       // Fresh order (Sales / new kit)
-      uid = o.verified_by ? String(o.verified_by) : (lId ? (leadAssignMap[lId] || null) : (o.created_by ? String(o.created_by) : null));
+      uid = lId ? (leadAssignMap[lId] || null) : (o.created_by ? String(o.created_by) : null);
     }
 
     if (uid && statsMap[uid]) {
