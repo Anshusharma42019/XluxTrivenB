@@ -136,7 +136,7 @@ function classifyStatus(s = '') {
  * Backlog activity (orders created in previous months) are fetched separately.
  */
 async function fetchOrderStats(filter) {
-  const proj = { status: 1, delivery_attempt: 1, delivered_at: 1, createdAt: 1 };
+  const proj = { status: 1, delivery_attempt: 1, delivered_at: 1, createdAt: 1, sub_total: 1, total: 1 };
   const [sr, sm] = await Promise.all([
     Order.find(filter, proj).lean(),
     ShipmaxxOrder.find(filter, proj).lean(),
@@ -146,13 +146,14 @@ async function fetchOrderStats(filter) {
 
 
 function calcKPIs(orders) {
-  let delivered = 0, ofd = 0, undelivered = 0, rto = 0, rtoIntersite = 0, inTransit = 0;
+  let delivered = 0, ofd = 0, undelivered = 0, rto = 0, rtoIntersite = 0, inTransit = 0, deliveredRevenue = 0;
   let firstAttemptDelivered = 0, knownAttemptDelivered = 0, totalTat = 0, tatCount = 0;
 
   for (const o of orders) {
     const cat = classifyStatus(o.status);
     if (cat === 'delivered') {
       delivered++;
+      deliveredRevenue += (Number(o.sub_total) || Number(o.total) || 0);
       // Only count first-attempt for orders where delivery_attempt is explicitly set
       if (o.delivery_attempt !== null && o.delivery_attempt !== undefined) {
         knownAttemptDelivered++;
@@ -173,7 +174,7 @@ function calcKPIs(orders) {
   const ndrRate = total                > 0 ? +((undelivered / total)                         * 100).toFixed(1) : 0;
   const fadr    = knownAttemptDelivered > 0 ? +((firstAttemptDelivered / knownAttemptDelivered) * 100).toFixed(1) : 0;
   const avgTat  = tatCount             > 0 ? +(totalTat / tatCount).toFixed(1) : 0;
-  return { delivered, ofd, undelivered, rto, rtoIntersite, inTransit, ndrRate, fadr, avgTat, total };
+  return { delivered, ofd, undelivered, rto, rtoIntersite, inTransit, ndrRate, fadr, avgTat, total, deliveredRevenue };
 }
 
 function pctChange(curr, prev) {
@@ -259,6 +260,7 @@ export async function getKPIs(params) {
       inTransit:      { value: curr.inTransit,     change: pctChange(curr.inTransit,    prev.inTransit)     },
       ofd:            { value: curr.ofd,           change: pctChange(curr.ofd,          prev.ofd)           },
       delivered:      { value: curr.delivered,     change: pctChange(curr.delivered,    prev.delivered)     },
+      revenue:        { value: curr.deliveredRevenue, change: 0 },
       undelivered:    { value: curr.undelivered,   change: pctChange(curr.undelivered,  prev.undelivered)   },
       rto:            { value: curr.rto,           change: pctChange(curr.rto,          prev.rto)           },
       rtoIntersite:   { value: curr.rtoIntersite,  change: pctChange(curr.rtoIntersite, prev.rtoIntersite)  },

@@ -943,7 +943,7 @@ export const getAllStaffCommissions = async (month, year) => {
       isReorder = true;
     } else {
       const lIdAssignedTo = o.lead_id && typeof o.lead_id === 'object' ? String(o.lead_id.assignedTo) : null;
-      uid = lIdAssignedTo ? lIdAssignedTo : (o.created_by ? String(o.created_by) : null);
+      uid = o.verified_by ? String(o.verified_by) : (lIdAssignedTo ? lIdAssignedTo : (o.created_by ? String(o.created_by) : null));
       if (o.lead_id && typeof o.lead_id === 'object' && o.lead_id.status === 'old') {
         isReorder = true;
       }
@@ -960,6 +960,30 @@ export const getAllStaffCommissions = async (month, year) => {
 
   for (const o of allOrdersSR) processOrder(o);
   for (const o of allOrdersSM) processOrder(o);
+
+
+  const fromStr = new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
+  const toStr = new Date(Date.UTC(year, month + 1, 0)).toISOString().slice(0, 10);
+  for (const uid in statsMap) {
+    if (statsMap[uid].user.role === 'support' || statsMap[uid].user.role === 'sales') {
+      try {
+        await import('../shiprocket/models/followup.model.js').catch(e=>{});
+        await import('../shipmaxx/models/shipmaxxFollowup.model.js').catch(e=>{});
+        await import('../shiprocket/models/ndrNote.model.js').catch(e=>{});
+        const { getKPIs } = await import('../ops-dashboard/opsDashboard.service.js');
+        const res = await getKPIs({ preset: 'custom', from: fromStr, to: toStr, staffId: uid });
+        // Include BOTH New Delivered and Old Delivered (blDelivered)
+        if (statsMap[uid].user.role === 'support') {
+          statsMap[uid].totalDeliveries = (res.kpis.delivered?.value || 0) + (res.kpis.blDelivered?.value || 0);
+        } else {
+          statsMap[uid].totalDeliveries = res.kpis.delivered?.value || 0;
+        }
+        statsMap[uid].totalRevenue = res.kpis.revenue?.value || statsMap[uid].totalRevenue;
+      } catch (e) {
+        console.error('Failed to fetch KPIs for', statsMap[uid].user.role, e);
+      }
+    }
+  }
 
   let grandTotalDeliveries = allOrdersSR.length + allOrdersSM.length;
   let grandTotalRevenue = 0;
