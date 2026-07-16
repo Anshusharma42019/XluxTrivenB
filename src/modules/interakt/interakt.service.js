@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { config } from 'dotenv';
+import crypto from 'crypto';
 config();
 
 const INTERAKT_API_KEY = process.env.INTERAKT_API_KEY;
@@ -134,41 +135,52 @@ export const sendRcsMessage = async ({ countryCode = '+91', phoneNumber, cardTit
 /**
  * Send an RCS Template Message with SMS Fallback
  */
-export const sendRcsTemplate = async ({ countryCode = '+91', phoneNumber, templateName, languageCode = 'en', carouselCards = [], campaignId, smsFallbackContent, dltTemplateId, variables = [] }) => {
-  if (!INTERAKT_API_KEY) return;
-  try {
-    const payload = {
-      countryCode,
-      phoneNumber,
-      template: {
-        name: templateName,
-        languageCode,
-        carouselCards: carouselCards.map(card => ({
-          bodyValues: card.bodyValues
-        }))
-      },
-      type: "Template",
-      campaignId,
-      fallback: [
-        {
-          channel: "sms",
-          sender_id: "INTRKT", // Replace with actual
-          pe_id: "1201159195599372920",
-          provider_name: "default",
-          content: {
-            message: smsFallbackContent,
-            dlt_te_id: dltTemplateId,
-            variables: variables
-          }
-        }
-      ]
-    };
-
-    const response = await axios.post('https://api.interakt.ai/v1/public/rcs/message/', payload, { headers: getHeaders() });
-    return response.data;
-  } catch (error) {
-    console.error('Interakt Send RCS Template Error:', error?.response?.data || error.message);
+export const sendRcsTemplate = async ({ phone, templateName, languageCode = 'en', carouselCards = [], campaignId, smsFallbackContent, dltTemplateId, variables = [] }) => {
+  if (!INTERAKT_API_KEY) throw new Error('INTERAKT_API_KEY not configured');
+  
+  let cleanPhone = phone.trim();
+  let countryCode = '91';
+  
+  if (cleanPhone.startsWith('+91')) cleanPhone = cleanPhone.substring(3);
+  else if (cleanPhone.startsWith('91') && cleanPhone.length === 12) cleanPhone = cleanPhone.substring(2);
+  else if (cleanPhone.startsWith('+')) {
+    const match = cleanPhone.match(/^\+(\d{1,3})(\d+)$/);
+    if (match) { countryCode = match[1]; cleanPhone = match[2]; }
   }
+  cleanPhone = cleanPhone.slice(-10);
+
+  const payload = {
+    countryCode: `+${countryCode}`,
+    phoneNumber: cleanPhone,
+    template: {
+      name: templateName,
+      languageCode,
+      carouselCards: carouselCards.map(card => ({
+        bodyValues: card.bodyValues
+      }))
+    },
+    type: "Template",
+    fallback: [
+      {
+        channel: "sms",
+        sender_id: process.env.DLT_SMS_SENDER_ID || "INTRKT",
+        pe_id: process.env.DLT_PROVIDER_ENTITY_ID || "1201159195599372920",
+        provider_name: "default",
+        content: {
+          message: smsFallbackContent || process.env.DLT_SMS_CONTENT || 'Thank you for contacting us.',
+          dlt_te_id: dltTemplateId || process.env.DLT_TEMPLATE_ID || '1107174012164676172',
+          variables: variables
+        }
+      }
+    ]
+  };
+
+  if (campaignId) {
+    payload.campaignId = campaignId;
+  }
+
+  const response = await axios.post('https://api.interakt.ai/v1/public/rcs/message/', payload, { headers: getHeaders() });
+  return response.data;
 };
 
 /**

@@ -7,7 +7,7 @@ import { generateReorderCommissions } from '../shiprocket/shiprocket.controller.
 const initShipmaxxCron = () => {
   // Sync pending orders every 15 minutes
   cron.schedule('*/15 * * * *', async () => {
-    console.log('[Cron] Running ShipMaxx auto-sync for recent in-transit orders...');
+    // console.log('[Cron] Running ShipMaxx auto-sync for recent in-transit orders...');
     try {
       // Find active orders created since the start of the previous month
       const trackingLimit = new Date();
@@ -33,7 +33,7 @@ const initShipmaxxCron = () => {
           if (existing) {
             statusUpdatedAt = existing.status_updated_at || statusUpdatedAt;
             if (newStatus === 'UNKNOWN') {
-              console.log(`[Cron] ShipMaxx order ${s.awb || s.order_id} status is UNKNOWN, skipping update.`);
+              // console.log(`[Cron] ShipMaxx order ${s.awb || s.order_id} status is UNKNOWN, skipping update.`);
               continue;
             }
           }
@@ -119,7 +119,7 @@ const initShipmaxxCron = () => {
       if (updatedCount > 0) {
         await generateReorderCommissions();
       }
-      console.log(`[Cron] ShipMaxx auto-sync finished. Checked ${activeOrders.length}, Updated ${updatedCount}.`);
+      // console.log(`[Cron] ShipMaxx auto-sync finished. Checked ${activeOrders.length}, Updated ${updatedCount}.`);
     } catch (error) {
       console.error('[Cron] ShipMaxx auto-sync error:', error.message);
     }

@@ -64,6 +64,13 @@ router.post('/distribute-absent', auth('admin', 'manager'), leadController.distr
 router.get('/search-phone', auth('admin', 'manager', 'sales', 'support'), departmentFilter, leadController.searchByPhone);
 router.get('/follow-up/list', auth('admin', 'manager', 'sales', 'support'), departmentFilter, leadController.getFollowUpLeads);
 
+// Bulk Message Routes
+router.post('/bulk-message', auth('admin', 'manager'), leadController.bulkMessage);
+router.get('/bulk-message/logs', auth('admin', 'manager'), leadController.getBulkMessageLogs);
+router.get('/bulk-message/logs/:batchId', auth('admin', 'manager'), leadController.getBulkMessageBatchDetails);
+router.get('/bulk-message/:batchId/status', auth('admin', 'manager'), leadController.getBulkMessageBatchStatus);
+router.post('/bulk-message/:batchId/retry', auth('admin', 'manager'), leadController.retryBulkMessageBatch);
+
 router
   .route('/:leadId')
   .get(auth('admin', 'manager', 'sales', 'support'), departmentFilter, validate(leadValidation.getLead), leadController.getLead)

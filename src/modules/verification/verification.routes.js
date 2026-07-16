@@ -571,17 +571,16 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
     if (status) {
       update.status = status;
       if (status === 'verified') {
-        // CLOSER RULE: Jo button dabaye — 100% credit usi ka!
-        // Chahe pehle kisi aur ka naam tha (Priti), ab jo verify kar raha hai (Sweety) uska hoga.
-        // On Hold se bhi agar koi verify kare — same rule applies.
-        update.verifiedBy = req.user._id;
-        update.assignedTo = req.user._id;
-      }
-      // For non-verified status changes: only assign if no owner exists yet
-      if (status !== 'verified' && !update.assignedTo) {
-        if (!recordBefore.assignedTo) {
+        // NAYA RULE: Jisne lead ko Verification me laya tha (assignedTo), 100% credit usi ka hoga!
+        // Button koi bhi dabaye, original owner change nahi hoga.
+        update.verifiedBy = recordBefore.assignedTo || req.user._id;
+        
+        if (!recordBefore.assignedTo && !update.assignedTo) {
           update.assignedTo = req.user._id;
         }
+      } else if (!update.assignedTo && !recordBefore.assignedTo) {
+        // For non-verified status changes: only assign if no owner exists yet
+        update.assignedTo = req.user._id;
       }
     }
     if (onHoldUntil) update.onHoldUntil = onHoldUntil;

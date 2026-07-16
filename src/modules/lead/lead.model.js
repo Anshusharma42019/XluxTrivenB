@@ -57,6 +57,10 @@ const leadSchema = new mongoose.Schema(
       enum: ['migraine', 'piles'],
       default: null,
     },
+    lastWhatsAppMessagedAt: { type: Date },
+    doNotContact: { type: Boolean, default: false },
+    hasUnreadReply: { type: Boolean, default: false },
+    lastMessageWasBulk: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

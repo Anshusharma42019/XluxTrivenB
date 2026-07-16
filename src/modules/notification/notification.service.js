@@ -9,6 +9,7 @@ export const getUserNotifications = async (userId, page = 1, limit = 20) => {
   const filter = { user: userId };
   const [notifications, total, unreadCount] = await Promise.all([
     Notification.find(filter)
+      .populate('relatedLead', 'name phone')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit),

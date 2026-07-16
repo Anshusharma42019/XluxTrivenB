@@ -5,6 +5,8 @@ import ApiResponse from '../../utils/ApiResponse.js';
 import ApiError from '../../utils/ApiError.js';
 import * as leadService from './lead.service.js';
 import * as interaktService from '../interakt/interakt.service.js';
+import { BulkMessageBatch, BulkMessageRecipient } from './bulkMessage.model.js';
+import { bulkMessageQueue } from './bulkMessageQueue.js';
 
 const createLead = catchAsync(async (req, res) => {
   const lead = await leadService.createLead(req.body, req.user._id, req.user.role, req.userDepartments);
@@ -36,6 +38,10 @@ const getLeads = catchAsync(async (req, res) => {
 
 const getLead = catchAsync(async (req, res) => {
   const lead = await leadService.getLeadById(req.params.leadId, req.user.role, req.user._id, req.userDepartments);
+  if (lead && lead.hasUnreadReply) {
+    await Lead.updateOne({ _id: lead._id }, { hasUnreadReply: false });
+    lead.hasUnreadReply = false;
+  }
   res.json(new ApiResponse(httpStatus.OK, lead, 'Lead fetched'));
 });
 
@@ -190,4 +196,147 @@ const deleteNote = catchAsync(async (req, res) => {
   res.json(new ApiResponse(httpStatus.OK, lead, 'Note deleted'));
 });
 
-export default { createLead, submitLead, submitLeadForDepartment, getLeads, getLead, updateLead, deleteLead, assignLead, addNote, deleteNote, markCNP, unmarkCNP, addFollowUp, setNextFollowUp, getFollowUpLeads, searchByPhone, exportLeads, distributeUnassigned, distributeAbsentSales };
+const bulkMessage = catchAsync(async (req, res) => {
+  const { status, templateName } = req.body;
+  if (!status || !templateName) throw new ApiError(httpStatus.BAD_REQUEST, 'Status and templateName are required');
+
+  const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const allLeads = await Lead.find({ status, isDeleted: false }).populate('assignedTo', 'name');
+  
+  const eligibleLeads = [];
+  const excludedLeads = [];
+
+  allLeads.forEach(lead => {
+    let excludeReason = null;
+    if (lead.doNotContact) {
+      excludeReason = 'Do Not Contact marked';
+    } else if (lead.lastWhatsAppMessagedAt && lead.lastWhatsAppMessagedAt > twentyFourHoursAgo) {
+      excludeReason = 'Messaged within last 24 hours';
+    } else if (!lead.phone || lead.phone.length < 10) {
+      excludeReason = 'Invalid or missing phone number';
+    }
+
+    if (excludeReason) {
+      excludedLeads.push({ lead_id: lead._id, error_reason: excludeReason });
+    } else {
+      eligibleLeads.push(lead);
+    }
+  });
+
+  const batch = await BulkMessageBatch.create({
+    section: status,
+    template: templateName,
+    sent_by: req.user._id,
+    total: eligibleLeads.length + excludedLeads.length,
+    excluded_count: excludedLeads.length,
+    status: 'processing'
+  });
+
+  const excludedRecipients = excludedLeads.map(ex => ({
+    batch_id: batch._id,
+    lead_id: ex.lead_id,
+    status: 'excluded',
+    error_reason: ex.error_reason
+  }));
+
+  const queuedRecipients = eligibleLeads.map(el => ({
+    batch_id: batch._id,
+    lead_id: el._id,
+    status: 'sent',
+  }));
+
+  if (excludedRecipients.length > 0) await BulkMessageRecipient.insertMany(excludedRecipients);
+  if (queuedRecipients.length > 0) await BulkMessageRecipient.insertMany(queuedRecipients);
+
+  const jobs = eligibleLeads.map(el => ({
+    name: 'sendTemplate',
+    data: {
+      batchId: batch._id,
+      leadId: el._id,
+      templateName,
+      phone: el.phone,
+      name: el.name,
+      source: el.source,
+      assignedToName: el.assignedTo?.name
+    }
+  }));
+
+  if (jobs.length > 0) {
+    await bulkMessageQueue.addBulk(jobs);
+  } else {
+    batch.status = 'completed';
+    batch.completed_at = new Date();
+    await batch.save();
+  }
+
+  res.status(httpStatus.ACCEPTED).json(new ApiResponse(httpStatus.ACCEPTED, {
+    batchId: batch._id,
+    totalMatched: allLeads.length,
+    eligible: eligibleLeads.length,
+    excluded: excludedLeads.length,
+    status: batch.status
+  }, 'Bulk message queued successfully'));
+});
+
+const getBulkMessageLogs = catchAsync(async (req, res) => {
+  const logs = await BulkMessageBatch.find()
+    .populate('sent_by', 'name email')
+    .sort({ createdAt: -1 });
+  res.json(new ApiResponse(httpStatus.OK, logs, 'Bulk message logs retrieved'));
+});
+
+const getBulkMessageBatchDetails = catchAsync(async (req, res) => {
+  const batch = await BulkMessageBatch.findById(req.params.batchId).populate('sent_by', 'name');
+  if (!batch) throw new ApiError(httpStatus.NOT_FOUND, 'Batch not found');
+  
+  const recipients = await BulkMessageRecipient.find({ batch_id: batch._id }).populate('lead_id', 'name phone');
+  res.json(new ApiResponse(httpStatus.OK, { batch, recipients }, 'Batch details retrieved'));
+});
+
+const getBulkMessageBatchStatus = catchAsync(async (req, res) => {
+  const batch = await BulkMessageBatch.findById(req.params.batchId);
+  if (!batch) throw new ApiError(httpStatus.NOT_FOUND, 'Batch not found');
+  res.json(new ApiResponse(httpStatus.OK, batch, 'Batch status retrieved'));
+});
+
+const retryBulkMessageBatch = catchAsync(async (req, res) => {
+  const batch = await BulkMessageBatch.findById(req.params.batchId);
+  if (!batch) throw new ApiError(httpStatus.NOT_FOUND, 'Batch not found');
+  
+  const failedRecipients = await BulkMessageRecipient.find({ batch_id: batch._id, status: 'failed' }).populate('lead_id');
+  if (failedRecipients.length === 0) {
+    return res.json(new ApiResponse(httpStatus.OK, batch, 'No failed messages to retry'));
+  }
+
+  batch.status = 'processing';
+  batch.failed_count -= failedRecipients.length;
+  await batch.save();
+
+  const leadIds = failedRecipients.map(r => r.lead_id._id);
+  const leads = await Lead.find({ _id: { $in: leadIds } }).populate('assignedTo', 'name');
+  const leadsMap = {};
+  leads.forEach(l => leadsMap[l._id] = l);
+
+  const finalJobs = failedRecipients.map(recipient => {
+    const el = leadsMap[recipient.lead_id._id];
+    return {
+      name: 'sendTemplate',
+      data: {
+        batchId: batch._id,
+        leadId: el._id,
+        templateName: batch.template,
+        phone: el.phone,
+        name: el.name,
+        source: el.source,
+        assignedToName: el.assignedTo?.name
+      }
+    };
+  });
+
+  await BulkMessageRecipient.updateMany({ batch_id: batch._id, status: 'failed' }, { status: 'sent', error_reason: null });
+  await bulkMessageQueue.addBulk(finalJobs);
+
+  res.status(httpStatus.ACCEPTED).json(new ApiResponse(httpStatus.ACCEPTED, batch, `Retrying ${finalJobs.length} messages`));
+});
+
+export default { createLead, submitLead, submitLeadForDepartment, getLeads, getLead, updateLead, deleteLead, assignLead, addNote, deleteNote, markCNP, unmarkCNP, addFollowUp, setNextFollowUp, getFollowUpLeads, searchByPhone, exportLeads, distributeUnassigned, distributeAbsentSales, bulkMessage, getBulkMessageLogs, getBulkMessageBatchDetails, getBulkMessageBatchStatus, retryBulkMessageBatch };

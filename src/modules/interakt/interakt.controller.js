@@ -7,6 +7,7 @@ import * as leadService from '../lead/lead.service.js';
 import streamifier from 'streamifier';
 import cloudinary from '../../config/cloudinary.js';
 import { sendWhatsAppMessage, sendInteraktChatMessage, getApprovedTemplates } from './interakt.service.js';
+import { createNotification } from '../notification/notification.service.js';
 
 /**
  * Handle incoming webhooks from Interakt
@@ -123,7 +124,16 @@ const handleWebhook = catchAsync(async (req, res) => {
           };
           
           try {
-            await leadService.createLead(newLeadData, defaultAdmin ? defaultAdmin._id : null, 'admin');
+            const createdLead = await leadService.createLead(newLeadData, defaultAdmin ? defaultAdmin._id : null, 'admin');
+            if (defaultAdmin) {
+              await createNotification({
+                user: defaultAdmin._id,
+                title: 'New WhatsApp Lead',
+                message: `${createdLead.name || createdLead.phone} sent a new message via WhatsApp.`,
+                type: 'lead_assigned',
+                relatedLead: createdLead._id
+              });
+            }
           } catch (createErr) {
             // If duplicate phone conflict — find that lead and add a note instead
             if (createErr.statusCode === 409 || createErr.message?.includes('already exists')) {
@@ -131,7 +141,18 @@ const handleWebhook = catchAsync(async (req, res) => {
               lead = await Lead.findOne({ phone: { $regex: normalizedPhone + '$' }, isDeleted: false });
               if (lead) {
                 lead.notes.push({ text: `[Interakt Message] ${messageText}`, direction: 'inbound' });
+                lead.hasUnreadReply = true;
                 await lead.save();
+                const notifyUser = lead.assignedTo || (defaultAdmin ? defaultAdmin._id : null);
+                if (notifyUser) {
+                  await createNotification({
+                    user: notifyUser,
+                    title: lead.lastMessageWasBulk ? 'New Bulk WhatsApp Reply' : 'New WhatsApp Reply',
+                    message: `${lead.name || lead.phone} replied: ${messageText}`,
+                    type: 'task',
+                    relatedLead: lead._id
+                  });
+                }
               }
             } else {
               throw createErr;
@@ -143,7 +164,35 @@ const handleWebhook = catchAsync(async (req, res) => {
             text: `[Interakt Message] ${messageText}`,
             direction: 'inbound',
           });
+          lead.hasUnreadReply = true;
           await lead.save();
+          console.log(`[Interakt Webhook] Lead found, lastMessageWasBulk: ${lead.lastMessageWasBulk}`);
+
+          const notifyUser = lead.assignedTo || (defaultAdmin ? defaultAdmin._id : null);
+          const titleStr = lead.lastMessageWasBulk ? 'New Bulk WhatsApp Reply' : 'New WhatsApp Reply';
+          const messageStr = `${lead.name || lead.phone} replied: ${messageText}`;
+          
+          if (notifyUser) {
+            console.log(`[Interakt Webhook] Creating notification for user ${notifyUser} with title ${titleStr}`);
+            await createNotification({
+              user: notifyUser,
+              title: titleStr,
+              message: messageStr,
+              type: 'task',
+              relatedLead: lead._id
+            });
+          }
+
+          if (defaultAdmin && notifyUser && notifyUser.toString() !== defaultAdmin._id.toString() && lead.lastMessageWasBulk) {
+            console.log(`[Interakt Webhook] Also notifying admin ${defaultAdmin._id} for Bulk Reply`);
+            await createNotification({
+              user: defaultAdmin._id,
+              title: titleStr,
+              message: messageStr,
+              type: 'task',
+              relatedLead: lead._id
+            });
+          }
         }
       }
     } else {

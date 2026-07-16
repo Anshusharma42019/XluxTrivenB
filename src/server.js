@@ -4,6 +4,7 @@ import connectDB from './config/database.js';
 import initAttendanceCron from './modules/attendance/attendance.cron.js';
 import initShipmaxxCron from './modules/shipmaxx/shipmaxx.cron.js';
 import initLeadCron from './modules/lead/lead.cron.js';
+import './modules/lead/bulkMessageQueue.js'; // Initialize worker
 import smx from './modules/shipmaxx/shipmaxx.service.js';
 import dns from 'dns';
 

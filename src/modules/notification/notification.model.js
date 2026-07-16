@@ -7,7 +7,7 @@ const notificationSchema = new mongoose.Schema(
     message: { type: String, required: true },
     type: {
       type: String,
-      enum: ['lead_assigned', 'task_due', 'task_overdue', 'lead_status_changed', 'reminder', 'general'],
+      enum: ['lead_assigned', 'task_due', 'task_overdue', 'lead_status_changed', 'reminder', 'general', 'task'],
       default: 'general',
     },
     relatedLead: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead' },
