@@ -4,9 +4,12 @@ export const createNotification = async (data) => {
   return Notification.create(data);
 };
 
-export const getUserNotifications = async (userId, page = 1, limit = 20) => {
+export const getUserNotifications = async (userId, page = 1, limit = 20, isWa = false) => {
   const skip = (page - 1) * limit;
   const filter = { user: userId };
+  if (isWa) {
+    filter.title = { $in: ['New Bulk WhatsApp Reply', 'New WhatsApp Reply', 'New WhatsApp Lead'] };
+  }
   const [notifications, total, unreadCount] = await Promise.all([
     Notification.find(filter)
       .populate('relatedLead', 'name phone')

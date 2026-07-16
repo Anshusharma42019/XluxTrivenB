@@ -6,7 +6,8 @@ import * as notificationService from './notification.service.js';
 const getNotifications = catchAsync(async (req, res) => {
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 20;
-  const result = await notificationService.getUserNotifications(req.user._id, page, limit);
+  const isWa = req.query.isWa === 'true';
+  const result = await notificationService.getUserNotifications(req.user._id, page, limit, isWa);
   res.json(new ApiResponse(httpStatus.OK, result, 'Notifications fetched'));
 });
 

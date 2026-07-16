@@ -179,7 +179,7 @@ export const generateReorderCommissions = async () => {
       }
 
       // Create Staff A commission (original delivery)
-      if (staffA && String(staffA) !== String(staffB)) {
+      if (staffA) {
         const amountA = calcAmount(true);
         if (amountA > 0) {
           await ReorderCommission.findOneAndUpdate(

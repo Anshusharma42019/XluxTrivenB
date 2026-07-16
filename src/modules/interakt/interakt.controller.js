@@ -40,6 +40,28 @@ const handleWebhook = catchAsync(async (req, res) => {
           extractedText = msgObj.message.text;
         } else if (msgObj?.text) {
           extractedText = msgObj.text;
+        } else if (msgObj?.type === 'button' && msgObj.button?.text) {
+          extractedText = `[Button Reply] ${msgObj.button.text}`;
+        } else if (msgObj?.type === 'interactive') {
+          if (msgObj.interactive?.type === 'button_reply') {
+            extractedText = `[Button Reply] ${msgObj.interactive.button_reply?.title || ''}`;
+          } else if (msgObj.interactive?.type === 'list_reply') {
+            extractedText = `[List Selection] ${msgObj.interactive.list_reply?.title || ''}`;
+          } else if (msgObj.interactive?.button_reply?.title) {
+            extractedText = `[Button Reply] ${msgObj.interactive.button_reply.title}`;
+          }
+        } else if (msgObj?.type === 'image' || msgObj?.image) {
+          extractedText = '[Image Attached]';
+        } else if (msgObj?.type === 'audio' || msgObj?.audio) {
+          extractedText = '[Audio Attached]';
+        } else if (msgObj?.type === 'video' || msgObj?.video) {
+          extractedText = '[Video Attached]';
+        } else if (msgObj?.type === 'document' || msgObj?.document) {
+          extractedText = '[Document Attached]';
+        } else if (msgObj?.type === 'location' || msgObj?.location) {
+          extractedText = '[Location Attached]';
+        } else if (msgObj?.type === 'contacts' || msgObj?.contacts) {
+          extractedText = '[Contact Attached]';
         }
 
         let referralText = "";
@@ -47,7 +69,7 @@ const handleWebhook = catchAsync(async (req, res) => {
           referralText = `\n[Clicked Ad: ${msgObj.referral.headline}]`;
         }
 
-        messageText = extractedText ? (extractedText + referralText) : (msgObj ? JSON.stringify(msgObj) : "New message received");
+        messageText = extractedText ? (extractedText + referralText).trim() : (msgObj ? `[${msgObj.type || 'Media/File'} Received]` : "New message received");
 
         let businessPhone = payload.data?.customer?.channel_phone_number || "";
         
@@ -129,7 +151,7 @@ const handleWebhook = catchAsync(async (req, res) => {
               await createNotification({
                 user: defaultAdmin._id,
                 title: 'New WhatsApp Lead',
-                message: `${createdLead.name || createdLead.phone} sent a new message via WhatsApp.`,
+                message: `${createdLead.name || createdLead.phone} replied: ${messageText}`,
                 type: 'lead_assigned',
                 relatedLead: createdLead._id
               });
@@ -152,6 +174,15 @@ const handleWebhook = catchAsync(async (req, res) => {
                     type: 'task',
                     relatedLead: lead._id
                   });
+                  if (defaultAdmin && notifyUser.toString() !== defaultAdmin._id.toString()) {
+                    await createNotification({
+                      user: defaultAdmin._id,
+                      title: lead.lastMessageWasBulk ? 'New Bulk WhatsApp Reply' : 'New WhatsApp Reply',
+                      message: `${lead.name || lead.phone} replied: ${messageText}`,
+                      type: 'task',
+                      relatedLead: lead._id
+                    });
+                  }
                 }
               }
             } else {
@@ -183,8 +214,8 @@ const handleWebhook = catchAsync(async (req, res) => {
             });
           }
 
-          if (defaultAdmin && notifyUser && notifyUser.toString() !== defaultAdmin._id.toString() && lead.lastMessageWasBulk) {
-            console.log(`[Interakt Webhook] Also notifying admin ${defaultAdmin._id} for Bulk Reply`);
+          if (defaultAdmin && notifyUser && notifyUser.toString() !== defaultAdmin._id.toString()) {
+            console.log(`[Interakt Webhook] Also notifying admin ${defaultAdmin._id} for Reply`);
             await createNotification({
               user: defaultAdmin._id,
               title: titleStr,
