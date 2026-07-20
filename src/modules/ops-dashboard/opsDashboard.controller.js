@@ -14,11 +14,11 @@ function extractParams(req) {
     preset:       req.query.preset    || 'mtd',
     from:         req.query.from,
     to:           req.query.to,
-    hub:          req.query.hub,
-    courier:      req.query.courier,
-    awb:          req.query.awb,
-    state:        req.query.state,
-    status:       req.query.status,
+    hub:          typeof req.query.hub === 'string' ? req.query.hub.trim() : req.query.hub,
+    courier:      typeof req.query.courier === 'string' ? req.query.courier.trim() : req.query.courier,
+    awb:          typeof req.query.awb === 'string' ? req.query.awb.trim() : req.query.awb,
+    state:        typeof req.query.state === 'string' ? req.query.state.trim() : req.query.state,
+    status:       typeof req.query.status === 'string' ? req.query.status.trim() : req.query.status,
     platform:     req.query.platform,
     page:         req.query.page  || 1,
     limit:        req.query.limit || 50,
@@ -37,3 +37,8 @@ export const getAging       = catchAsync(async (req, res) => res.json(new ApiRes
 export const getLeaderboard = catchAsync(async (req, res) => res.json(new ApiResponse(200, await svc.getLeaderboard(extractParams(req)), 'Leaderboard fetched')));
 export const getShipments   = catchAsync(async (req, res) => res.json(new ApiResponse(200, await svc.getShipments(extractParams(req)),   'Shipments fetched')));
 export const getAlerts      = catchAsync(async (req, res) => res.json(new ApiResponse(200, await svc.getAlerts(extractParams(req)),      'Alerts fetched')));
+
+export const submitRtoVerification = catchAsync(async (req, res) => {
+  const result = await svc.submitRtoVerification(req.body);
+  res.json(new ApiResponse(200, result, 'RTO verification saved successfully'));
+});

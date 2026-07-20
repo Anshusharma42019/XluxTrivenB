@@ -95,7 +95,11 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
         select: 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem department createdBy pending_reorder_source',
         populate: { path: 'createdBy', select: 'name role' }
       })
-      .populate('task', 'department')
+      .populate({
+        path: 'task',
+        select: 'department createdBy',
+        populate: { path: 'createdBy', select: 'name role' }
+      })
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit)

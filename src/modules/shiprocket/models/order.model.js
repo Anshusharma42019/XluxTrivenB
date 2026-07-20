@@ -75,6 +75,7 @@ const orderSchema = new mongoose.Schema({
   reorder_commission_generated: { type: Boolean, default: false },
   delivery_attempt: { type: Number, default: 1 },
   platform: { type: String, enum: ['shiprocket', 'shipmaxx'], default: 'shiprocket', index: true },
+  rto_verification_action: { type: String, enum: ['wants_again', 'no_need'], default: null },
   raw_response: mongoose.Schema.Types.Mixed,
 }, { timestamps: true });
 

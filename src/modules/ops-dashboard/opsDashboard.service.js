@@ -16,9 +16,20 @@ function buildDateRange(preset, from, to) {
   const m = istNow.getUTCMonth();
 
   if (preset === 'today')  return { start: new Date(`${istNow.toISOString().slice(0, 10)}T00:00:00.000+05:30`), end: new Date(`${istNow.toISOString().slice(0, 10)}T23:59:59.999+05:30`) };
-  if (preset === 'weekly') return { start: new Date(now.getTime() - 7 * 86400000), end: now };
-  if (preset === 'mtd')    return { start: new Date(Date.UTC(y, m, 1) - IST), end: now };
+  if (preset === 'yesterday') {
+    const yest = new Date(istNow.getTime() - 86400000);
+    return { start: new Date(`${yest.toISOString().slice(0, 10)}T00:00:00.000+05:30`), end: new Date(`${yest.toISOString().slice(0, 10)}T23:59:59.999+05:30`) };
+  }
+  if (preset === 'last7' || preset === 'weekly') return { start: new Date(now.getTime() - 7 * 86400000), end: now };
+  if (preset === 'month' || preset === 'mtd')    return { start: new Date(Date.UTC(y, m, 1) - IST), end: now };
+  if (preset === 'last_month') {
+    const startLast = new Date(Date.UTC(y, m - 1, 1) - IST);
+    const endLast = new Date(Date.UTC(y, m, 1) - IST - 1);
+    return { start: startLast, end: endLast };
+  }
+  if (preset === 'all') return { start: new Date(0), end: now };
   if (preset === 'qtd')    return { start: new Date(Date.UTC(y, Math.floor(m / 3) * 3, 1) - IST), end: now };
+  
   if (from && to)          return { start: new Date(`${from}T00:00:00.000+05:30`), end: new Date(`${to}T23:59:59.999+05:30`) };
   return { start: new Date(Date.UTC(y, m, 1) - IST), end: now };
 }
@@ -105,7 +116,7 @@ function classifyStatus(s = '') {
 
   // ── RTO Intersite / In-Transit (check BEFORE generic RTO) ─────────────────
   if (
-    v === 'RTO_IN_TRANSIT' || v === 'RTO_INTRANSIT' ||
+    v === 'RTO_IN_TRANSIT' || v === 'RTO_INTRANSIT' || v === 'RTO IN TRANSIT' ||
     v === 'RRA' ||                 // ShipMaxx raw code for RTO_INTRANSIT
     v === 'RTO_OFD'                // Out for delivery back to origin
   ) return 'rto_intersite';
@@ -113,11 +124,11 @@ function classifyStatus(s = '') {
   // ── RTO (returned / initiated / delivered back) ────────────────────────────
   if (
     v === 'RTO' || v === 'RTO_INITIATED' ||
-    v === 'RTO_DELIVERED' || v === 'RTO_NDR'
+    v === 'RTO_DELIVERED' || v === 'RTO_NDR' || v === 'RTO_UNDELIVERED'
   ) return 'rto';
 
   // ── Out for Delivery ───────────────────────────────────────────────────────
-  if (v === 'OFD' || v === 'OUT_FOR_DELIVERY' || v === 'OUT_FOR_PICKUP') return 'ofd';
+  if (v === 'OFD' || v === 'OUT_FOR_DELIVERY' || v === 'OUT FOR DELIVERY') return 'ofd';
 
   // ── Undelivered / NDR ──────────────────────────────────────────────────────
   if (
@@ -136,24 +147,60 @@ function classifyStatus(s = '') {
  * Backlog activity (orders created in previous months) are fetched separately.
  */
 async function fetchOrderStats(filter) {
-  const proj = { status: 1, delivery_attempt: 1, delivered_at: 1, createdAt: 1, sub_total: 1, total: 1 };
+  const proj = { status: 1, delivery_attempt: 1, delivered_at: 1, createdAt: 1, sub_total: 1, total: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1 };
+  const populates = [
+    { path: 'lead_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
+    { path: 'verified_by', select: 'role' },
+    { path: 'verification_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
+    { path: 'created_by', select: 'role' }
+  ];
   const [sr, sm] = await Promise.all([
-    Order.find(filter, proj).lean(),
-    ShipmaxxOrder.find(filter, proj).lean(),
+    Order.find(filter, proj).populate(populates).lean(),
+    ShipmaxxOrder.find(filter, proj).populate(populates).lean(),
   ]);
-  return [...sr, ...sm];
+  const all = [...sr, ...sm].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+  
+  const seen = new Set();
+  const deduped = [];
+  for (const o of all) {
+    const leadKey = o.lead_id ? (o.lead_id._id ? o.lead_id._id.toString() : o.lead_id.toString()) : null;
+    const key = leadKey ? 'lead_' + leadKey : (o.awb_code ? 'awb_' + o.awb_code : (o.order_id ? 'ord_' + o.order_id : 'id_' + o._id.toString()));
+    if (!seen.has(key)) {
+      seen.add(key);
+      deduped.push(o);
+    }
+  }
+  return deduped;
 }
 
 
 function calcKPIs(orders) {
   let delivered = 0, ofd = 0, undelivered = 0, rto = 0, rtoIntersite = 0, inTransit = 0, deliveredRevenue = 0;
   let firstAttemptDelivered = 0, knownAttemptDelivered = 0, totalTat = 0, tatCount = 0;
+  let salesDelivered = 0, supportDelivered = 0;
+  let totalSales = 0, totalSupport = 0;
 
   for (const o of orders) {
+    let staffRole = '';
+    // If it's a fresh sale (source_order_id is null), prioritize Lead Owner (Sales)
+    // If it's a re-order (source_order_id exists), prioritize the person who verified it (Support)
+    if (o.source_order_id) {
+      staffRole = o.verified_by?.role || o.verification_id?.assignedTo?.role || o.created_by?.role || o.lead_id?.assignedTo?.role || '';
+    } else {
+      staffRole = o.lead_id?.assignedTo?.role || o.verified_by?.role || o.verification_id?.assignedTo?.role || o.created_by?.role || '';
+    }
+    
+    if (staffRole === 'sales') totalSales++;
+    else totalSupport++;
+
     const cat = classifyStatus(o.status);
     if (cat === 'delivered') {
       delivered++;
       deliveredRevenue += (Number(o.sub_total) || Number(o.total) || 0);
+      
+      if (staffRole === 'sales') salesDelivered++;
+      else supportDelivered++;
+      
       // Only count first-attempt for orders where delivery_attempt is explicitly set
       if (o.delivery_attempt !== null && o.delivery_attempt !== undefined) {
         knownAttemptDelivered++;
@@ -174,7 +221,7 @@ function calcKPIs(orders) {
   const ndrRate = total                > 0 ? +((undelivered / total)                         * 100).toFixed(1) : 0;
   const fadr    = knownAttemptDelivered > 0 ? +((firstAttemptDelivered / knownAttemptDelivered) * 100).toFixed(1) : 0;
   const avgTat  = tatCount             > 0 ? +(totalTat / tatCount).toFixed(1) : 0;
-  return { delivered, ofd, undelivered, rto, rtoIntersite, inTransit, ndrRate, fadr, avgTat, total, deliveredRevenue };
+  return { delivered, ofd, undelivered, rto, rtoIntersite, inTransit, ndrRate, fadr, avgTat, total, deliveredRevenue, salesDelivered, supportDelivered, totalSales, totalSupport };
 }
 
 function pctChange(curr, prev) {
@@ -203,24 +250,21 @@ export async function getKPIs(params) {
     verFPrv.$or = [{ verifiedBy: id }, { assignedTo: id }];
   }
 
-  const [orders, prevOrders, verified, prevVerified, totalShipments, prevTotalShipments] = await Promise.all([
+  const [orders, prevOrders, verified, prevVerified] = await Promise.all([
     fetchOrderStats(f),
     fetchOrderStats(fPrv),
     Verification.countDocuments(verF),
-    Verification.countDocuments(verFPrv),
-    // Total shipments = ALL orders created in this period (createdAt) from both platforms
-    Promise.all([
-      Order.countDocuments({ ...f, createdAt: { $gte: start, $lte: end } }),
-      ShipmaxxOrder.countDocuments({ ...f, createdAt: { $gte: start, $lte: end } }),
-    ]).then(([sr, sm]) => sr + sm),
-    Promise.all([
-      Order.countDocuments({ ...fPrv, createdAt: { $gte: ps, $lte: pe } }),
-      ShipmaxxOrder.countDocuments({ ...fPrv, createdAt: { $gte: ps, $lte: pe } }),
-    ]).then(([sr, sm]) => sr + sm),
+    Verification.countDocuments(verFPrv)
   ]);
 
   // Backlog fetches (Orders created BEFORE start, but had activity THIS period)
-  const proj = { status: 1 };
+  const projBl = { status: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1 };
+  const populates = [
+    { path: 'lead_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
+    { path: 'verified_by', select: 'role' },
+    { path: 'verification_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
+    { path: 'created_by', select: 'role' }
+  ];
   const backlogFilter = { ...f, createdAt: { $lt: start } };
   
   const baseF = { ...f };
@@ -229,43 +273,71 @@ export async function getKPIs(params) {
   // For total delivered, check either delivered_at OR status_updated_at (fallback if delivered_at is missing)
   const deliveredTimeFilter = { $or: [ { delivered_at: { $gte: start, $lte: end } }, { delivered_at: { $exists: false }, status_updated_at: { $gte: start, $lte: end } }, { delivered_at: null, status_updated_at: { $gte: start, $lte: end } } ] };
   
-  // Combine baseF (which may have its own $or for scoping) and deliveredTimeFilter using $and
-  const totalDeliveredFilter = { $and: [ baseF, { status: { $in: ['DELIVERED', 'DEL'] } }, deliveredTimeFilter ] };
   const backlogActiveFilter = { $and: [ backlogFilter, { status: { $nin: ['DELIVERED', 'DEL'] }, status_updated_at: { $gte: start, $lte: end } } ] };
   const backlogDeliveredFilter = { $and: [ baseF, { createdAt: { $lt: start }, status: { $in: ['DELIVERED', 'DEL'] } }, deliveredTimeFilter ] };
 
-  const [totalDelSr, totalDelSm, blActSr, blActSm, blDelSr, blDelSm] = await Promise.all([
-    Order.countDocuments(totalDeliveredFilter),
-    ShipmaxxOrder.countDocuments(totalDeliveredFilter),
-    Order.find(backlogActiveFilter, proj).lean(),
-    ShipmaxxOrder.find(backlogActiveFilter, proj).lean(),
-    Order.countDocuments(backlogDeliveredFilter),
-    ShipmaxxOrder.countDocuments(backlogDeliveredFilter)
+  const [blActSr, blActSm, blDelSr, blDelSm] = await Promise.all([
+    Order.find(backlogActiveFilter, projBl).populate(populates).lean(),
+    ShipmaxxOrder.find(backlogActiveFilter, projBl).populate(populates).lean(),
+    Order.find(backlogDeliveredFilter, projBl).populate(populates).lean(),
+    ShipmaxxOrder.find(backlogDeliveredFilter, projBl).populate(populates).lean()
   ]);
 
-  const backlogOrders = [...blActSr, ...blActSm];
+  // Live RTO Intersite query (ignores date range entirely to show all active)
+  const rtoIntersiteFilter = { ...baseF };
+  rtoIntersiteFilter.status = { $regex: '^rto_in_transit$|^rto_intransit$|^rto in transit$|^rra$|^rto_ofd$', $options: 'i' };
+  const [liveRtoIntersiteSr, liveRtoIntersiteSm] = await Promise.all([
+    Order.countDocuments(rtoIntersiteFilter),
+    ShipmaxxOrder.countDocuments(rtoIntersiteFilter)
+  ]);
+  const liveRtoIntersiteCount = liveRtoIntersiteSr + liveRtoIntersiteSm;
+
+  const dedup = (arr) => {
+    const seen = new Set();
+    const res = [];
+    for (const o of arr) {
+      const leadKey = o.lead_id ? (o.lead_id._id ? o.lead_id._id.toString() : o.lead_id.toString()) : null;
+      const key = leadKey ? 'lead_' + leadKey : (o.awb_code ? 'awb_' + o.awb_code : (o.order_id ? 'ord_' + o.order_id : 'id_' + o._id.toString()));
+      if (!seen.has(key)) { seen.add(key); res.push(o); }
+    }
+    return res;
+  };
+
+  const backlogOrders = dedup([...blActSr, ...blActSm]);
+  const backlogDeliveredOrders = dedup([...blDelSr, ...blDelSm]);
 
   const curr = calcKPIs(orders);
   const prev = calcKPIs(prevOrders);
   const backlog = calcKPIs(backlogOrders);
+  const backlogDel = calcKPIs(backlogDeliveredOrders);
+
+  const totalShipments = curr.total;
+  const prevTotalShipments = prev.total;
 
   // Directly calculate old deliveries instead of (Total - New) to avoid undercounting issues
-  const calculatedBlDelivered = blDelSr + blDelSm;
+  const calculatedBlDelivered = backlogDeliveredOrders.length;
 
   return {
     period: { start, end },
     kpis: {
       totalShipments: { value: totalShipments,    change: pctChange(totalShipments,    prevTotalShipments) },
+      totalSales:     { value: curr.totalSales,   change: pctChange(curr.totalSales,   prev.totalSales) },
+      totalSupport:   { value: curr.totalSupport, change: pctChange(curr.totalSupport, prev.totalSupport) },
       verified:       { value: verified,           change: pctChange(verified,          prevVerified)       },
       inTransit:      { value: curr.inTransit,     change: pctChange(curr.inTransit,    prev.inTransit)     },
       ofd:            { value: curr.ofd,           change: pctChange(curr.ofd,          prev.ofd)           },
-      delivered:      { value: curr.delivered,     change: pctChange(curr.delivered,    prev.delivered)     },
+      delivered:      { value: curr.delivered + calculatedBlDelivered,     change: pctChange(curr.delivered + calculatedBlDelivered,    prev.delivered)     },
+      salesDelivered: { value: curr.salesDelivered, change: pctChange(curr.salesDelivered, prev.salesDelivered) },
+      supportDelivered: { value: curr.supportDelivered + calculatedBlDelivered, change: pctChange(curr.supportDelivered + calculatedBlDelivered, prev.supportDelivered) },
+      deliveredRate:  { value: totalShipments ? Math.round((curr.delivered / totalShipments) * 100) : 0, change: 0 },
+      rtoRate:        { value: (curr.delivered + curr.rto + curr.rtoIntersite) > 0 ? Math.round(((curr.rto + curr.rtoIntersite) / (curr.delivered + curr.rto + curr.rtoIntersite)) * 100) : 0, change: 0 },
       revenue:        { value: curr.deliveredRevenue, change: 0 },
       undelivered:    { value: curr.undelivered,   change: pctChange(curr.undelivered,  prev.undelivered)   },
       rto:            { value: curr.rto,           change: pctChange(curr.rto,          prev.rto)           },
-      rtoIntersite:   { value: curr.rtoIntersite,  change: pctChange(curr.rtoIntersite, prev.rtoIntersite)  },
-      // Backlog KPIs
+      rtoIntersite:   { value: liveRtoIntersiteCount, change: pctChange(liveRtoIntersiteCount, prev.rtoIntersite) },
+      // Backlog KPIs (kept for legacy support if frontend still asks for it)
       blDelivered:    { value: calculatedBlDelivered, change: 0 },
+      blOfd:          { value: backlog.ofd,           change: 0 },
       blUndelivered:  { value: backlog.undelivered,   change: 0 },
       blRto:          { value: backlog.rto,           change: 0 },
       blRtoIntersite: { value: backlog.rtoIntersite,  change: 0 },
@@ -285,7 +357,7 @@ export async function getTrend(params) {
   const { preset, from, to, hub, courier, state, staffId } = params;
   const { start, end } = buildDateRange(preset, from, to);
   const staffScope = await getStaffScope(staffId);
-  const filter = buildOrderFilter(start, end, { hub, courier, state, staffId, staffScope });
+  const filter = await buildOrderFilter(start, end, { hub, courier, state, staffId, staffScope });
 
   const [sr, sm] = await Promise.all([
     Order.find(filter, { status: 1, createdAt: 1 }).lean(),
@@ -317,7 +389,7 @@ export async function getFunnel(params) {
   const { preset, from, to, hub, courier, state, staffId } = params;
   const { start, end } = buildDateRange(preset, from, to);
   const staffScope = await getStaffScope(staffId);
-  const filter = buildOrderFilter(start, end, { hub, courier, state, staffId, staffScope });
+  const filter = await buildOrderFilter(start, end, { hub, courier, state, staffId, staffScope });
 
   const verF = { createdAt: { $gte: start, $lte: end } };
   if (staffId) verF.assignedTo = new mongoose.Types.ObjectId(staffId);
@@ -401,20 +473,26 @@ export async function getAging(params) {
   const proj = {
     order_id: 1, awb_code: 1, billing_customer_name: 1, billing_city: 1,
     billing_state: 1, courier_name: 1, status: 1, status_updated_at: 1,
-    delivery_attempt: 1, sub_total: 1, platform: 1,
+    delivery_attempt: 1, sub_total: 1, platform: 1, rto_verification_action: 1,
+    problem: 1, comments: 1, notes: 1, follow_ups: 1, order_items: 1,
+    billing_phone: 1, billing_address: 1, billing_pincode: 1, verification_id: 1,
   };
+
+  const populates = [
+    { path: 'verification_id', select: 'problem department age weight height otherProblems problemDuration' }
+  ];
 
   const ofdFilter = { ...base, status: { $regex: 'out.?for.?delivery|^ofd', $options: 'i' }, status_updated_at: { $lte: new Date(now.getTime() - 2 * 86400000) } };
   const undFilter = { ...base, status: { $regex: '^undelivered|^ndr',        $options: 'i' }, delivery_attempt: { $gte: 3 } };
   const rtoFilter = { ...base, status: { $regex: 'rto.?in.?transit|rto.?intersite', $options: 'i' }, status_updated_at: { $lte: new Date(now.getTime() - 5 * 86400000) } };
 
   const [ofdSR, ofdSM, undSR, undSM, rtoSR, rtoSM] = await Promise.all([
-    Order.find(ofdFilter, proj).sort({ status_updated_at: 1 }).limit(150).lean(),
-    ShipmaxxOrder.find(ofdFilter, proj).sort({ status_updated_at: 1 }).limit(150).lean(),
-    Order.find(undFilter, proj).sort({ delivery_attempt: -1 }).limit(150).lean(),
-    ShipmaxxOrder.find(undFilter, proj).sort({ delivery_attempt: -1 }).limit(150).lean(),
-    Order.find(rtoFilter, proj).sort({ status_updated_at: 1 }).limit(150).lean(),
-    ShipmaxxOrder.find(rtoFilter, proj).sort({ status_updated_at: 1 }).limit(150).lean(),
+    Order.find(ofdFilter, proj).populate(populates).sort({ status_updated_at: 1 }).limit(150).lean(),
+    ShipmaxxOrder.find(ofdFilter, proj).populate(populates).sort({ status_updated_at: 1 }).limit(150).lean(),
+    Order.find(undFilter, proj).populate(populates).sort({ delivery_attempt: -1 }).limit(150).lean(),
+    ShipmaxxOrder.find(undFilter, proj).populate(populates).sort({ delivery_attempt: -1 }).limit(150).lean(),
+    Order.find(rtoFilter, proj).populate(populates).sort({ status_updated_at: 1 }).limit(150).lean(),
+    ShipmaxxOrder.find(rtoFilter, proj).populate(populates).sort({ status_updated_at: 1 }).limit(150).lean(),
   ]);
 
   const tag = (arr, plat) => arr.map(o => ({ ...o, platform: o.platform || plat }));
@@ -499,9 +577,9 @@ export async function getShipments(params) {
     
     let targetStatusRegex = '';
     if (status === 'blDelivered') targetStatusRegex = '^delivered$|^del$';
-    else if (status === 'blRto') targetStatusRegex = '^rto$|^rto_initiated$|^rto_delivered$|^rto_ndr$';
+    else if (status === 'blRto') targetStatusRegex = '^rto$|^rto_initiated$|^rto_delivered$|^rto_ndr$|^rto_undelivered$';
     else if (status === 'blUndelivered') targetStatusRegex = '^und$|undelivered|^ndr$|^dex$|^pcn$';
-    else if (status === 'blRtoIntersite') targetStatusRegex = '^rto_in_transit$|^rto_intransit$|^rra$|^rto_ofd$';
+    else if (status === 'blRtoIntersite') targetStatusRegex = '^rto_in_transit$|^rto_intransit$|^rto in transit$|^rra$|^rto_ofd$';
 
     const statusTimeFilter = { $or: [ { delivered_at: { $gte: start, $lte: end } }, { delivered_at: { $exists: false }, status_updated_at: { $gte: start, $lte: end } }, { delivered_at: null, status_updated_at: { $gte: start, $lte: end } } ] };
     
@@ -517,15 +595,83 @@ export async function getShipments(params) {
     
     baseFilter.$and = andClauses;
   } else if (status && status !== 'totalShipments') {
-    const statusRegex = { 
-      delivered: '^delivered$|^del$', 
-      ofd: '^ofd$|^out_for_delivery$|^out_for_pickup$', 
-      undelivered: '^und$|undelivered|^ndr$|^dex$|^pcn$', 
-      rto: '^rto$|^rto_initiated$|^rto_delivered$|^rto_ndr$',
-      inTransit: '^in.?transit$|^shipped$|^dispatched$',
-      rtoIntersite: '^rto_in_transit$|^rto_intransit$|^rra$|^rto_ofd$'
-    };
-    baseFilter.status = { $regex: statusRegex[status] || status, $options: 'i' };
+    if (['totalSales', 'totalSupport', 'salesDelivered', 'supportDelivered'].includes(status)) {
+      const User = (await import('../user/user.model.js')).default;
+      const Lead = (await import('../lead/lead.model.js')).default;
+      const salesUsers = await User.find({ role: 'sales' }, '_id').lean();
+      const supportUsers = await User.find({ role: { $in: ['support', 'admin', 'manager'] } }, '_id').lean();
+      const salesUserIds = salesUsers.map(u => u._id);
+      const supportUserIds = supportUsers.map(u => u._id);
+      
+      const salesLeads = await Lead.find({ assignedTo: { $in: salesUserIds } }, '_id').lean();
+      const supportLeads = await Lead.find({ assignedTo: { $in: supportUserIds } }, '_id').lean();
+      const salesLeadIds = salesLeads.map(l => l._id);
+      const supportLeadIds = supportLeads.map(l => l._id);
+
+      baseFilter.$and = baseFilter.$and || [];
+      if (status.includes('Sales') || status.includes('sales')) {
+        baseFilter.$and.push({
+          $or: [
+            { lead_id: { $in: salesLeadIds }, source_order_id: null },
+            { verified_by: { $in: salesUserIds }, source_order_id: { $ne: null } }
+          ]
+        });
+      } else {
+        baseFilter.$and.push({
+          $or: [
+            { lead_id: { $in: supportLeadIds }, source_order_id: null },
+            { verified_by: { $in: supportUserIds }, source_order_id: { $ne: null } },
+            { lead_id: { $exists: false } },
+            { lead_id: null }
+          ]
+        });
+      }
+
+      if (status.includes('Delivered')) {
+        baseFilter.status = { $regex: '^delivered$|^del$', $options: 'i' };
+        if (status === 'supportDelivered') {
+          const supportRoleCondition = baseFilter.$and.pop();
+          delete baseFilter.createdAt;
+          const deliveredTimeFilter = { $or: [ { delivered_at: { $gte: start, $lte: end } }, { delivered_at: { $exists: false }, status_updated_at: { $gte: start, $lte: end } }, { delivered_at: null, status_updated_at: { $gte: start, $lte: end } } ] };
+          baseFilter.$and.push({
+            $or: [
+              { $and: [ { createdAt: { $gte: start, $lte: end } }, supportRoleCondition ] },
+              { $and: [ { createdAt: { $lt: start } }, deliveredTimeFilter ] }
+            ]
+          });
+        }
+      }
+    } else {
+      const statusRegex = { 
+        delivered: '^delivered$|^del$', 
+        ofd: '^ofd$|^out_for_delivery$|^out for delivery$', 
+        undelivered: '^und$|undelivered|^ndr$|^dex$|^pcn$', 
+        rto: '^rto$|^rto_initiated$|^rto_delivered$|^rto_ndr$|^rto_undelivered$',
+        rtoIntersite: '^rto_in_transit$|^rto_intransit$|^rto in transit$|^rra$|^rto_ofd$'
+      };
+      
+      if (status === 'inTransit') {
+        baseFilter.status = { $not: { $regex: '^delivered$|^del$|^ofd$|^out_for_delivery$|^out for delivery$|^und$|undelivered|^ndr$|^dex$|^pcn$|^rto$|^rto_initiated$|^rto_delivered$|^rto_ndr$|^rto_undelivered$|^rto_in_transit$|^rto_intransit$|^rto in transit$|^rra$|^rto_ofd$', $options: 'i' } };
+      } else {
+        baseFilter.status = { $regex: statusRegex[status] || status, $options: 'i' };
+      }
+
+      if (status === 'delivered') {
+        delete baseFilter.createdAt;
+        const deliveredTimeFilter = { $or: [ { delivered_at: { $gte: start, $lte: end } }, { delivered_at: { $exists: false }, status_updated_at: { $gte: start, $lte: end } }, { delivered_at: null, status_updated_at: { $gte: start, $lte: end } } ] };
+        baseFilter.$and = baseFilter.$and || [];
+        baseFilter.$and.push({
+          $or: [
+            { createdAt: { $gte: start, $lte: end } },
+            deliveredTimeFilter
+          ]
+        });
+      }
+      
+      if (status === 'rtoIntersite') {
+        delete baseFilter.createdAt;
+      }
+    }
   }
 
   const skip = (Number(page) - 1) * Number(limit);
@@ -533,8 +679,14 @@ export async function getShipments(params) {
     order_id: 1, awb_code: 1, billing_customer_name: 1, billing_phone: 1,
     billing_city: 1, billing_state: 1, courier_name: 1, status: 1,
     status_updated_at: 1, delivery_attempt: 1, sub_total: 1, payment_method: 1,
-    delivered_at: 1, createdAt: 1, platform: 1, pickup_location: 1,
+    delivered_at: 1, createdAt: 1, platform: 1, pickup_location: 1, lead_id: 1,
+    rto_verification_action: 1, problem: 1, comments: 1, notes: 1, follow_ups: 1,
+    order_items: 1, billing_address: 1, billing_pincode: 1, verification_id: 1,
   };
+
+  const populates = [
+    { path: 'verification_id', select: 'problem department age weight height otherProblems problemDuration' }
+  ];
 
   let srOrders = [], smOrders = [], verOrders = [], srTotal = 0, smTotal = 0, verTotal = 0;
   
@@ -573,27 +725,38 @@ export async function getShipments(params) {
     combined = verOrders;
   } else {
     const sortField = (status && status !== 'totalShipments') ? 'status_updated_at' : 'createdAt';
+    let srOrders = [];
+    let smOrders = [];
     if (!platform || platform === 'shiprocket') {
-      [srTotal, srOrders] = await Promise.all([
-        Order.countDocuments(baseFilter),
-        Order.find(baseFilter, proj).sort({ [sortField]: -1 }).skip(skip).limit(Number(limit)).lean(),
-      ]);
+      srOrders = await Order.find(baseFilter, proj).populate(populates).lean();
     }
     if (!platform || platform === 'shipmaxx') {
-      [smTotal, smOrders] = await Promise.all([
-        ShipmaxxOrder.countDocuments(baseFilter),
-        ShipmaxxOrder.find(baseFilter, proj).sort({ [sortField]: -1 }).skip(skip).limit(Number(limit)).lean(),
-      ]);
+      smOrders = await ShipmaxxOrder.find(baseFilter, proj).populate(populates).lean();
     }
 
-    combined = [
+    const all = [
       ...srOrders.map(o => ({ ...o, platform: 'shiprocket' })),
       ...smOrders.map(o => ({ ...o, platform: 'shipmaxx' })),
     ].sort((a, b) => {
       const dateA = a[sortField] ? new Date(a[sortField]) : new Date(0);
       const dateB = b[sortField] ? new Date(b[sortField]) : new Date(0);
       return dateB - dateA;
-    }).slice(0, Number(limit));
+    });
+
+    const seen = new Set();
+    const deduped = [];
+    for (const o of all) {
+      const leadKey = o.lead_id ? (o.lead_id._id ? o.lead_id._id.toString() : o.lead_id.toString()) : null;
+      const key = leadKey ? 'lead_' + leadKey : (o.awb_code ? 'awb_' + o.awb_code : (o.order_id ? 'ord_' + o.order_id : 'id_' + o._id.toString()));
+      if (!seen.has(key)) {
+        seen.add(key);
+        deduped.push(o);
+      }
+    }
+
+    srTotal = deduped.length; // use srTotal as the combined total for ease
+    smTotal = 0;
+    combined = deduped.slice(skip, skip + Number(limit));
   }
 
   const totalAll = verTotal > 0 ? verTotal : (srTotal + smTotal);
@@ -624,4 +787,31 @@ export async function getAlerts(params) {
   if (slaBreach > 0) alerts.push({ type: 'sla_breach', severity: slaBreach > 50 ? 'critical' : 'medium', message: `${slaBreach} shipment${slaBreach > 1 ? 's' : ''} exceeded the ${SLA_DAYS}-day SLA`, value: slaBreach });
 
   return { alerts, kpis: { ndrRate: kpis.ndrRate, rtoRate, slaBreach } };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   9. RTO Verification
+══════════════════════════════════════════════════════════════════════════════ */
+export async function submitRtoVerification({ order_id, platform, action }) {
+  if (!order_id || !action) {
+    throw new Error('Order ID and action are required');
+  }
+  
+  if (platform === 'shipmaxx') {
+    const order = await ShipmaxxOrder.findOneAndUpdate(
+      { order_id },
+      { $set: { rto_verification_action: action } },
+      { new: true }
+    );
+    if (!order) throw new Error('Shipmaxx order not found');
+    return order;
+  } else {
+    const order = await Order.findOneAndUpdate(
+      { order_id },
+      { $set: { rto_verification_action: action } },
+      { new: true }
+    );
+    if (!order) throw new Error('Shiprocket order not found');
+    return order;
+  }
 }

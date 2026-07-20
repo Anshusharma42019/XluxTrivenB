@@ -1829,6 +1829,7 @@ export const searchOrderByPhone = catchAsync(async (req, res) => {
 // ── Send to Verification ──────────────────────────────────────────────────────
 export const sendToVerification = catchAsync(async (req, res) => {
   const { id } = req.params;
+  const { source } = req.body || {};
   const order = await Order.findOne({ _id: id, platform: 'shipmaxx' }).populate('lead_id');
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
 
@@ -1853,8 +1854,15 @@ export const sendToVerification = catchAsync(async (req, res) => {
   const followups = await Followup.find({ order_id: id }).sort({ followup_number: 1 }).lean();
   const lastRelief = [...followups].reverse().find(f => f.relief_percentage != null)?.relief_percentage ?? null;
 
+  let oldVer = null;
+  if (order.verification_id) {
+    oldVer = await Verification.findById(order.verification_id);
+  }
+
+  const titlePrefix = source === 'rto' ? '[RTO] Re-Verification for ' : 'Re-Verification for ';
+  const fallbackProblem = lead.problem || oldVer?.problem || order.problem || (order.order_items && order.order_items[0]?.name) || (order.products && order.products[0]?.name) || '';
   const task = await Task.create({
-    title: `Re-Verification for ${lead.name || order.billing_customer_name}`,
+    title: `${titlePrefix}${lead.name || order.billing_customer_name}`,
     lead: lead._id,
     assignedTo: req.user._id,
     createdBy: req.user._id,
@@ -1878,11 +1886,22 @@ export const sendToVerification = catchAsync(async (req, res) => {
     state: task.state,
     pincode: task.pincode,
     address: task.address,
+    problem: oldVer?.problem || task.problem,
+    age: oldVer?.age,
+    weight: oldVer?.weight,
+    height: oldVer?.height,
+    otherProblems: oldVer?.otherProblems,
+    problemDuration: oldVer?.problemDuration,
+    department: oldVer?.department,
     price: task.price,
     relief_percentage: lastRelief,
   });
 
-  await Order.findByIdAndUpdate(id, { followup_done: true, sent_to_verification: true, verified_by: req.user._id });
+  const updatePayload = { followup_done: true, sent_to_verification: true, verified_by: req.user._id };
+  if (source === 'rto') {
+    updatePayload.rto_verification_action = 'send_to_verification';
+  }
+  await Order.findByIdAndUpdate(id, updatePayload);
   await Lead.findByIdAndUpdate(lead._id, { $set: { pending_reorder_source: id, pending_reorder_staff: req.user._id } });
 
   res.json(new ApiResponse(200, task, 'Order sent to verification successfully'));

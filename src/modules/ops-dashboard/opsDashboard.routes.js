@@ -16,4 +16,6 @@ router.get('/leaderboard', opsAuth, c.getLeaderboard);
 router.get('/shipments',   opsAuth, c.getShipments);
 router.get('/alerts',      opsAuth, c.getAlerts);
 
+router.post('/rto-verification', opsAuth, c.submitRtoVerification);
+
 export default router;
