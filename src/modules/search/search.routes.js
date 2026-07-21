@@ -40,6 +40,32 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
   if (isValidObjectId) leadMatch.$or.push({ _id: queryStr });
   
   const orderMatch = { $or: [{ billing_customer_name: regex }, { billing_phone: regex }, { order_id: regex }, { awb_code: regex }] };
+
+  try {
+    const [leadPhones, orderPhones, maxxPhones, srDelivered, smDelivered] = await Promise.all([
+      Lead.find(leadMatch).select('phone').limit(10).lean(),
+      ShiprocketOrder.find(orderMatch).select('billing_phone').limit(10).lean(),
+      ShipmaxxOrder.find(orderMatch).select('billing_phone').limit(10).lean(),
+      (getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch).select('billing_phone').limit(10).lean(),
+      (getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch).select('billing_phone').limit(10).lean(),
+    ]);
+    const phoneSet = new Set();
+    const addPhone = (p) => { if (p) phoneSet.add(p.replace(/\D/g, '')); };
+    leadPhones.forEach(l => addPhone(l.phone));
+    orderPhones.forEach(o => addPhone(o.billing_phone));
+    maxxPhones.forEach(o => addPhone(o.billing_phone));
+    srDelivered.forEach(o => addPhone(o.billing_phone));
+    smDelivered.forEach(o => addPhone(o.billing_phone));
+    
+    const expandedPhones = Array.from(phoneSet).filter(Boolean);
+    if (expandedPhones.length > 0) {
+      expandedPhones.forEach(p => {
+        const reg = new RegExp(p, 'i');
+        leadMatch.$or.push({ phone: reg });
+        orderMatch.$or.push({ billing_phone: reg });
+      });
+    }
+  } catch (err) {}
   
   const [
     leads, 
@@ -70,15 +96,15 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     ),
     Appointment.find({ isDeleted: false, $or: [{ patientName: regex }, { phone: regex }] }).populate('createdBy', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
     
-    ShiprocketOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).populate({ path: 'verification_id', populate: { path: 'assignedTo', select: 'name' } }).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).populate('verification_staff_id', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShiprocketInTransitOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShiprocketRtoOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    ShiprocketOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).populate({ path: 'verification_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).populate({ path: 'verification_staff_id', select: 'name', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShiprocketInTransitOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShiprocketRtoOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
     
-    ShipmaxxOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).populate('verified_by', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).populate('verification_staff_id', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShipmaxxInTransitOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShipmaxxRtoOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' } }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    ShipmaxxOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).populate({ path: 'verified_by', select: 'name', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).populate({ path: 'verification_staff_id', select: 'name', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShipmaxxInTransitOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShipmaxxRtoOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
   ]);
 
   const allResults = [];
@@ -186,8 +212,9 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
   const processedOrders = new Set();
   const processShiprocket = (ordersArr) => {
     ordersArr.forEach(o => {
-      if (processedOrders.has(o._id.toString())) return;
-      processedOrders.add(o._id.toString());
+      const uniqueKey = o.order_id || o.awb_code || o._id.toString();
+      if (processedOrders.has(uniqueKey)) return;
+      processedOrders.add(uniqueKey);
       const latestNote = o.notes || '';
       
       let moduleName = 'Shiprocket';
@@ -209,8 +236,9 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
   const processedMaxxOrders = new Set();
   const processShipmaxx = (ordersArr) => {
     ordersArr.forEach(o => {
-      if (processedMaxxOrders.has(o._id.toString())) return;
-      processedMaxxOrders.add(o._id.toString());
+      const uniqueKey = o.order_id || o.awb_code || o._id.toString();
+      if (processedMaxxOrders.has(uniqueKey)) return;
+      processedMaxxOrders.add(uniqueKey);
       const latestNote = o.notes || '';
       
       let moduleName = 'ShipMaxx';
@@ -260,6 +288,13 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     if (r.customerName && r.customerName !== 'Unknown' && grouped[key].customerName === 'Unknown') {
       grouped[key].customerName = r.customerName;
     }
+  });
+  Object.values(grouped).forEach(group => {
+    const orderRecords = group.records.filter(r => ['order', 'shipmaxx'].includes(r.type));
+    orderRecords.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    orderRecords.forEach((order, index) => {
+      order.kit_number = index + 1;
+    });
   });
 
   const finalResults = Object.values(grouped).map(group => {
