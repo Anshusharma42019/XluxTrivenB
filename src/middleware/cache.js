@@ -40,7 +40,7 @@ export const cacheMiddleware = (ttlSeconds = 300) => {
         cache.set(cacheKey, body, ttlSeconds);
       }
       
-      return res.json(body);
+      return originalJson.call(this, body);
     };
 
     next();
@@ -59,6 +59,7 @@ export const cacheInvalidatorMiddleware = (req, res, next) => {
     const invalidate = () => {
       if (!invalidated && res.statusCode >= 200 && res.statusCode < 300) {
         cache.delPattern('route:/api/v1/dashboard');
+        cache.delPattern('route:/api/v1/ops-dashboard');
         invalidated = true;
       }
     };
@@ -66,13 +67,13 @@ export const cacheInvalidatorMiddleware = (req, res, next) => {
     res.json = function (body) {
       res.json = originalJson;
       invalidate();
-      return res.json(body);
+      return originalJson.call(this, body);
     };
 
     res.send = function (body) {
       res.send = originalSend;
       invalidate();
-      return res.send(body);
+      return originalSend.call(this, body);
     };
   }
   next();

@@ -5,6 +5,7 @@ import { Return } from '../shiprocket/models/return.model.js';
 import { ShipmaxxRtoOrder } from '../shipmaxx/models/shipmaxxRtoOrder.model.js';
 import Verification from '../verification/verification.model.js';
 import { NdrNote } from '../shiprocket/models/ndrNote.model.js';
+import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
 
 /* ─── IST helpers ──────────────────────────────────────────────────────────── */
 const IST = 5.5 * 60 * 60 * 1000;
@@ -147,7 +148,7 @@ function classifyStatus(s = '') {
  * Backlog activity (orders created in previous months) are fetched separately.
  */
 async function fetchOrderStats(filter) {
-  const proj = { status: 1, delivery_attempt: 1, delivered_at: 1, createdAt: 1, sub_total: 1, total: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1 };
+  const proj = { status: 1, delivery_attempt: 1, delivered_at: 1, createdAt: 1, sub_total: 1, total: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1, interakt_reply_text: 1, interakt_reply_at: 1 };
   const populates = [
     { path: 'lead_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
     { path: 'verified_by', select: 'role' },
@@ -175,12 +176,20 @@ async function fetchOrderStats(filter) {
 
 
 function calcKPIs(orders) {
-  let delivered = 0, ofd = 0, undelivered = 0, rto = 0, rtoIntersite = 0, inTransit = 0, deliveredRevenue = 0;
+  let delivered = 0, ofd = 0, undelivered = 0, rto = 0, rtoIntersite = 0, inTransit = 0, deliveredRevenue = 0, interaktReplies = 0;
+  let replyReattempt = 0, replyDawa = 0;
   let firstAttemptDelivered = 0, knownAttemptDelivered = 0, totalTat = 0, tatCount = 0;
   let salesDelivered = 0, supportDelivered = 0;
   let totalSales = 0, totalSupport = 0;
 
   for (const o of orders) {
+    if (o.interakt_reply_text && String(o.interakt_reply_text).trim()) {
+      interaktReplies++;
+      const replyStr = String(o.interakt_reply_text).toLowerCase();
+      if (replyStr.includes('reattempt')) replyReattempt++;
+      if (replyStr.includes('dawa') || replyStr.includes('medicine')) replyDawa++;
+    }
+
     let staffRole = '';
     // If it's a fresh sale (source_order_id is null), prioritize Lead Owner (Sales)
     // If it's a re-order (source_order_id exists), prioritize the person who verified it (Support)
@@ -221,7 +230,7 @@ function calcKPIs(orders) {
   const ndrRate = total                > 0 ? +((undelivered / total)                         * 100).toFixed(1) : 0;
   const fadr    = knownAttemptDelivered > 0 ? +((firstAttemptDelivered / knownAttemptDelivered) * 100).toFixed(1) : 0;
   const avgTat  = tatCount             > 0 ? +(totalTat / tatCount).toFixed(1) : 0;
-  return { delivered, ofd, undelivered, rto, rtoIntersite, inTransit, ndrRate, fadr, avgTat, total, deliveredRevenue, salesDelivered, supportDelivered, totalSales, totalSupport };
+  return { delivered, ofd, undelivered, rto, rtoIntersite, inTransit, ndrRate, fadr, avgTat, total, deliveredRevenue, salesDelivered, supportDelivered, totalSales, totalSupport, interaktReplies, replyReattempt, replyDawa };
 }
 
 function pctChange(curr, prev) {
@@ -258,7 +267,7 @@ export async function getKPIs(params) {
   ]);
 
   // Backlog fetches (Orders created BEFORE start, but had activity THIS period)
-  const projBl = { status: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1 };
+  const projBl = { status: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1, interakt_reply_text: 1, interakt_reply_at: 1 };
   const populates = [
     { path: 'lead_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
     { path: 'verified_by', select: 'role' },
@@ -270,27 +279,26 @@ export async function getKPIs(params) {
   const baseF = { ...f };
   delete baseF.createdAt;
 
-  // For total delivered, check either delivered_at OR status_updated_at (fallback if delivered_at is missing)
-  const deliveredTimeFilter = { $or: [ { delivered_at: { $gte: start, $lte: end } }, { delivered_at: { $exists: false }, status_updated_at: { $gte: start, $lte: end } }, { delivered_at: null, status_updated_at: { $gte: start, $lte: end } } ] };
-  
+  // Backlog delivered: orders created within the last 4 days before period start (month rollover), but delivered DURING this period.
+  const backlogWindow = new Date(start.getTime() - 4 * 24 * 60 * 60 * 1000);
+  const backlogDeliveredFilter = {
+    $and: [
+      baseF,
+      { createdAt: { $gte: backlogWindow, $lt: start } },
+      { status: { $in: ['DELIVERED', 'DEL'] } },
+      { delivered_at: { $gte: start, $lte: end } }
+    ]
+  };
+
+  // backlogActiveFilter: old orders still in transit/NDR that had activity this period
   const backlogActiveFilter = { $and: [ backlogFilter, { status: { $nin: ['DELIVERED', 'DEL'] }, status_updated_at: { $gte: start, $lte: end } } ] };
-  const backlogDeliveredFilter = { $and: [ baseF, { createdAt: { $lt: start }, status: { $in: ['DELIVERED', 'DEL'] } }, deliveredTimeFilter ] };
 
   const [blActSr, blActSm, blDelSr, blDelSm] = await Promise.all([
     Order.find(backlogActiveFilter, projBl).populate(populates).lean(),
     ShipmaxxOrder.find(backlogActiveFilter, projBl).populate(populates).lean(),
     Order.find(backlogDeliveredFilter, projBl).populate(populates).lean(),
-    ShipmaxxOrder.find(backlogDeliveredFilter, projBl).populate(populates).lean()
+    ShipmaxxOrder.find(backlogDeliveredFilter, projBl).populate(populates).lean(),
   ]);
-
-  // Live RTO Intersite query (ignores date range entirely to show all active)
-  const rtoIntersiteFilter = { ...baseF };
-  rtoIntersiteFilter.status = { $regex: '^rto_in_transit$|^rto_intransit$|^rto in transit$|^rra$|^rto_ofd$', $options: 'i' };
-  const [liveRtoIntersiteSr, liveRtoIntersiteSm] = await Promise.all([
-    Order.countDocuments(rtoIntersiteFilter),
-    ShipmaxxOrder.countDocuments(rtoIntersiteFilter)
-  ]);
-  const liveRtoIntersiteCount = liveRtoIntersiteSr + liveRtoIntersiteSm;
 
   const dedup = (arr) => {
     const seen = new Set();
@@ -314,37 +322,53 @@ export async function getKPIs(params) {
   const totalShipments = curr.total;
   const prevTotalShipments = prev.total;
 
-  // Directly calculate old deliveries instead of (Total - New) to avoid undercounting issues
-  const calculatedBlDelivered = backlogDeliveredOrders.length;
+  // Actual total delivered this period = cohort delivered (222) + backlog delivered (30) = 252
+  const totalDelivered    = curr.delivered + (backlogDel.delivered || 0);
+  const totalSalesDeliv   = curr.salesDelivered + (backlogDel.salesDelivered || 0);
+  const totalSupportDeliv = curr.supportDelivered + (backlogDel.supportDelivered || 0);
+  const totalRevenue      = curr.deliveredRevenue + (backlogDel.deliveredRevenue || 0);
+
+  // Delivery rate = total delivered / total cohort shipments
+  const deliveryRate = totalShipments > 0
+    ? Math.round((totalDelivered / totalShipments) * 100) : 0;
+
+  // RTO rate = rto / (total_delivered + rto + rtoIntersite)
+  const rtoBase = totalDelivered + curr.rto + curr.rtoIntersite;
+  const rtoRate = rtoBase > 0
+    ? Math.round(((curr.rto + curr.rtoIntersite) / rtoBase) * 100) : 0;
 
   return {
     period: { start, end },
     kpis: {
-      totalShipments: { value: totalShipments,    change: pctChange(totalShipments,    prevTotalShipments) },
-      totalSales:     { value: curr.totalSales,   change: pctChange(curr.totalSales,   prev.totalSales) },
-      totalSupport:   { value: curr.totalSupport, change: pctChange(curr.totalSupport, prev.totalSupport) },
-      verified:       { value: verified,           change: pctChange(verified,          prevVerified)       },
-      inTransit:      { value: curr.inTransit,     change: pctChange(curr.inTransit,    prev.inTransit)     },
-      ofd:            { value: curr.ofd,           change: pctChange(curr.ofd,          prev.ofd)           },
-      delivered:      { value: curr.delivered + calculatedBlDelivered,     change: pctChange(curr.delivered + calculatedBlDelivered,    prev.delivered)     },
-      salesDelivered: { value: curr.salesDelivered, change: pctChange(curr.salesDelivered, prev.salesDelivered) },
-      supportDelivered: { value: curr.supportDelivered + calculatedBlDelivered, change: pctChange(curr.supportDelivered + calculatedBlDelivered, prev.supportDelivered) },
-      deliveredRate:  { value: totalShipments ? Math.round((curr.delivered / totalShipments) * 100) : 0, change: 0 },
-      rtoRate:        { value: (curr.delivered + curr.rto + curr.rtoIntersite) > 0 ? Math.round(((curr.rto + curr.rtoIntersite) / (curr.delivered + curr.rto + curr.rtoIntersite)) * 100) : 0, change: 0 },
-      revenue:        { value: curr.deliveredRevenue, change: 0 },
-      undelivered:    { value: curr.undelivered,   change: pctChange(curr.undelivered,  prev.undelivered)   },
-      rto:            { value: curr.rto,           change: pctChange(curr.rto,          prev.rto)           },
-      rtoIntersite:   { value: liveRtoIntersiteCount, change: pctChange(liveRtoIntersiteCount, prev.rtoIntersite) },
-      // Backlog KPIs (kept for legacy support if frontend still asks for it)
-      blDelivered:    { value: calculatedBlDelivered, change: 0 },
-      blOfd:          { value: backlog.ofd,           change: 0 },
-      blUndelivered:  { value: backlog.undelivered,   change: 0 },
-      blRto:          { value: backlog.rto,           change: 0 },
-      blRtoIntersite: { value: backlog.rtoIntersite,  change: 0 },
+      totalShipments:   { value: totalShipments,       change: pctChange(totalShipments,       prevTotalShipments)           },
+      totalSales:       { value: curr.totalSales,      change: pctChange(curr.totalSales,      prev.totalSales)              },
+      totalSupport:     { value: curr.totalSupport,    change: pctChange(curr.totalSupport,    prev.totalSupport)            },
+      verified:         { value: verified,              change: pctChange(verified,             prevVerified)                 },
+      inTransit:        { value: curr.inTransit,        change: pctChange(curr.inTransit,       prev.inTransit)               },
+      ofd:              { value: curr.ofd,              change: pctChange(curr.ofd,             prev.ofd)                     },
+      // Total delivered completed during this period (cohort + backlog delivered)
+      delivered:        { value: totalDelivered,        change: pctChange(totalDelivered,       prev.delivered)               },
+      salesDelivered:   { value: totalSalesDeliv,       change: pctChange(totalSalesDeliv,     prev.salesDelivered)          },
+      supportDelivered: { value: totalSupportDeliv,     change: pctChange(totalSupportDeliv,   prev.supportDelivered)        },
       // Rates
-      ndrRate:        { value: curr.ndrRate,       change: pctChange(curr.ndrRate,      prev.ndrRate)       },
-      fadr:           { value: curr.fadr,          change: pctChange(curr.fadr,         prev.fadr)          },
-      avgTat:         { value: curr.avgTat,        change: pctChange(curr.avgTat,       prev.avgTat)        },
+      deliveredRate:    { value: deliveryRate,          change: 0 },
+      rtoRate:          { value: rtoRate,               change: 0 },
+      revenue:          { value: totalRevenue,          change: 0 },
+      undelivered:      { value: curr.undelivered,      change: pctChange(curr.undelivered,     prev.undelivered)             },
+      rto:              { value: curr.rto,              change: pctChange(curr.rto,             prev.rto)                     },
+      rtoIntersite:     { value: curr.rtoIntersite,     change: pctChange(curr.rtoIntersite,    prev.rtoIntersite)            },
+      // Backlog KPIs — old orders still active this period
+      blOfd:            { value: backlog.ofd,           change: 0 },
+      blUndelivered:    { value: backlog.undelivered,   change: 0 },
+      blRto:            { value: backlog.rto,           change: 0 },
+      blRtoIntersite:   { value: backlog.rtoIntersite,  change: 0 },
+      // Performance rates
+      ndrRate:          { value: curr.ndrRate,          change: pctChange(curr.ndrRate,         prev.ndrRate)                 },
+      fadr:             { value: curr.fadr,             change: pctChange(curr.fadr,            prev.fadr)                    },
+      avgTat:           { value: curr.avgTat,           change: pctChange(curr.avgTat,          prev.avgTat)                  },
+      interaktReplies:  { value: (curr.interaktReplies || 0) + (backlog.interaktReplies || 0) + (backlogDel.interaktReplies || 0), change: 0 },
+      replyReattempt:   { value: (curr.replyReattempt || 0) + (backlog.replyReattempt || 0) + (backlogDel.replyReattempt || 0), change: 0 },
+      replyDawa:        { value: (curr.replyDawa || 0) + (backlog.replyDawa || 0) + (backlogDel.replyDawa || 0), change: 0 },
     },
   };
 }
@@ -576,24 +600,33 @@ export async function getShipments(params) {
     baseFilter.createdAt = { $lt: start };
     
     let targetStatusRegex = '';
-    if (status === 'blDelivered') targetStatusRegex = '^delivered$|^del$';
-    else if (status === 'blRto') targetStatusRegex = '^rto$|^rto_initiated$|^rto_delivered$|^rto_ndr$|^rto_undelivered$';
+    if (status === 'blRto') targetStatusRegex = '^rto$|^rto_initiated$|^rto_delivered$|^rto_ndr$|^rto_undelivered$';
     else if (status === 'blUndelivered') targetStatusRegex = '^und$|undelivered|^ndr$|^dex$|^pcn$';
     else if (status === 'blRtoIntersite') targetStatusRegex = '^rto_in_transit$|^rto_intransit$|^rto in transit$|^rra$|^rto_ofd$';
+    else if (status === 'blOfd') targetStatusRegex = '^ofd$|^out_for_delivery$|^out for delivery$';
 
-    const statusTimeFilter = { $or: [ { delivered_at: { $gte: start, $lte: end } }, { delivered_at: { $exists: false }, status_updated_at: { $gte: start, $lte: end } }, { delivered_at: null, status_updated_at: { $gte: start, $lte: end } } ] };
-    
     // If baseFilter already has an $or (for staff scoping), we must wrap everything in $and
     const baseOr = baseFilter.$or;
     delete baseFilter.$or;
     
     const andClauses = [
       { status: { $regex: targetStatusRegex, $options: 'i' } },
-      status === 'blDelivered' ? statusTimeFilter : { status_updated_at: { $gte: start, $lte: end } }
+      { status_updated_at: { $gte: start, $lte: end } }
     ];
     if (baseOr) andClauses.push({ $or: baseOr });
     
     baseFilter.$and = andClauses;
+  } else if (['interaktReplies', 'reply_reattempt', 'reply_dawa'].includes(status)) {
+    delete baseFilter.createdAt;
+    const ninetyDaysAgo = new Date(start.getTime() - 90 * 24 * 60 * 60 * 1000);
+    baseFilter.createdAt = { $gte: ninetyDaysAgo };
+    if (status === 'reply_reattempt') {
+      baseFilter.interakt_reply_text = { $regex: 'reattempt', $options: 'i' };
+    } else if (status === 'reply_dawa') {
+      baseFilter.interakt_reply_text = { $regex: 'dawa|medicine', $options: 'i' };
+    } else {
+      baseFilter.interakt_reply_text = { $ne: null, $exists: true, $regex: /\S/ };
+    }
   } else if (status && status !== 'totalShipments') {
     if (['totalSales', 'totalSupport', 'salesDelivered', 'supportDelivered'].includes(status)) {
       const User = (await import('../user/user.model.js')).default;
@@ -629,17 +662,16 @@ export async function getShipments(params) {
 
       if (status.includes('Delivered')) {
         baseFilter.status = { $regex: '^delivered$|^del$', $options: 'i' };
-        if (status === 'supportDelivered') {
-          const supportRoleCondition = baseFilter.$and.pop();
-          delete baseFilter.createdAt;
-          const deliveredTimeFilter = { $or: [ { delivered_at: { $gte: start, $lte: end } }, { delivered_at: { $exists: false }, status_updated_at: { $gte: start, $lte: end } }, { delivered_at: null, status_updated_at: { $gte: start, $lte: end } } ] };
-          baseFilter.$and.push({
-            $or: [
-              { $and: [ { createdAt: { $gte: start, $lte: end } }, supportRoleCondition ] },
-              { $and: [ { createdAt: { $lt: start } }, deliveredTimeFilter ] }
-            ]
-          });
-        }
+        const roleCondition = baseFilter.$and.pop();
+        delete baseFilter.createdAt;
+        const backlogWindow = new Date(start.getTime() - 4 * 24 * 60 * 60 * 1000);
+        const deliveredTimeFilter = { delivered_at: { $gte: start, $lte: end } };
+        baseFilter.$and.push({
+          $or: [
+            { $and: [ { createdAt: { $gte: start, $lte: end } }, roleCondition ] },
+            { $and: [ { createdAt: { $gte: backlogWindow, $lt: start } }, deliveredTimeFilter, roleCondition ] }
+          ]
+        });
       }
     } else {
       const statusRegex = { 
@@ -658,18 +690,15 @@ export async function getShipments(params) {
 
       if (status === 'delivered') {
         delete baseFilter.createdAt;
-        const deliveredTimeFilter = { $or: [ { delivered_at: { $gte: start, $lte: end } }, { delivered_at: { $exists: false }, status_updated_at: { $gte: start, $lte: end } }, { delivered_at: null, status_updated_at: { $gte: start, $lte: end } } ] };
+        const backlogWindow = new Date(start.getTime() - 4 * 24 * 60 * 60 * 1000);
+        const deliveredTimeFilter = { delivered_at: { $gte: start, $lte: end } };
         baseFilter.$and = baseFilter.$and || [];
         baseFilter.$and.push({
           $or: [
             { createdAt: { $gte: start, $lte: end } },
-            deliveredTimeFilter
+            { $and: [ { createdAt: { $gte: backlogWindow, $lt: start } }, deliveredTimeFilter ] }
           ]
         });
-      }
-      
-      if (status === 'rtoIntersite') {
-        delete baseFilter.createdAt;
       }
     }
   }
@@ -682,6 +711,7 @@ export async function getShipments(params) {
     delivered_at: 1, createdAt: 1, platform: 1, pickup_location: 1, lead_id: 1,
     rto_verification_action: 1, problem: 1, comments: 1, notes: 1, follow_ups: 1,
     order_items: 1, billing_address: 1, billing_pincode: 1, verification_id: 1,
+    interakt_reply_text: 1, interakt_reply_at: 1,
   };
 
   const populates = [
@@ -724,7 +754,7 @@ export async function getShipments(params) {
   if (status === 'verified') {
     combined = verOrders;
   } else {
-    const sortField = (status && status !== 'totalShipments') ? 'status_updated_at' : 'createdAt';
+    const sortField = ['interaktReplies', 'reply_reattempt', 'reply_dawa'].includes(status) ? 'interakt_reply_at' : ((status && status !== 'totalShipments') ? 'status_updated_at' : 'createdAt');
     let srOrders = [];
     let smOrders = [];
     if (!platform || platform === 'shiprocket') {
@@ -815,3 +845,100 @@ export async function submitRtoVerification({ order_id, platform, action }) {
     return order;
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════════════════
+   10. Interakt Template Message Sending (Data-Wise for Undelivered / Shipments)
+══════════════════════════════════════════════════════════════════════════════ */
+export async function sendInteraktTemplateMessages({ items = [], filterParams = null, templateName, languageCode }) {
+  const tmplName = templateName || process.env.INTERAKT_UNDELIVERED_TEMPLATE || process.env.INTERAKT_BULK_TEMPLATE_UNDELIVERED || 'undeliveredattempt_ts';
+  const tmplLang = languageCode || 'en';
+  
+  let targetShipments = items;
+  if (!targetShipments || !targetShipments.length) {
+    if (filterParams) {
+      const res = await getShipments({ ...filterParams, page: 1, limit: 1000 });
+      targetShipments = res.shipments || [];
+    }
+  }
+
+  if (!targetShipments || !targetShipments.length) {
+    return { status: 'completed', total: 0, sent_count: 0, failed_count: 0, excluded_count: 0, message: 'No matching shipments found to message' };
+  }
+
+  let sent_count = 0;
+  let failed_count = 0;
+  let excluded_count = 0;
+  const errors = [];
+
+  for (const item of targetShipments) {
+    const phone = item.billing_phone || item.phone;
+    if (!phone || String(phone).replace(/\D/g, '').length < 10) {
+      excluded_count++;
+      continue;
+    }
+    const customerName = item.billing_customer_name || item.customerName || 'Customer';
+    const awbCode = item.awb_code || item.awbCode || 'Order';
+    const courierName = item.courier_name || item.courierName || 'Delivery Partner';
+    const amount = item.sub_total || item.amount || 0;
+    const status = item.status || 'Undelivered';
+
+    // The standard Interakt utility templates for this org (undeliveredattempt, crm_bulk_*) expect exactly 1 body variable ({{1}} = Customer Name).
+    // Passing extra body values causes a 400 Bad Request from Interakt.
+    const isSingleVarTemplate = tmplName.includes('undeliveredattempt') || tmplName.startsWith('crm_bulk_') || tmplName === 'hello_world';
+    const bodyValues = isSingleVarTemplate ? [
+      String(customerName)
+    ] : [
+      String(customerName),
+      String(awbCode),
+      String(courierName),
+      String(amount ? `₹${amount}` : '₹0'),
+      String(status)
+    ];
+
+    let success = false;
+    let primaryErrMsg = '';
+    let lastErrMsg = '';
+    
+    // Test primary language first, then fallback across other standard Interakt WhatsApp language variants
+    const langVariants = Array.from(new Set([tmplLang, 'en', 'en_US', 'en_GB']));
+    
+    for (const testLang of langVariants) {
+      try {
+        await sendWhatsAppMessage({
+          phone: String(phone),
+          messageText: `Dear ${customerName}, update regarding your shipment ${awbCode} via ${courierName}.`,
+          bodyValues,
+          templateName: tmplName,
+          languageCode: testLang,
+        });
+        success = true;
+        break;
+      } catch (err) {
+        lastErrMsg = err?.response?.data?.message || err?.message || 'Unknown error';
+        if (!primaryErrMsg) primaryErrMsg = lastErrMsg;
+        // If error is not a template language error, do not retry other languages
+        if (!lastErrMsg.toLowerCase().includes('no approved template found')) {
+          break;
+        }
+      }
+    }
+
+    if (success) {
+      sent_count++;
+    } else {
+      failed_count++;
+      if (errors.length < 5) errors.push(`${phone}: ${primaryErrMsg || lastErrMsg}`);
+    }
+  }
+
+  return {
+    status: 'completed',
+    total: targetShipments.length,
+    sent_count,
+    failed_count,
+    excluded_count,
+    errors,
+    message: `Processed ${targetShipments.length} shipments: ${sent_count} sent, ${failed_count} failed, ${excluded_count} excluded.`
+  };
+}
+

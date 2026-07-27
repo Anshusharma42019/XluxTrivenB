@@ -8,6 +8,8 @@ import streamifier from 'streamifier';
 import cloudinary from '../../config/cloudinary.js';
 import { sendWhatsAppMessage, sendInteraktChatMessage, getApprovedTemplates } from './interakt.service.js';
 import { createNotification } from '../notification/notification.service.js';
+import { Order } from '../shiprocket/models/order.model.js';
+import { ShipmaxxOrder } from '../shipmaxx/models/shipmaxxOrder.model.js';
 
 /**
  * Handle incoming webhooks from Interakt
@@ -123,8 +125,33 @@ const handleWebhook = catchAsync(async (req, res) => {
         let normalizedPhone = phone.replace(/\s+/g, '');
         if (normalizedPhone.startsWith('+91')) normalizedPhone = normalizedPhone.substring(3);
         else if (normalizedPhone.startsWith('91') && normalizedPhone.length === 12) normalizedPhone = normalizedPhone.substring(2);
-        else if (normalizedPhone.startsWith('+')) normalizedPhone = normalizedPhone.substring(1);
         normalizedPhone = normalizedPhone.slice(-10); // always use last 10 digits
+
+        const cleanReplyText = messageText.replace(/^\[(?:Button Reply|List Selection)\]\s*/i, '').trim();
+        const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
+        
+        // Save WhatsApp reply directly to any active/recent shipments for Ops Dashboard tracking
+        try {
+          await Promise.all([
+            Order.updateMany(
+              { billing_phone: { $regex: normalizedPhone + '$' }, createdAt: { $gte: sixtyDaysAgo } },
+              { 
+                $set: { interakt_reply_text: cleanReplyText, interakt_reply_at: new Date() },
+                $push: { comments: { text: `[WhatsApp Reply] ${cleanReplyText}`, type: 'general', section: 'ops', createdAt: new Date() } }
+              }
+            ),
+            ShipmaxxOrder.updateMany(
+              { billing_phone: { $regex: normalizedPhone + '$' }, createdAt: { $gte: sixtyDaysAgo } },
+              { 
+                $set: { interakt_reply_text: cleanReplyText, interakt_reply_at: new Date() },
+                $push: { comments: { text: `[WhatsApp Reply] ${cleanReplyText}`, type: 'general', section: 'ops', createdAt: new Date() } }
+              }
+            )
+          ]);
+          console.log(`[Interakt Webhook] Updated shipments for phone ${normalizedPhone} with reply: ${cleanReplyText}`);
+        } catch (shipErr) {
+          console.error('[Interakt Webhook] Failed to update shipment reply:', shipErr.message);
+        }
 
         // Search only active (non-deleted) leads — match last 10 digits
         let lead = await Lead.findOne({

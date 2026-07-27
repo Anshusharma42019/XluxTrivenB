@@ -42,3 +42,16 @@ export const submitRtoVerification = catchAsync(async (req, res) => {
   const result = await svc.submitRtoVerification(req.body);
   res.json(new ApiResponse(200, result, 'RTO verification saved successfully'));
 });
+
+export const sendInteraktMessages = catchAsync(async (req, res) => {
+  const params = extractParams(req);
+  const { items, templateName, languageCode, useFilters } = req.body;
+  const result = await svc.sendInteraktTemplateMessages({
+    items: useFilters ? null : items,
+    filterParams: useFilters ? params : null,
+    templateName,
+    languageCode
+  });
+  res.json(new ApiResponse(200, result, 'Interakt template messages processed successfully'));
+});
+

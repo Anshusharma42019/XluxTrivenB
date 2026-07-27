@@ -17,5 +17,6 @@ router.get('/shipments',   opsAuth, c.getShipments);
 router.get('/alerts',      opsAuth, c.getAlerts);
 
 router.post('/rto-verification', opsAuth, c.submitRtoVerification);
+router.post('/send-interakt-messages', opsAuth, c.sendInteraktMessages);
 
 export default router;
