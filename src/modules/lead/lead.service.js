@@ -454,7 +454,7 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
 
   const pipeline = [ { $match: query } ];
 
-  if (!filter.cnp && !isExport && !isWhatsapp && filter.month === undefined) {
+  if (!filter.cnp && !isExport && !isWhatsapp) {
     const isOnHold = filter.status === 'on_hold';
     const isInterested = filter.status === 'interested';
 
