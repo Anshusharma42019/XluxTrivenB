@@ -5,12 +5,14 @@ import * as dashboardService from './dashboard.service.js';
 import { getStaffDeliveryStats } from './dashboard.service.js';
 
 const cache = new Map();
-const CACHE_TTL = 120000; // 2 minutes — dashboard data doesn't need sub-minute freshness
+const CACHE_TTL = 5000; // 5 seconds — ensure responsive dynamic updates when filtering real data
 
-const withCache = async (key, fetchFn) => {
-  const cached = cache.get(key);
-  if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
-    return cached.data;
+const withCache = async (key, fetchFn, bypass = false) => {
+  if (!bypass) {
+    const cached = cache.get(key);
+    if (cached && (Date.now() - cached.timestamp < CACHE_TTL)) {
+      return cached.data;
+    }
   }
   const data = await fetchFn();
   cache.set(key, { data, timestamp: Date.now() });
@@ -25,11 +27,11 @@ export const debugDeliveries = catchAsync(async (req, res) => {
 });
 
 const getStats = catchAsync(async (req, res) => {
-  const { date, from, to, department } = req.query;
+  const { date, from, to, department, refresh } = req.query;
   const userDepts = ['sales', 'support', 'logistics'].includes(req.user.role) ? req.userDepartments : (department ? [department] : []);
   
   const cacheKey = `stats_${req.user.role}_${req.user._id}_${date}_${from}_${to}_${userDepts.join(',')}`;
-  const stats = await withCache(cacheKey, () => dashboardService.getDashboardStats(req.user.role, req.user._id, date, from, to, userDepts));
+  const stats = await withCache(cacheKey, () => dashboardService.getDashboardStats(req.user.role, req.user._id, date, from, to, userDepts), refresh === 'true' || refresh === true);
   
   res.json(new ApiResponse(httpStatus.OK, stats, 'Dashboard stats fetched'));
 });
@@ -73,11 +75,11 @@ const getStaffVerifications = catchAsync(async (req, res) => {
 });
 
 const getStaffTodayLists = catchAsync(async (req, res) => {
-  const { date, staffId, from, to, department } = req.query;
+  const { date, staffId, from, to, department, refresh } = req.query;
   const userDepts = ['sales', 'support', 'logistics'].includes(req.user.role) ? req.userDepartments : (department ? [department] : []);
   
   const cacheKey = `todayLists_${req.user.role}_${req.user._id}_${date}_${staffId}_${from}_${to}_${userDepts.join(',')}`;
-  const data = await withCache(cacheKey, () => dashboardService.getStaffTodayLists(req.user.role, req.user._id, date, staffId, from, to, userDepts));
+  const data = await withCache(cacheKey, () => dashboardService.getStaffTodayLists(req.user.role, req.user._id, date, staffId, from, to, userDepts), refresh === 'true' || refresh === true);
   
   res.json(new ApiResponse(httpStatus.OK, data, 'Staff today lists fetched'));
 });

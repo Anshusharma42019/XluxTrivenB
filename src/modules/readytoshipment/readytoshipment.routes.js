@@ -25,8 +25,20 @@ router.get('/stats', auth('admin', 'manager', 'sales', 'logistics'), departmentF
 
     // Drill-down extra filter (state or pincode)
     const drillFilter = {};
-    if (filterState) drillFilter.state = { $regex: new RegExp(`^${filterState}$`, 'i') };
-    if (filterPincode) drillFilter.pincode = filterPincode;
+    if (filterState) {
+      if (filterState === 'Not Specified' || filterState === 'Unspecified') {
+        drillFilter.$or = [{ state: null }, { state: '' }, { state: { $exists: false } }, { state: { $regex: /^\s*$/ } }];
+      } else {
+        drillFilter.state = { $regex: new RegExp(`^\\s*${filterState.trim()}\\s*$`, 'i') };
+      }
+    }
+    if (filterPincode) {
+      if (filterPincode === 'Not Specified' || filterPincode === 'Unspecified') {
+        drillFilter.$or = [{ pincode: null }, { pincode: '' }, { pincode: { $exists: false } }, { pincode: { $regex: /^\s*$/ } }];
+      } else {
+        drillFilter.pincode = { $regex: new RegExp(`^\\s*${filterPincode.trim()}\\s*$`, 'i') };
+      }
+    }
 
     // Month filter for state/pincode column: filterMonth = 'YYYY-MM'
     const monthFilter = {};
@@ -38,8 +50,8 @@ router.get('/stats', auth('admin', 'manager', 'sales', 'logistics'), departmentF
     const allMatch        = { task: { $in: validTaskIds }, ...drillFilter, ...monthFilter };
     const baseMatch       = { sentToShiprocket: { $ne: true }, task: { $in: validTaskIds }, ...monthFilter };
     const drillBase       = { sentToShiprocket: { $ne: true }, task: { $in: validTaskIds }, ...drillFilter, ...monthFilter };
-    const stateMatch      = baseMatch;
-    const drillStateMatch = drillBase;
+    const stateMatch      = { task: { $in: validTaskIds }, ...monthFilter };
+    const drillStateMatch = { task: { $in: validTaskIds }, ...drillFilter, ...monthFilter };
 
     const twelveMonthsAgo = new Date();
     twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 11);
@@ -58,23 +70,30 @@ router.get('/stats', auth('admin', 'manager', 'sales', 'logistics'), departmentF
       { $project: { month: '$_id', count: 1, _id: 0 } },
     ]) : Promise.resolve(null);
 
-    const [byPincode, byState, byMonth, byWeek, total, drillTotal, allMonths] = await Promise.all([
-      // Pincodes — if state is filtered, show pincodes for that state; else top-20 overall
+    const [rawPincodes, rawStates, byMonth, byWeek, total, drillTotal, allMonths] = await Promise.all([
+      // Pincodes — show all pincodes without limit, grouping cleanly
       ReadyToShipment.aggregate([
         { $match: filterState ? drillStateMatch : stateMatch },
-        { $group: { _id: '$pincode', count: { $sum: 1 }, states: { $addToSet: '$state' } } },
-        { $match: { _id: { $ne: null, $ne: '' } } },
+        {
+          $group: {
+            _id: { $toUpper: { $trim: { input: { $ifNull: ['$pincode', ''] } } } },
+            count: { $sum: 1 },
+            states: { $addToSet: { $toUpper: { $trim: { input: { $ifNull: ['$state', ''] } } } } },
+          },
+        },
         { $sort: { count: -1 } },
-        { $limit: 30 },
-        { $project: { pincode: '$_id', count: 1, states: 1, _id: 0 } },
       ]),
-      // States — filtered by month if provided
+      // States — filtered by month or pincode drill-down, normalized uppercase grouping
       ReadyToShipment.aggregate([
-        { $match: stateMatch },
-        { $group: { _id: '$state', count: { $sum: 1 }, pincodes: { $addToSet: '$pincode' } } },
-        { $match: { _id: { $ne: null, $ne: '' } } },
+        { $match: filterPincode ? drillStateMatch : stateMatch },
+        {
+          $group: {
+            _id: { $toUpper: { $trim: { input: { $ifNull: ['$state', ''] } } } },
+            count: { $sum: 1 },
+            pincodes: { $addToSet: { $toUpper: { $trim: { input: { $ifNull: ['$pincode', ''] } } } } },
+          },
+        },
         { $sort: { count: -1 } },
-        { $project: { state: '$_id', count: 1, pincodes: 1, _id: 0 } },
       ]),
       // Monthly — filtered if drill-down or month active
       ReadyToShipment.aggregate([
@@ -132,6 +151,46 @@ router.get('/stats', auth('admin', 'manager', 'sales', 'logistics'), departmentF
       (filterState || filterPincode) ? ReadyToShipment.countDocuments(drillBase) : Promise.resolve(null),
       allMonthsAgg,
     ]);
+
+    const formatStateName = (str) => {
+      if (!str || !str.trim()) return 'Not Specified';
+      const clean = str.trim().toLowerCase();
+      return clean.replace(/\b\w/g, (m) => m.toUpperCase());
+    };
+
+    const stateMap = new Map();
+    for (const item of rawStates) {
+      const stateName = formatStateName(item._id);
+      const pins = (item.pincodes || []).filter(p => p && p.trim() !== '');
+      if (!stateMap.has(stateName)) {
+        stateMap.set(stateName, { state: stateName, count: 0, pincodeSet: new Set() });
+      }
+      const entry = stateMap.get(stateName);
+      entry.count += item.count;
+      pins.forEach(p => entry.pincodeSet.add(p));
+    }
+    const byState = Array.from(stateMap.values()).map(e => ({
+      state: e.state,
+      count: e.count,
+      pincodes: Array.from(e.pincodeSet),
+    })).sort((a, b) => b.count - a.count);
+
+    const pincodeMap = new Map();
+    for (const item of rawPincodes) {
+      const pin = (!item._id || !item._id.trim()) ? 'Not Specified' : item._id.trim();
+      const stList = (item.states || []).filter(s => s && s.trim() !== '').map(s => formatStateName(s));
+      if (!pincodeMap.has(pin)) {
+        pincodeMap.set(pin, { pincode: pin, count: 0, stateSet: new Set() });
+      }
+      const entry = pincodeMap.get(pin);
+      entry.count += item.count;
+      stList.forEach(s => entry.stateSet.add(s));
+    }
+    const byPincode = Array.from(pincodeMap.values()).map(e => ({
+      pincode: e.pincode,
+      count: e.count,
+      states: Array.from(e.stateSet),
+    })).sort((a, b) => b.count - a.count);
 
     res.json({
       status: 200,
