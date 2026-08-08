@@ -8,6 +8,8 @@ const callAgainSchema = new mongoose.Schema(
     status: { type: String, enum: ['pending', 'contacted', 'interested', 'converted', 'closed_lost', 'done'], default: 'pending' },
     department: { type: String, enum: ['migraine', 'piles'] },
     notes: [{ text: String, createdAt: { type: Date, default: Date.now } }],
+    isDeleted: { type: Boolean, default: false },
+    isArchived: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

@@ -25,6 +25,8 @@ const cnpSchema = new mongoose.Schema(
     cnpCount: { type: Number, default: 1 },
     lastCnpAt: { type: Date, default: Date.now },
     cnpHistory: [{ clickedAt: { type: Date, default: Date.now } }],
+    isDeleted: { type: Boolean, default: false },
+    isArchived: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

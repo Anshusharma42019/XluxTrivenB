@@ -1,19 +1,15 @@
 import { z } from 'zod';
 
-const typeEnum = z.enum(['call', 'follow_up', 'meeting', 'email', 'task']);
 const statusEnum = z.enum(['pending', 'completed', 'overdue', 'cancelled', 'verification', 'cnp', 'interested', 'cancel_call', 'ready_to_shipment', 'new', 'old', 'on_hold', 'closed_lost']);
-const priorityEnum = z.enum(['low', 'medium', 'high']);
 
 export const createTask = {
   body: z.object({
     title: z.string().min(1),
     description: z.string().optional(),
     problem: z.string().optional(),
-    type: typeEnum.optional(),
     lead: z.string().optional(),
     assignedTo: z.string().optional(),
     dueDate: z.string().optional(),
-    priority: priorityEnum.optional(),
     reminderAt: z.string().optional(),
     cityVillageType: z.enum(['city', 'village']).optional(),
     cityVillage: z.string().optional(),
@@ -39,10 +35,8 @@ export const updateTask = {
     title: z.string().min(1).optional(),
     description: z.string().optional(),
     problem: z.string().optional(),
-    type: typeEnum.optional(),
     status: statusEnum.optional(),
     dueDate: z.string().optional(),
-    priority: priorityEnum.optional(),
     reminderAt: z.string().optional(),
     cityVillageType: z.enum(['city', 'village']).optional(),
     cityVillage: z.string().optional(),
@@ -73,7 +67,6 @@ export const deleteTask = {
 export const getTasks = {
   query: z.object({
     status: z.string().optional(),
-    type: typeEnum.optional(),
     assignedTo: z.string().optional(),
     lead: z.string().optional(),
     date: z.string().optional(),

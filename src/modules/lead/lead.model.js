@@ -21,7 +21,6 @@ const leadSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['new', 'contacted', 'interested', 'follow_up', 'closed_won', 'closed_lost', 'on_hold', 'old'],
       default: 'new',
     },
     note: { type: String },
@@ -61,6 +60,9 @@ const leadSchema = new mongoose.Schema(
     doNotContact: { type: Boolean, default: false },
     hasUnreadReply: { type: Boolean, default: false },
     lastMessageWasBulk: { type: Boolean, default: false },
+    isArchived: { type: Boolean, default: false },
+    transferredTo: { type: String, default: null },
+    transferredAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

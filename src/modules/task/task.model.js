@@ -7,7 +7,7 @@ const taskSchema = new mongoose.Schema(
     problem: { type: String },
     type: {
       type: String,
-      enum: ['call', 'follow_up', 'meeting', 'email', 'task'],
+      enum: ['call', 'follow_up', 'meeting', 'email', 'task', 'general'],
       default: 'task',
     },
     lead: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead' },
@@ -51,6 +51,7 @@ const taskSchema = new mongoose.Schema(
       default: null,
     },
     isDeleted: { type: Boolean, default: false },
+    isArchived: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

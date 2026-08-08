@@ -1,4 +1,5 @@
 import express from 'express';
+import mongoose from 'mongoose';
 import auth from '../../middleware/auth.js';
 import requireCheckedIn from '../../middleware/requireCheckedIn.js';
 import departmentFilter from '../../middleware/departmentFilter.js';
@@ -10,7 +11,7 @@ const router = express.Router();
 
 router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, async (req, res) => {
   try {
-    const query = {};
+    const query = { isDeleted: { $ne: true }, isArchived: { $ne: true } };
     if (req.query.department) {
       query.department = req.query.department;
       if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
@@ -63,7 +64,24 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
       });
     }
 
-    res.json({ status: 200, data: records });
+    // On-the-fly deduplication by lead ID so users never see duplicates, auto-cleaning any old existing ones
+    const uniqueLeads = new Set();
+    const cleanRecords = [];
+    const duplicateIds = [];
+    for (const r of records) {
+      const leadKey = r.lead?._id ? String(r.lead._id) : (r.lead ? String(r.lead) : String(r._id));
+      if (uniqueLeads.has(leadKey)) {
+        duplicateIds.push(r._id);
+      } else {
+        uniqueLeads.add(leadKey);
+        cleanRecords.push(r);
+      }
+    }
+    if (duplicateIds.length > 0) {
+      Cnp.updateMany({ _id: { $in: duplicateIds } }, { $set: { isDeleted: true, isArchived: true } }).catch(() => {});
+    }
+
+    res.json({ status: 200, data: cleanRecords });
   } catch (e) {
     res.status(500).json({ status: 500, message: e.message });
   }
@@ -87,8 +105,10 @@ router.patch('/:id/increment', auth('admin', 'manager', 'sales', 'support'), dep
 
 router.delete('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, async (req, res) => {
   try {
-    await Cnp.findByIdAndDelete(req.params.id);
-    res.json({ status: 200, message: 'Deleted' });
+    const targetId = req.params.id;
+    const objId = mongoose.Types.ObjectId.isValid(String(targetId)) ? new mongoose.Types.ObjectId(String(targetId)) : targetId;
+    await Cnp.updateMany({ $or: [{ _id: objId }, { lead: objId }] }, { $set: { isDeleted: true, isArchived: true } });
+    res.json({ status: 200, message: 'Archived' });
   } catch (e) {
     res.status(500).json({ status: 500, message: e.message });
   }

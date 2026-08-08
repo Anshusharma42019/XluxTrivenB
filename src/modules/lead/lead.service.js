@@ -11,6 +11,65 @@ import Attendance from '../attendance/attendance.model.js';
 import ApiError from '../../utils/ApiError.js';
 import { createNotification } from '../notification/notification.service.js';
 import * as interaktService from '../interakt/interakt.service.js';
+import { InterestedLead, NotInterestedLead, OnHoldOrder, PendingOrder, VerifiedOrder } from '../transition/statusModels.js';
+
+const getStatusModel = (status) => {
+  if (!status) return null;
+  const s = status.toLowerCase();
+  if (s === 'interested' || s === 'warm') return InterestedLead;
+  if (s === 'closed_lost' || s === 'not_interested' || s === 'lost' || s === 'rejected' || s === 'cancelled') return NotInterestedLead;
+  if (s === 'on_hold' || s === 'hold' || s === 'parked') return OnHoldOrder;
+  if (s === 'pending_order' || s === 'pending_evaluation' || s === 'pendingorder') return PendingOrder;
+  if (s === 'verified' || s === 'verified_order' || s === 'converted' || s === 'closed_won') return VerifiedOrder;
+  return null;
+};
+
+const resolveLeadDocument = async (id, populateFull = false) => {
+  if (!id || !mongoose.isValidObjectId(String(id))) return null;
+  const matchId = String(id);
+  
+  const applyPopulations = (query) => {
+    query = query.populate('assignedTo', 'name email role').populate('createdBy', 'name email');
+    if (populateFull && query.populate) {
+      try { query = query.populate('notes.createdBy', 'name').populate('follow_ups.createdBy', 'name'); } catch (e) {}
+    }
+    return query;
+  };
+
+  // 1. Search across Lead and status tables for active unarchived record
+  const allModels = [Lead, InterestedLead, NotInterestedLead, OnHoldOrder, PendingOrder, VerifiedOrder];
+  for (const Model of allModels) {
+    try {
+      const doc = await applyPopulations(Model.findOne({ _id: matchId, isDeleted: { $ne: true }, isArchived: { $ne: true } }));
+      if (doc) return { doc, model: Model };
+    } catch (e) {}
+  }
+
+  // 2. If matchId is a wrapper record ID (Cnp, CallAgain, Task, Verification), resolve to the actual lead!
+  for (const Wrapper of [Cnp, CallAgain, Task, Verification]) {
+    try {
+      const wrapper = await Wrapper.findById(matchId).select('lead').lean();
+      if (wrapper && wrapper.lead && String(wrapper.lead) !== matchId) {
+        const resolved = await resolveLeadDocument(wrapper.lead, populateFull);
+        if (resolved) return resolved;
+      }
+    } catch (e) {}
+  }
+
+  // 3. Fallback: Search across all tables without deletion filter so even soft-deleted records can be viewed or resurrected!
+  for (const Model of allModels) {
+    try {
+      const doc = await applyPopulations(Model.findById(matchId));
+      if (doc) {
+        doc.isDeleted = false;
+        doc.isArchived = false;
+        return { doc, model: Model };
+      }
+    } catch (e) {}
+  }
+
+  return null;
+};
 
 const notifyAdmins = async (data) => {
   const admins = await User.find({ role: { $in: ['admin', 'manager'] }, isDeleted: false }, '_id');
@@ -206,7 +265,7 @@ export const createLead = async (data, createdBy, creatorRole, userDepartments =
           ? new mongoose.Types.ObjectId(String(createdBy))
           : assignedToId;
         await Task.create({
-          title: `Call ${lead.name}`,
+          title: lead.name,
           description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
           type: 'call',
           lead: lead._id,
@@ -245,7 +304,7 @@ export const distributeUnassignedLeads = async (adminId) => {
       const task = existingTask
         ? existingTask
         : await Task.create({
-          title: `Call ${lead.name}`,
+          title: lead.name,
           description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
           type: 'call',
           lead: lead._id,
@@ -345,7 +404,7 @@ export const distributeAbsentSalesLeads = async () => {
       } else {
         const dueDate = new Date(Date.now() + 2 * 60 * 60 * 1000);
         await Task.create({
-          title: `Call ${lead.name}`,
+          title: lead.name,
           description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
           type: 'call',
           lead: lead._id,
@@ -468,17 +527,18 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
     if (userRole === 'sales') matchFilterBase.assignedTo = new mongoose.Types.ObjectId(userId);
     else if (filter.department) matchFilterBase.department = filter.department;
 
-    const [activeTaskLeads, activeCnpLeads, activeVerLeads] = await Promise.all([
-      Task.distinct('lead', { status: { $in: taskStatuses }, isDeleted: false, ...matchFilterBase }),
-      !isOnHold ? Cnp.distinct('lead', { ...matchFilterBase }) : Promise.resolve([]),
-      Verification.distinct('lead', { status: isOnHold ? 'on_hold' : { $ne: 'on_hold' }, ...matchFilterBase })
+    const [activeTaskLeads, activeCnpLeads, activeVerLeads, activeCallAgainLeads] = await Promise.all([
+      Task.distinct('lead', { status: { $in: taskStatuses }, isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }),
+      !isOnHold ? Cnp.distinct('lead', { isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }) : Promise.resolve([]),
+      Verification.distinct('lead', { status: isOnHold ? 'on_hold' : { $ne: 'on_hold' }, isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }),
+      !isOnHold ? CallAgain.distinct('lead', { isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }) : Promise.resolve([])
     ]);
 
     const toObjectIds = (arr) => [...new Set(arr.filter(Boolean).map(id => String(id)))]
       .filter(id => id !== 'null' && id !== 'undefined' && mongoose.isValidObjectId(id))
       .map(id => new mongoose.Types.ObjectId(id));
 
-    const excludeLeadIds = toObjectIds([...activeTaskLeads, ...activeCnpLeads, ...activeVerLeads]);
+    const excludeLeadIds = toObjectIds([...activeTaskLeads, ...activeCnpLeads, ...activeVerLeads, ...activeCallAgainLeads]);
       
     if (isOnHold) {
        query.$and = query.$and || [];
@@ -496,6 +556,50 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
   }
 
   pipeline.push({ $sort: sortCriteria });
+
+  const StatusModel = getStatusModel(filter.status);
+  if (StatusModel) {
+    const leadQuery = { ...pipeline[0].$match, isArchived: { $ne: true } };
+    const statusQuery = { ...pipeline[0].$match, isArchived: { $ne: true }, isDeleted: { $ne: true } };
+    delete statusQuery.cnp; // CNP filter not relevant once record has transitioned into status collection
+    delete statusQuery.status; // All records in a dedicated StatusModel belong to that section regardless of alias naming (closed_lost vs not_interested)
+
+
+    const [statusLeads, legacyLeads] = await Promise.all([
+      StatusModel.find(statusQuery)
+        .select('-notes -follow_ups')
+        .populate('assignedTo', 'name email role')
+        .populate('createdBy', 'name email')
+        .lean(),
+      Lead.find(leadQuery)
+        .select('-notes -follow_ups')
+        .populate('assignedTo', 'name email role')
+        .populate('createdBy', 'name email')
+        .lean()
+    ]);
+
+    const seen = new Set();
+    const merged = [...statusLeads, ...legacyLeads].filter(item => {
+      if ((!item.name && item.title) || item.originalCollection === 'tasks' || item.transferredFrom === 'tasks') {
+        StatusModel.deleteMany({ _id: item._id }).catch(() => {});
+        return false;
+      }
+      const idStr = String(item._id);
+      if (seen.has(idStr)) return false;
+      seen.add(idStr);
+      return true;
+    });
+
+    merged.sort((a, b) => {
+      const dateA = new Date(a.updatedAt || a.createdAt || 0);
+      const dateB = new Date(b.updatedAt || b.createdAt || 0);
+      return sortCriteria.updatedAt === -1 || sortCriteria.createdAt === -1 ? dateB - dateA : dateA - dateB;
+    });
+
+    const totalCount = merged.length;
+    const allLeads = !isExport ? merged.slice(skip, skip + limit) : merged;
+    return { leads: allLeads, total: totalCount, page: !isExport ? page : 1, limit: !isExport ? limit : (totalCount || 1), totalPages: !isExport ? Math.ceil(totalCount / (limit || 1)) : 1 };
+  }
 
   if (!isExport) {
     const [leads, total] = await Promise.all([
@@ -519,12 +623,9 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
 };
 
 export const getLeadById = async (id, userRole, userId, userDepartments = []) => {
-  const lead = await Lead.findOne({ _id: id, isDeleted: false })
-    .populate('assignedTo', 'name email role')
-    .populate('createdBy', 'name email')
-    .populate('notes.createdBy', 'name')
-    .populate('follow_ups.createdBy', 'name');
-  if (!lead) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  const resolved = await resolveLeadDocument(id, true);
+  if (!resolved || !resolved.doc) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  const lead = resolved.doc;
   // Sales can view shared-status leads (interested, closed_lost, on_hold, cnp) from all staff
   const sharedStatuses = ['interested', 'closed_lost', 'on_hold', 'cnp'];
   
@@ -551,9 +652,9 @@ export const getLeadById = async (id, userRole, userId, userDepartments = []) =>
 };
 
 export const updateLead = async (id, data, userRole, userId, userDepartments = []) => {
-  const lead = await Lead.findOne({ _id: id, isDeleted: false })
-    .populate('assignedTo', 'name email role');
-  if (!lead) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  const resolved = await resolveLeadDocument(id, false);
+  if (!resolved || !resolved.doc) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  let lead = resolved.doc;
   
   if (userRole === 'sales') {
     // Removed department restriction so sales can edit leads assigned to them
@@ -572,32 +673,23 @@ export const updateLead = async (id, data, userRole, userId, userDepartments = [
   }
   const oldStatus = lead.status;
 
-  // When moving to on_hold, force cnp=false and clean up CNP records/tasks BEFORE saving
-  if (data.status === 'on_hold') {
+  const leadObjId = mongoose.Types.ObjectId.isValid(String(id)) ? new mongoose.Types.ObjectId(String(id)) : id;
+  const matchIds = [id, leadObjId];
+
+  if (data.status && ['interested', 'on_hold', 'closed_lost', 'pending_order', 'verified_order', 'closed_won', 'rejected'].includes(String(data.status).toLowerCase())) {
     data.cnp = false;
-    const leadObjId = new mongoose.Types.ObjectId(String(id));
-    await Cnp.deleteMany({ lead: leadObjId });
-    await CallAgain.deleteMany({ lead: leadObjId });
+  }
+
+  // When moving out of active CNP/new status or clearing CNP flag, soft-archive related CNP, CallAgain, and Tasks
+  if (data.cnp === false || (data.status && data.status !== oldStatus && ['interested', 'on_hold', 'closed_lost', 'follow_up', 'pending_order', 'verified_order'].includes(String(data.status).toLowerCase()))) {
+    await Cnp.updateMany({ lead: { $in: matchIds } }, { $set: { isArchived: true, isDeleted: true } });
+    await CallAgain.updateMany({ lead: { $in: matchIds } }, { $set: { isArchived: true, isDeleted: true } });
     await Task.updateMany(
-      { lead: leadObjId, status: { $in: ['pending', 'overdue', 'cnp'] }, isDeleted: false },
-      { isDeleted: true }
+      { lead: { $in: matchIds }, status: { $in: ['pending', 'overdue', 'cnp', 'on_hold', 'verification'] }, isDeleted: false },
+      { $set: { isArchived: true, isDeleted: true } }
     );
   }
 
-  // When moving to closed_lost or follow_up, clean up active tasks
-  if (data.status === 'closed_lost' || data.status === 'follow_up') {
-    const leadObjId = new mongoose.Types.ObjectId(String(id));
-    await Task.updateMany(
-      { lead: leadObjId, status: { $in: ['pending', 'overdue', 'cnp', 'verification'] }, isDeleted: false },
-      { isDeleted: true }
-    );
-  }
-
-  // When clearing CNP flag (from any status), delete cnp-status tasks and remove CNP records BEFORE saving
-  if (data.cnp === false) {
-    await Task.deleteMany({ lead: id, status: 'cnp', isDeleted: false });
-    await Cnp.deleteMany({ lead: id });
-  }
 
   Object.assign(lead, data);
   await lead.save();
@@ -645,7 +737,7 @@ export const updateLead = async (id, data, userRole, userId, userDepartments = [
       );
     } else {
       // Moving to interested - clean up verification so it shows in pipeline
-      await Verification.deleteMany({ lead: leadObjId });
+      await Verification.updateMany({ lead: leadObjId }, { $set: { isArchived: true, isDeleted: true } });
       await Task.updateMany(
         { lead: leadObjId, status: { $in: ['verification', 'pending', 'overdue', 'on_hold', 'cnp'] }, isDeleted: false },
         { isDeleted: true }
@@ -663,21 +755,23 @@ export const updateLead = async (id, data, userRole, userId, userDepartments = [
   }
 
   if (data.status && data.status !== oldStatus && lead.assignedTo) {
-    await createNotification({
+    createNotification({
       user: lead.assignedTo,
       title: 'Lead Status Updated',
       message: `Lead "${lead.name}" moved to ${data.status}.`,
       type: 'lead_status_changed',
       relatedLead: lead._id,
-    });
-    await notifyAdmins({ title: 'Lead Status Updated', message: `Lead "${lead.name}" moved to ${data.status}.`, type: 'lead_status_changed', relatedLead: lead._id });
+    }).catch(() => {});
+    notifyAdmins({ title: 'Lead Status Updated', message: `Lead "${lead.name}" moved to ${data.status}.`, type: 'lead_status_changed', relatedLead: lead._id }).catch(() => {});
   }
   return lead;
 };
 
 export const markCNP = async (leadId, userRole, userId) => {
-  const lead = await Lead.findOne({ _id: leadId, isDeleted: false });
-  if (!lead) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  const resolved = await resolveLeadDocument(leadId);
+  if (!resolved || !resolved.doc) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  const lead = resolved.doc;
+  const realLeadId = lead._id;
   lead.cnp = true;
   lead.cnpCount = (lead.cnpCount || 0) + 1;
   lead.cnpAt = new Date();
@@ -685,65 +779,54 @@ export const markCNP = async (leadId, userRole, userId) => {
   await syncPilesLead(lead);
 
   // Track CNP marked event in Interakt
-  interaktService.trackEvent(lead._id, 'Lead Marked CNP', {
+  interaktService.trackEvent(realLeadId, 'Lead Marked CNP', {
     cnpCount: lead.cnpCount
   }).catch(err => console.error('Failed to track event in Interakt', err));
 
   // Mark any pending/overdue tasks for this lead as cnp
   const tasks = await Task.find(
-    { lead: leadId, status: { $in: ['pending', 'overdue'] }, isDeleted: false }
+    { lead: realLeadId, status: { $in: ['pending', 'overdue'] }, isDeleted: false }
   ).lean();
 
   await Task.updateMany(
-    { lead: leadId, status: { $in: ['pending', 'overdue'] }, isDeleted: false },
+    { lead: realLeadId, status: { $in: ['pending', 'overdue'] }, isDeleted: false },
     { status: 'cnp' }
   );
 
-  // Create a Cnp record for each task (upsert to avoid duplicates)
-  for (const task of tasks) {
-    await Cnp.findOneAndUpdate(
-      { task: task._id },
-      {
-        task: task._id,
-        title: task.title,
-        assignedTo: task.assignedTo,
-        lead: leadId,
-        dueDate: task.dueDate,
-        department: lead.department || task.department || null,
-        cnpCount: 1,
-        lastCnpAt: new Date(),
-      },
-      { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
-    );
-  }
-
-  // If no tasks exist, create a placeholder task then CNP record
-  if (tasks.length === 0) {
+  // Create or update EXACTLY ONE Cnp record for this lead (upsert by lead ID to prevent duplicates)
+  const targetTask = tasks[0];
+  let taskId = targetTask?._id;
+  if (!taskId) {
     const placeholderTask = await Task.create({
-      title: lead.name,
+      title: lead.name || 'Unknown Lead (CNP)',
       type: 'call',
-      lead: leadId,
-      assignedTo: lead.assignedTo,
-      createdBy: lead.assignedTo,
+      lead: realLeadId,
+      assignedTo: lead.assignedTo?._id || lead.assignedTo || userId,
+      createdBy: lead.createdBy?._id || lead.createdBy || userId,
       department: lead.department,
       dueDate: new Date(),
       status: 'cnp',
       isDeleted: false,
     });
-    await Cnp.findOneAndUpdate(
-      { task: placeholderTask._id },
-      {
-        task: placeholderTask._id,
-        title: lead.name,
-        assignedTo: lead.assignedTo,
-        lead: leadId,
-        department: lead.department || null,
-        cnpCount: 1,
-        lastCnpAt: new Date(),
-      },
-      { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
-    );
+    taskId = placeholderTask._id;
   }
+
+  await Cnp.findOneAndUpdate(
+    { lead: realLeadId },
+    {
+      task: taskId,
+      title: targetTask?.title || lead.name || 'Unknown Lead (CNP)',
+      assignedTo: targetTask?.assignedTo || lead.assignedTo?._id || lead.assignedTo || userId,
+      lead: realLeadId,
+      dueDate: targetTask?.dueDate || new Date(),
+      department: lead.department || targetTask?.department || null,
+      cnpCount: lead.cnpCount || 1,
+      lastCnpAt: new Date(),
+      isDeleted: false,
+      isArchived: false
+    },
+    { upsert: true, returnDocument: 'after', setDefaultsOnInsert: true }
+  );
 
   return lead;
 };
@@ -757,26 +840,28 @@ export const unmarkCNP = async (leadId, userRole, userId) => {
 };
 
 export const deleteLead = async (id) => {
-  const lead = await Lead.findOne({ _id: id, isDeleted: false });
-  if (!lead) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  const resolved = await resolveLeadDocument(id);
+  if (!resolved || !resolved.doc) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  const lead = resolved.doc;
   lead.isDeleted = true;
   lead.deletedAt = new Date();
   await lead.save();
   await syncPilesLead(lead);
 
   // Cascading soft-delete associated records
-  const leadObjId = new mongoose.Types.ObjectId(String(id));
+  const leadObjId = new mongoose.Types.ObjectId(String(lead._id));
   await Promise.all([
     Task.updateMany({ lead: leadObjId, isDeleted: false }, { isDeleted: true, deletedAt: new Date() }),
     Verification.updateMany({ lead: leadObjId, isDeleted: false }, { isDeleted: true, deletedAt: new Date() }),
-    Cnp.deleteMany({ lead: leadObjId }),
-    CallAgain.deleteMany({ lead: leadObjId }),
+    Cnp.updateMany({ lead: leadObjId }, { $set: { isArchived: true, isDeleted: true } }),
+    CallAgain.updateMany({ lead: leadObjId }, { $set: { isArchived: true, isDeleted: true } }),
   ]).catch(err => console.error('Cascading delete error:', err));
 };
 
 export const assignLead = async (leadId, assignedTo) => {
-  const lead = await Lead.findOne({ _id: leadId, isDeleted: false });
-  if (!lead) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  const resolved = await resolveLeadDocument(leadId);
+  if (!resolved || !resolved.doc) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
+  const lead = resolved.doc;
   lead.assignedTo = assignedTo;
   await lead.save();
   await syncPilesLead(lead);
@@ -799,7 +884,7 @@ export const assignLead = async (leadId, assignedTo) => {
   if (!existingCallTask) {
     const dueDate = new Date(Date.now() + 2 * 60 * 60 * 1000);
     await Task.create({
-      title: `Call ${lead.name}`,
+      title: lead.name,
       description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
       type: 'call',
       lead: lead._id,

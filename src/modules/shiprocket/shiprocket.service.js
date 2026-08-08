@@ -1,6 +1,7 @@
 import axios from 'axios';
+import { config } from '../../config/config.js';
 
-const BASE_URL = process.env.SHIPROCKET_BASE_URL || 'https://apiv2.shiprocket.in/v1/external';
+const BASE_URL = config.shiprocket.baseUrl;
 
 // ── Token cache ───────────────────────────────────────────────────────────────
 let _token = null;
@@ -10,8 +11,8 @@ const TOKEN_TTL_MS = 23 * 60 * 60 * 1000;
 const getToken = async () => {
   if (_token && Date.now() < _tokenExpiry) return _token;
   const { data } = await axios.post(`${BASE_URL}/auth/login`, {
-    email: process.env.SHIPROCKET_EMAIL,
-    password: process.env.SHIPROCKET_PASSWORD,
+    email: config.shiprocket.email,
+    password: config.shiprocket.password,
   });
   if (!data.token) throw new Error(data.message || 'Shiprocket login failed');
   _token = data.token;

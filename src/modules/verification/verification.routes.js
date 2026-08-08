@@ -365,32 +365,56 @@ router.post('/repair', auth('admin', 'manager', 'sales', 'support'), departmentF
 
     let fixed = 0;
     for (const record of verifiedRecords) {
-      if (!record.task) continue;
       let rtsAssignedTo = record.assignedTo?._id || record.assignedTo;
-      await Task.findByIdAndUpdate(record.task, { status: 'ready_to_shipment', assignedTo: rtsAssignedTo });
-      await ReadyToShipment.findOneAndUpdate(
-        { task: record.task },
-        {
-          $set: {
-            title: record.title,
+      const leadId = record.lead?._id || record.lead;
+
+      let taskId = record.task;
+      if (!taskId && leadId) {
+        let existingTask = await Task.findOne({ lead: leadId, isDeleted: false });
+        if (!existingTask) {
+          existingTask = await Task.create({
+            title: record.title || 'Verified Order',
+            lead: leadId,
             assignedTo: rtsAssignedTo,
-            lead: record.lead?._id || record.lead,
-            description: record.description,
-            problem: record.problem,
-            age: record.age, weight: record.weight, height: record.height,
-            otherProblems: record.otherProblems, problemDuration: record.problemDuration,
-            price: record.price,
-            cityVillageType: record.cityVillageType, cityVillage: record.cityVillage,
-            houseNo: record.houseNo, postOffice: record.postOffice,
-            district: record.district, landmark: record.landmark,
-            pincode: record.pincode, state: record.state,
-            reminderAt: record.reminderAt,
+            department: record.department,
+            status: 'ready_to_shipment',
+            createdBy: rtsAssignedTo
+          });
+        }
+        taskId = existingTask._id;
+        await Verification.findByIdAndUpdate(record._id, { task: taskId });
+      }
+
+      if (taskId) {
+        await Task.findByIdAndUpdate(taskId, { status: 'ready_to_shipment', assignedTo: rtsAssignedTo, isDeleted: false });
+        await ReadyToShipment.findOneAndUpdate(
+          { $or: [{ task: taskId }, { lead: leadId }] },
+          {
+            $set: {
+              task: taskId,
+              title: record.title,
+              assignedTo: rtsAssignedTo,
+              lead: leadId,
+              description: record.description,
+              problem: record.problem,
+              age: record.age, weight: record.weight, height: record.height,
+              otherProblems: record.otherProblems, problemDuration: record.problemDuration,
+              price: record.price,
+              cityVillageType: record.cityVillageType, cityVillage: record.cityVillage,
+              houseNo: record.houseNo, postOffice: record.postOffice,
+              district: record.district, landmark: record.landmark,
+              pincode: record.pincode, state: record.state,
+              reminderAt: record.reminderAt,
+              isDeleted: false,
+              isArchived: false,
+              sentToShiprocket: false,
+              updatedAt: new Date(),
+            },
           },
-          $setOnInsert: { task: record.task },
-        },
-        { upsert: true }
-      );
-      fixed++;
+          { upsert: true }
+        );
+        fixed++;
+      }
     }
     res.json({ status: 200, message: `Repaired ${fixed} records` });
   } catch (e) {
@@ -472,7 +496,7 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
     // Shape pipeline leads to match verification record structure
     const pipelineRecords = pipelineOnHoldLeads.map(lead => ({
       _id: lead._id,
-      title: `Call ${lead.name}`,
+      title: lead.name,
       status: 'on_hold',
       onHoldReason: lead.onHoldReason,
       onHoldUntil: lead.onHoldUntil,
@@ -626,45 +650,67 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
       }
     }
 
-    if (status === 'verified' && record.task) {
+    if (status === 'verified') {
       let rtsAssignedTo = record.assignedTo?._id || record.assignedTo;
+      const leadId = record.lead?._id || record.lead;
 
-      // CLOSER RULE: Update lead.assignedTo to the Closer too, so Staff Dashboard matches Ops Dashboard
-      if (record.lead) {
-        const Lead = (await import('../lead/lead.model.js')).default;
-        const leadId = record.lead._id || record.lead;
-        await Lead.findByIdAndUpdate(leadId, { assignedTo: rtsAssignedTo });
+      // Ensure task exists
+      let taskId = record.task;
+      if (!taskId && leadId) {
+        let existingTask = await Task.findOne({ lead: leadId, isDeleted: false });
+        if (!existingTask) {
+          existingTask = await Task.create({
+            title: record.title || 'Verified Order',
+            lead: leadId,
+            assignedTo: rtsAssignedTo,
+            department: record.department,
+            status: 'ready_to_shipment',
+            createdBy: req.user?._id || rtsAssignedTo
+          });
+        }
+        taskId = existingTask._id;
+        await Verification.findByIdAndUpdate(record._id, { task: taskId });
       }
 
-      const taskUpdate = await Task.findByIdAndUpdate(
-        record.task,
-        { status: 'ready_to_shipment', assignedTo: rtsAssignedTo, ...taskFields },
-        { returnDocument: 'after' }
-      );
-      if (!taskUpdate) return res.status(500).json({ status: 500, message: 'Task not found' });
+      if (leadId) {
+        const Lead = (await import('../lead/lead.model.js')).default;
+        await Lead.findByIdAndUpdate(leadId, { assignedTo: rtsAssignedTo, status: 'verified_order' });
+      }
 
-      await ReadyToShipment.findOneAndUpdate(
-        { task: record.task },
-        {
-          $set: {
-            title: record.title,
-            assignedTo: rtsAssignedTo,
-            lead: record.lead?._id || record.lead,
-            description: record.description,
-            problem: record.problem,
-            age: record.age, weight: record.weight, height: record.height,
-            otherProblems: record.otherProblems, problemDuration: record.problemDuration,
-            price: record.price,
-            cityVillageType: record.cityVillageType, cityVillage: record.cityVillage,
-            houseNo: record.houseNo, postOffice: record.postOffice,
-            district: record.district, landmark: record.landmark,
-            pincode: record.pincode, state: record.state,
-            reminderAt: record.reminderAt,
+      if (taskId) {
+        await Task.findByIdAndUpdate(
+          taskId,
+          { status: 'ready_to_shipment', assignedTo: rtsAssignedTo, isDeleted: false, ...taskFields }
+        );
+
+        await ReadyToShipment.findOneAndUpdate(
+          { $or: [{ task: taskId }, { lead: leadId }] },
+          {
+            $set: {
+              task: taskId,
+              title: record.title,
+              assignedTo: rtsAssignedTo,
+              lead: leadId,
+              description: record.description,
+              problem: record.problem,
+              age: record.age, weight: record.weight, height: record.height,
+              otherProblems: record.otherProblems, problemDuration: record.problemDuration,
+              price: record.price,
+              cityVillageType: record.cityVillageType, cityVillage: record.cityVillage,
+              houseNo: record.houseNo, postOffice: record.postOffice,
+              district: record.district, landmark: record.landmark,
+              pincode: record.pincode, state: record.state,
+              reminderAt: record.reminderAt,
+              isDeleted: false,
+              isArchived: false,
+              sentToShiprocket: false,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
           },
-          $setOnInsert: { task: record.task },
-        },
-        { upsert: true, returnDocument: 'after' }
-      );
+          { upsert: true, returnDocument: 'after' }
+        );
+      }
 
       // WhatsApp dispatch notification - smart sender (template + chat fallback)
       try {
@@ -683,6 +729,15 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
       }
     } else if (record.task && Object.keys(taskFields).length > 0) {
       await Task.findByIdAndUpdate(record.task, taskFields);
+    }
+
+    if (status && record && record._id) {
+      try {
+        const { transitionRecord } = await import('../transition/transition.service.js');
+        await transitionRecord(Verification, record._id, status === 'rejected' ? 'closed_lost' : status, update, req.user?._id || req.user || null);
+      } catch (transErr) {
+        console.error('[transitionRecord] Verification transition note:', transErr.message);
+      }
     }
 
     res.json({ status: 200, data: record });

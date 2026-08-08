@@ -49,8 +49,14 @@ async function getStaffScope(staffId) {
   if (!staffId) return null; // null = no scope (admin/manager)
   const id = new mongoose.Types.ObjectId(staffId);
   const verifications = await mongoose.model('Verification').find({ $or: [{ verifiedBy: id }, { assignedTo: id }] }, { lead: 1, _id: 1 }).lean();
+  const leads = await mongoose.model('Lead').find({ assignedTo: id }, { _id: 1 }).lean();
+
+  const leadIdsSet = new Set();
+  verifications.forEach(v => { if (v.lead) leadIdsSet.add(String(v.lead)); });
+  leads.forEach(l => { if (l._id) leadIdsSet.add(String(l._id)); });
+
   return {
-    leadIds: verifications.map(v => v.lead).filter(Boolean),
+    leadIds: Array.from(leadIdsSet).map(idStr => new mongoose.Types.ObjectId(idStr)),
     verificationIds: verifications.map(v => v._id).filter(Boolean)
   };
 }
@@ -138,6 +144,9 @@ function classifyStatus(s = '') {
     v === 'PCN'                     // Pickup cancelled / failed attempt
   ) return 'undelivered';
 
+  // ── Canceled ───────────────────────────────────────────────────────────────
+  if (v === 'CANCELED' || v === 'CANCELLED' || v === 'SHIPMENT_CANCELLED' || v === 'SC') return 'canceled';
+
   return 'other';
 }
 
@@ -152,6 +161,7 @@ async function fetchOrderStats(filter) {
   const populates = [
     { path: 'lead_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
     { path: 'verified_by', select: 'role' },
+    { path: 'task_created_by', select: 'role' },
     { path: 'verification_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
     { path: 'created_by', select: 'role' }
   ];
@@ -164,8 +174,7 @@ async function fetchOrderStats(filter) {
   const seen = new Set();
   const deduped = [];
   for (const o of all) {
-    const leadKey = o.lead_id ? (o.lead_id._id ? o.lead_id._id.toString() : o.lead_id.toString()) : null;
-    const key = leadKey ? 'lead_' + leadKey : (o.awb_code ? 'awb_' + o.awb_code : (o.order_id ? 'ord_' + o.order_id : 'id_' + o._id.toString()));
+    const key = o.awb_code ? 'awb_' + o.awb_code : (o.order_id ? 'ord_' + o.order_id : 'id_' + o._id.toString());
     if (!seen.has(key)) {
       seen.add(key);
       deduped.push(o);
@@ -175,7 +184,7 @@ async function fetchOrderStats(filter) {
 }
 
 
-function calcKPIs(orders) {
+function calcKPIs(orders, startPeriod) {
   let delivered = 0, ofd = 0, undelivered = 0, rto = 0, rtoIntersite = 0, inTransit = 0, deliveredRevenue = 0, interaktReplies = 0;
   let replyReattempt = 0, replyDawa = 0;
   let firstAttemptDelivered = 0, knownAttemptDelivered = 0, totalTat = 0, tatCount = 0;
@@ -191,12 +200,12 @@ function calcKPIs(orders) {
     }
 
     let staffRole = '';
-    // If it's a fresh sale (source_order_id is null), prioritize Lead Owner (Sales)
-    // If it's a re-order (source_order_id exists), prioritize the person who verified it (Support)
-    if (o.source_order_id) {
-      staffRole = o.verified_by?.role || o.verification_id?.assignedTo?.role || o.created_by?.role || o.lead_id?.assignedTo?.role || '';
+    const isOld = Boolean(o.source_order_id);
+    if (isOld) {
+      staffRole = o.verified_by?.role || o.verification_id?.assignedTo?.role || o.lead_id?.assignedTo?.role || o.created_by?.role || '';
     } else {
-      staffRole = o.lead_id?.assignedTo?.role || o.verified_by?.role || o.verification_id?.assignedTo?.role || o.created_by?.role || '';
+      // Prioritize Task Creator (who sent it to Verification) for new orders
+      staffRole = o.task_created_by?.role || o.verified_by?.role || o.verification_id?.assignedTo?.role || o.lead_id?.assignedTo?.role || o.created_by?.role || '';
     }
     
     if (staffRole === 'sales') totalSales++;
@@ -204,6 +213,9 @@ function calcKPIs(orders) {
 
     const cat = classifyStatus(o.status);
     if (cat === 'delivered') {
+      if (startPeriod && o.delivered_at && new Date(o.delivered_at) < startPeriod) {
+        continue;
+      }
       delivered++;
       deliveredRevenue += (Number(o.sub_total) || Number(o.total) || 0);
       
@@ -271,6 +283,7 @@ export async function getKPIs(params) {
   const populates = [
     { path: 'lead_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
     { path: 'verified_by', select: 'role' },
+    { path: 'task_created_by', select: 'role' },
     { path: 'verification_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
     { path: 'created_by', select: 'role' }
   ];
@@ -279,14 +292,28 @@ export async function getKPIs(params) {
   const baseF = { ...f };
   delete baseF.createdAt;
 
-  // Backlog delivered: orders created within the last 4 days before period start (month rollover), but delivered DURING this period.
-  const backlogWindow = new Date(start.getTime() - 4 * 24 * 60 * 60 * 1000);
+  // Backlog delivered: orders created BEFORE start period, but delivered DURING this period.
   const backlogDeliveredFilter = {
     $and: [
       baseF,
-      { createdAt: { $gte: backlogWindow, $lt: start } },
+      { createdAt: { $lt: start } },
       { status: { $in: ['DELIVERED', 'DEL'] } },
-      { delivered_at: { $gte: start, $lte: end } }
+      {
+        $or: [
+          { delivered_at: { $gte: start, $lte: end } },
+          {
+            $and: [
+              { status_updated_at: { $gte: start, $lte: end } },
+              {
+                $or: [
+                  { delivered_at: null },
+                  { $expr: { $eq: ["$delivered_at", "$createdAt"] } }
+                ]
+              }
+            ]
+          }
+        ]
+      }
     ]
   };
 
@@ -304,8 +331,7 @@ export async function getKPIs(params) {
     const seen = new Set();
     const res = [];
     for (const o of arr) {
-      const leadKey = o.lead_id ? (o.lead_id._id ? o.lead_id._id.toString() : o.lead_id.toString()) : null;
-      const key = leadKey ? 'lead_' + leadKey : (o.awb_code ? 'awb_' + o.awb_code : (o.order_id ? 'ord_' + o.order_id : 'id_' + o._id.toString()));
+      const key = o.awb_code ? 'awb_' + o.awb_code : (o.order_id ? 'ord_' + o.order_id : 'id_' + o._id.toString());
       if (!seen.has(key)) { seen.add(key); res.push(o); }
     }
     return res;
@@ -314,10 +340,10 @@ export async function getKPIs(params) {
   const backlogOrders = dedup([...blActSr, ...blActSm]);
   const backlogDeliveredOrders = dedup([...blDelSr, ...blDelSm]);
 
-  const curr = calcKPIs(orders);
-  const prev = calcKPIs(prevOrders);
-  const backlog = calcKPIs(backlogOrders);
-  const backlogDel = calcKPIs(backlogDeliveredOrders);
+  const curr = calcKPIs(orders, start);
+  const prev = calcKPIs(prevOrders, ps);
+  const backlog = calcKPIs(backlogOrders, start);
+  const backlogDel = calcKPIs(backlogDeliveredOrders, start);
 
   const totalShipments = curr.total;
   const prevTotalShipments = prev.total;
@@ -664,12 +690,23 @@ export async function getShipments(params) {
         baseFilter.status = { $regex: '^delivered$|^del$', $options: 'i' };
         const roleCondition = baseFilter.$and.pop();
         delete baseFilter.createdAt;
-        const backlogWindow = new Date(start.getTime() - 4 * 24 * 60 * 60 * 1000);
-        const deliveredTimeFilter = { delivered_at: { $gte: start, $lte: end } };
+        const deliveredTimeFilter = { $or: [{ delivered_at: { $gte: start, $lte: end } }, { $and: [ { status_updated_at: { $gte: start, $lte: end } }, { $or: [ { delivered_at: null }, { $expr: { $eq: ["$delivered_at", "$createdAt"] } } ] } ] }] };
+        const cohortDeliveredFilter = { 
+          $and: [
+            { createdAt: { $gte: start, $lte: end } },
+            {
+              $or: [
+                { delivered_at: { $gte: start } },
+                { delivered_at: { $exists: false } },
+                { delivered_at: null }
+              ]
+            }
+          ]
+        };
         baseFilter.$and.push({
           $or: [
-            { $and: [ { createdAt: { $gte: start, $lte: end } }, roleCondition ] },
-            { $and: [ { createdAt: { $gte: backlogWindow, $lt: start } }, deliveredTimeFilter, roleCondition ] }
+            { $and: [ cohortDeliveredFilter, roleCondition ] },
+            { $and: [ { createdAt: { $lt: start } }, deliveredTimeFilter, roleCondition ] }
           ]
         });
       }
@@ -683,20 +720,31 @@ export async function getShipments(params) {
       };
       
       if (status === 'inTransit') {
-        baseFilter.status = { $not: { $regex: '^delivered$|^del$|^ofd$|^out_for_delivery$|^out for delivery$|^und$|undelivered|^ndr$|^dex$|^pcn$|^rto$|^rto_initiated$|^rto_delivered$|^rto_ndr$|^rto_undelivered$|^rto_in_transit$|^rto_intransit$|^rto in transit$|^rra$|^rto_ofd$', $options: 'i' } };
+        baseFilter.status = { $not: { $regex: '^delivered$|^del$|^ofd$|^out_for_delivery$|^out for delivery$|^und$|undelivered|^ndr$|^dex$|^pcn$|^rto$|^rto_initiated$|^rto_delivered$|^rto_ndr$|^rto_undelivered$|^rto_in_transit$|^rto_intransit$|^rto in transit$|^rra$|^rto_ofd$|^canceled$|^cancelled$|^shipment_cancelled$|^sc$', $options: 'i' } };
       } else {
         baseFilter.status = { $regex: statusRegex[status] || status, $options: 'i' };
       }
 
       if (status === 'delivered') {
         delete baseFilter.createdAt;
-        const backlogWindow = new Date(start.getTime() - 4 * 24 * 60 * 60 * 1000);
-        const deliveredTimeFilter = { delivered_at: { $gte: start, $lte: end } };
+        const deliveredTimeFilter = { $or: [{ delivered_at: { $gte: start, $lte: end } }, { $and: [ { status_updated_at: { $gte: start, $lte: end } }, { $or: [ { delivered_at: null }, { $expr: { $eq: ["$delivered_at", "$createdAt"] } } ] } ] }] };
+        const cohortDeliveredFilter = { 
+          $and: [
+            { createdAt: { $gte: start, $lte: end } },
+            {
+              $or: [
+                { delivered_at: { $gte: start } },
+                { delivered_at: { $exists: false } },
+                { delivered_at: null }
+              ]
+            }
+          ]
+        };
         baseFilter.$and = baseFilter.$and || [];
         baseFilter.$and.push({
           $or: [
-            { createdAt: { $gte: start, $lte: end } },
-            { $and: [ { createdAt: { $gte: backlogWindow, $lt: start } }, deliveredTimeFilter ] }
+            cohortDeliveredFilter,
+            { $and: [ { createdAt: { $lt: start } }, deliveredTimeFilter ] }
           ]
         });
       }
@@ -776,8 +824,7 @@ export async function getShipments(params) {
     const seen = new Set();
     const deduped = [];
     for (const o of all) {
-      const leadKey = o.lead_id ? (o.lead_id._id ? o.lead_id._id.toString() : o.lead_id.toString()) : null;
-      const key = leadKey ? 'lead_' + leadKey : (o.awb_code ? 'awb_' + o.awb_code : (o.order_id ? 'ord_' + o.order_id : 'id_' + o._id.toString()));
+      const key = o.awb_code ? 'awb_' + o.awb_code : (o.order_id ? 'ord_' + o.order_id : 'id_' + o._id.toString());
       if (!seen.has(key)) {
         seen.add(key);
         deduped.push(o);

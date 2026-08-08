@@ -39,6 +39,7 @@ const verificationSchema = new mongoose.Schema(
     onHoldReason: { type: String },
     isDeleted: { type: Boolean, default: false },
     deletedAt: { type: Date },
+    isArchived: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

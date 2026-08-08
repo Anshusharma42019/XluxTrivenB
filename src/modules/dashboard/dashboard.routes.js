@@ -17,12 +17,12 @@ router.get('/target-history', auth('admin', 'manager', 'sales', 'support', 'logi
 router.get('/staff-verifications', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(300), dashboardController.getStaffVerifications);
 router.get('/staff-today-lists', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(300), dashboardController.getStaffTodayLists);
 router.get('/staff-monthly-chart', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(300), dashboardController.getStaffMonthlyChart);
-router.get('/all-staff-stats', auth('admin', 'manager'), departmentFilter, cacheMiddleware(300), dashboardController.getAllStaffStats);
+router.get('/all-staff-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, dashboardController.getAllStaffStats);
 router.get('/staff-commission', auth('admin', 'manager', 'sales', 'support', 'logistics'), cacheMiddleware(300), dashboardController.getStaffCommission);
 router.get('/all-staff-commissions', auth('admin', 'manager'), cacheMiddleware(300), dashboardController.getAllStaffCommissions);
 router.post('/save-commission-override', auth('admin', 'manager'), dashboardController.saveCommissionOverride);
 router.get('/unassigned-orders', auth('admin', 'manager'), cacheMiddleware(300), dashboardController.getUnassignedOrders);
-router.get('/staff-delivery-stats', auth('admin', 'manager'), dashboardController.getStaffDeliveryStats);
+router.get('/staff-delivery-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), dashboardController.getStaffDeliveryStats);
 router.get('/my-delivery-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), dashboardController.getMyDeliveryStats);
 router.post('/assign-order', auth('admin', 'manager'), dashboardController.assignOrder);
 

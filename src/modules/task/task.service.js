@@ -50,8 +50,8 @@ const handleVerificationSync = async (task, userId) => {
   };
   const existing = await Verification.findOne({ task: task._id }, '_id');
   await Verification.findOneAndUpdate({ task: task._id }, record, { upsert: true, returnDocument: 'after' });
-  await Cnp.deleteOne({ task: task._id });
-  await ReadyToShipment.deleteOne({ task: task._id });
+  await Cnp.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
+  await ReadyToShipment.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
 
   if (!existing) {
     try {
@@ -121,7 +121,23 @@ export const createTask = async (data, createdBy, creatorRole, userDepartments =
     data.assignedTo = await getNextSalesUser(data.department);
   }
 
-  const task = await Task.create({ ...data, createdBy });
+  let task;
+  if (data.lead) {
+    const existingTask = await Task.findOne({ lead: data.lead, isDeleted: false });
+    if (existingTask) {
+      Object.assign(existingTask, data, { status: data.status || 'pending', isDeleted: false });
+      task = await existingTask.save();
+      await Cnp.updateMany({ lead: data.lead }, { $set: { isArchived: true, isDeleted: true } });
+    } else {
+      task = await Task.create({ ...data, createdBy });
+      await Cnp.updateMany({ lead: data.lead }, { $set: { isArchived: true, isDeleted: true } });
+    }
+    // Immediately reset lead.cnp = false so task is not filtered out in getTasks/getDailyTasks
+    await Lead.findByIdAndUpdate(data.lead, { $set: { cnp: false, status: 'task' } }).catch(() => {});
+  } else {
+    task = await Task.create({ ...data, createdBy });
+  }
+
   if (task.status === 'verification') {
     await handleVerificationSync(task, createdBy);
   }
@@ -207,10 +223,11 @@ export const getTasks = async (filter, userRole, userId, userDepartments = []) =
 
   const tasks = await Task.find({ _id: { $in: taskIds } })
     .populate('assignedTo', 'name email')
-    .populate('lead', 'name phone status')
+    .populate('lead', 'name phone status cnp')
     .sort({ createdAt: -1 });
 
-  return { tasks, total, page, limit, totalPages: Math.ceil(total / limit) };
+  const cleanTasks = tasks.filter(t => !t.lead?.cnp && t.status !== 'cnp');
+  return { tasks: cleanTasks, total, page, limit, totalPages: Math.ceil(total / limit) };
 };
 
 export const getTaskById = async (id, userRole, userId, userDepartments = []) => {
@@ -264,8 +281,8 @@ export const updateTask = async (id, data, userRole, userId, userDepartments = [
   };
   if (data.status === 'cnp') {
     await Cnp.findOneAndUpdate({ task: task._id }, { ...record, lastCnpAt: new Date(), $inc: { cnpCount: 1 }, $push: { cnpHistory: { clickedAt: new Date() } } }, { upsert: true, returnDocument: 'after' });
-    await Verification.deleteOne({ task: task._id });
-    await ReadyToShipment.deleteOne({ task: task._id });
+    await Verification.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
+    await ReadyToShipment.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
     if (task.lead) {
       const leadId = task.lead._id || task.lead;
       await Lead.findByIdAndUpdate(leadId, { cnp: true }).catch(() => {});
@@ -274,12 +291,12 @@ export const updateTask = async (id, data, userRole, userId, userDepartments = [
     await handleVerificationSync(task, userId);
   } else if (data.status === 'ready_to_shipment') {
     await ReadyToShipment.findOneAndUpdate({ task: task._id }, record, { upsert: true, returnDocument: 'after' });
-    await Verification.deleteOne({ task: task._id });
-    await Cnp.deleteOne({ task: task._id });
+    await Verification.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
+    await Cnp.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
   } else {
-    await Cnp.deleteOne({ task: task._id });
-    await Verification.deleteOne({ task: task._id });
-    await ReadyToShipment.deleteOne({ task: task._id });
+    await Cnp.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
+    await Verification.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
+    await ReadyToShipment.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
   }
 
   return task;
@@ -318,9 +335,27 @@ export const getDailyTasks = async (filter, userId, userRole, userDepartments = 
     }
   }
 
-  return Task.find(query)
-    .populate('lead', 'name phone status')
+  // Aggregate to deduplicate: keep only the latest task per lead (tasks with no lead are kept as-is)
+  const pipeline = [
+    { $match: query },
+    { $sort: { createdAt: -1 } },
+    // Group by lead ID — tasks with no lead use their own _id as the group key so they are never merged
+    {
+      $group: {
+        _id: { $ifNull: ['$lead', '$_id'] },
+        taskId: { $first: '$_id' },
+      },
+    },
+    { $replaceRoot: { newRoot: { _id: '$taskId' } } },
+  ];
+
+  const dedupedIds = (await Task.aggregate(pipeline)).map(r => r._id);
+
+  const tasks = await Task.find({ _id: { $in: dedupedIds } })
+    .populate('lead', 'name phone status cnp')
     .populate('assignedTo', 'name email')
-    .sort({ priority: -1, dueDate: 1 });
+    .sort({ createdAt: -1 });
+
+  return tasks.filter(t => !t.lead?.cnp && t.status !== 'cnp');
 };
 

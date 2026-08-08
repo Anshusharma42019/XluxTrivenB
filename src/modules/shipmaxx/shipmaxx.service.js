@@ -1,8 +1,9 @@
 import axios from 'axios';
 import ApiError from '../../utils/ApiError.js';
+import { config } from '../../config/config.js';
 
-const BASE_URL = process.env.SHIPMAXX_BASE_URL || 'https://appapi.losung360.com/external/v1';
-const AUTH_URL = process.env.SHIPMAXX_AUTH_URL || 'https://appapi.losung360.com/external/v1';
+const BASE_URL = config.shipmaxx.baseUrl;
+const AUTH_URL = config.shipmaxx.authUrl;
 
 let _email;
 let _password;
@@ -75,8 +76,8 @@ const post = (url, data)   => call('POST', url, { data });
 const put  = (url, data)   => call('PUT',  url, { data });
 
 export const login = async () => {
-  const email = _email || process.env.SHIPMAXX_EMAIL;
-  const password = _password || process.env.SHIPMAXX_PASSWORD;
+  const email = _email || config.shipmaxx.email;
+  const password = _password || config.shipmaxx.password;
 
   const activeAuthUrl = _dynamicAuthUrl || AUTH_URL;
   const targetUrl = `${activeAuthUrl}/auth/login`;

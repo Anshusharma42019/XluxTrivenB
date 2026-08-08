@@ -246,11 +246,13 @@ export const createOrder = catchAsync(async (req, res) => {
     // Find verified_by and verification_id from Verification record for this lead
     let verifiedBy = req.user?._id;
     let verificationId = null;
+    let taskCreatedBy = null;
     if (matchedLeadId) {
-      const verDoc = await Verification.findOne({ lead: matchedLeadId, isDeleted: { $ne: true } }).sort({ createdAt: -1 }).lean();
+      const verDoc = await Verification.findOne({ lead: matchedLeadId, isDeleted: { $ne: true } }).populate('task', 'createdBy').sort({ createdAt: -1 }).lean();
       if (verDoc) {
         verifiedBy = verDoc.verifiedBy || verDoc.assignedTo || req.user?._id;
         verificationId = verDoc._id; // Lock verification_id on order permanently
+        taskCreatedBy = verDoc.task?.createdBy || null;
       }
     }
 
@@ -271,6 +273,7 @@ export const createOrder = catchAsync(async (req, res) => {
       created_by: req.user?._id,
       verified_by: verifiedBy,
       verification_id: verificationId, // Permanently links order to the Closer's verification record
+      task_created_by: taskCreatedBy,
       lead_id: matchedLeadId,
       raw_response: smxRes,
     });
@@ -348,11 +351,13 @@ export const createOrderAndShipment = catchAsync(async (req, res) => {
     // Find verified_by and verification_id from Verification record for this lead
     let verifiedBy = req.user?._id;
     let verificationId = null;
+    let taskCreatedBy = null;
     if (matchedLeadId) {
-      const verDoc = await Verification.findOne({ lead: matchedLeadId, isDeleted: { $ne: true } }).sort({ createdAt: -1 }).lean();
+      const verDoc = await Verification.findOne({ lead: matchedLeadId, isDeleted: { $ne: true } }).populate('task', 'createdBy').sort({ createdAt: -1 }).lean();
       if (verDoc) {
         verifiedBy = verDoc.verifiedBy || verDoc.assignedTo || req.user?._id;
         verificationId = verDoc._id; // Lock verification_id on order permanently
+        taskCreatedBy = verDoc.task?.createdBy || null;
       }
     }
 
@@ -373,6 +378,7 @@ export const createOrderAndShipment = catchAsync(async (req, res) => {
       created_by: req.user?._id,
       verified_by: verifiedBy,
       verification_id: verificationId, // Permanently links order to the Closer's verification record
+      task_created_by: taskCreatedBy,
       lead_id: matchedLeadId,
       raw_response: smxRes,
     });
@@ -1089,15 +1095,14 @@ export const importByIds = catchAsync(async (req, res) => {
   }, `Done: ${imported} new, ${updated} updated, ${failed} failed out of ${ids.length} order IDs`));
 });
 
-export const syncShipmaxx = catchAsync(async (req, res) => {
+export const runSyncInBackground = async (mode = 'quick') => {
   const syncStart = Date.now();
   const MAX_SYNC_MS = 4 * 60 * 1000;
   const isTimedOut = () => (Date.now() - syncStart) > MAX_SYNC_MS;
   let updatedCount = 0;
-  const mode = (req.query?.mode || req.body?.mode || 'quick').toLowerCase();
   const isFullSync = mode === 'full';
 
-  console.log(`[Sync ShipMaxx] ▶ Starting ${isFullSync ? 'FULL' : 'QUICK'} sync...`);
+  console.log(`[Sync ShipMaxx] ▶ Starting ${isFullSync ? 'FULL' : 'QUICK'} sync in background...`);
 
   // Status normalization (fast, DB only)
   await Order.updateMany({ platform: 'shipmaxx', status: 'SHIPMENT_BOOKED' }, { $set: { status: 'NEW' } }).catch(() => {});
@@ -1248,7 +1253,28 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
 
   const elapsed = Math.round((Date.now() - syncStart) / 1000);
   console.log(`[Sync ShipMaxx] ✅ ${isFullSync ? 'Full' : 'Quick'} sync done! ${updatedCount} updated in ${elapsed}s`);
-  res.json(new ApiResponse(200, { updatedCount, elapsed, mode, timedOut: isTimedOut() }, `${isFullSync ? 'Full' : 'Quick'} sync complete. Updated: ${updatedCount} orders in ${elapsed}s.`));
+};
+
+export const syncShipmaxx = catchAsync(async (req, res) => {
+  const mode = (req.query?.mode || req.body?.mode || 'quick').toLowerCase();
+  
+  // Return immediately so Hostinger doesn't timeout the HTTP request
+  res.json(new ApiResponse(200, { mode }, `Sync started in background. This might take a few minutes.`));
+  
+  // Run background process
+  runSyncInBackground(mode).catch(err => {
+    console.error('[Background Sync Error]', err.message);
+  });
+});
+
+export const runCronSyncWebhook = catchAsync(async (req, res) => {
+  res.json(new ApiResponse(200, null, 'ShipMaxx cron sync triggered successfully'));
+  
+  import('./shipmaxx.cron.js').then(cronModule => {
+    if (cronModule.runCronSync) {
+      cronModule.runCronSync().catch(err => console.error('[Cron Webhook Error]', err.message));
+    }
+  }).catch(err => console.error('[Cron Module Error]', err.message));
 });
 
 

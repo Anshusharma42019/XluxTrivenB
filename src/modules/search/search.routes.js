@@ -14,6 +14,13 @@ import Cnp from '../cnp/cnp.model.js';
 import Appointment from '../appointment/appointment.model.js';
 import { Order as ShiprocketOrder } from '../shiprocket/models/order.model.js';
 import { ShipmaxxOrder } from '../shipmaxx/models/shipmaxxOrder.model.js';
+import {
+  InterestedLead,
+  NotInterestedLead,
+  PendingOrder,
+  OnHoldOrder,
+  VerifiedOrder,
+} from '../transition/statusModels.js';
 
 const getModel = (name) => {
   try { return mongoose.model(name); } catch(e) { return null; }
@@ -82,7 +89,12 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     shipmaxxOrders,
     shipmaxxDelivered,
     shipmaxxInTransit,
-    shipmaxxRto
+    shipmaxxRto,
+    interestedLeads,
+    notInterestedLeads,
+    pendingOrders,
+    onHoldOrders,
+    verifiedOrders
   ] = await Promise.all([
     Lead.find(leadMatch).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
     Task.find({ isDeleted: false, $or: [{ title: regex }, { phone: regex }] }).populate('assignedTo', 'name').populate('lead', 'name phone problem department address cityVillage state pincode').sort({ updatedAt: -1 }).limit(limit).lean(),
@@ -105,6 +117,12 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     (getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).populate({ path: 'verification_staff_id', select: 'name', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
     (getModel('ShipmaxxInTransitOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
     (getModel('ShipmaxxRtoOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    
+    InterestedLead.find(leadMatch).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
+    NotInterestedLead.find(leadMatch).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
+    PendingOrder.find(leadMatch).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
+    OnHoldOrder.find(leadMatch).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
+    VerifiedOrder.find(leadMatch).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
   ]);
 
   const allResults = [];
@@ -207,6 +225,31 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
   appointments.forEach(a => {
     const latestNote = a.notes || '';
     addResult(a, 'appointment', 'Appointments', a.phone, a.patientName, a.status, `/appointments?openId=${a._id}`, a.createdBy?.name, latestNote);
+  });
+
+  interestedLeads.forEach(l => {
+    const latestNote = l.notes && l.notes.length > 0 ? l.notes[l.notes.length - 1].text : (l.note || '');
+    addResult(l, 'lead', 'Interested Leads', l.phone, l.name, 'Interested', `/pipeline?openId=${l._id}`, l.assignedTo?.name, latestNote);
+  });
+
+  notInterestedLeads.forEach(l => {
+    const latestNote = l.notes && l.notes.length > 0 ? l.notes[l.notes.length - 1].text : (l.rejectionReason || '');
+    addResult(l, 'lead', 'Not Interested', l.phone, l.name, 'Not Interested', `/pipeline?openId=${l._id}`, l.assignedTo?.name, latestNote);
+  });
+
+  pendingOrders.forEach(o => {
+    const latestNote = o.notes && o.notes.length > 0 ? o.notes[o.notes.length - 1].text : (o.pendingReason || '');
+    addResult(o, 'order', 'Pending Orders', o.phone, o.name, 'Pending', `/verification?openId=${o._id}`, o.assignedTo?.name, latestNote);
+  });
+
+  onHoldOrders.forEach(o => {
+    const latestNote = o.notes && o.notes.length > 0 ? o.notes[o.notes.length - 1].text : (o.onHoldReason || '');
+    addResult(o, 'order', 'On Hold', o.phone, o.name, 'On Hold', `/pipeline?openId=${o._id}&filter=on_hold`, o.assignedTo?.name, latestNote);
+  });
+
+  verifiedOrders.forEach(o => {
+    const latestNote = o.notes && o.notes.length > 0 ? o.notes[o.notes.length - 1].text : (o.note || '');
+    addResult(o, 'order', 'Verified Orders', o.phone, o.name, 'Verified', `/ready-to-shipment?openId=${o._id}`, o.assignedTo?.name, latestNote);
   });
 
   const processedOrders = new Set();

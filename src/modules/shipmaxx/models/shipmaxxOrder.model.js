@@ -40,6 +40,7 @@ const shipmaxxOrderSchema = new mongoose.Schema({
   
   lead_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead', index: true },
   created_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  task_created_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
   
   status_updated_at: { type: Date, index: true },
   delivered_at: { type: Date, index: true },

@@ -179,7 +179,8 @@ router.get('/debug/dump-reorders', catchAsync(async (req, res) => {
 
 router.get('/debug/sync', c.debugSync);
 router.post('/debug-sync-force', c.syncShipmaxx);
-router.get('/debug/run-cron', c.debugSync);
+router.get('/debug/run-cron', c.debugSync); // legacy
+router.get('/cron/shipmaxx-sync', c.runCronSyncWebhook);
 router.get('/debug-backfill-delivered', c.debugBackfillDelivered);
 router.get('/debug-stats', async (req, res) => {
   try {

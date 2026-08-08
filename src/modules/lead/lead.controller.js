@@ -7,6 +7,7 @@ import * as leadService from './lead.service.js';
 import * as interaktService from '../interakt/interakt.service.js';
 import { BulkMessageBatch, BulkMessageRecipient } from './bulkMessage.model.js';
 import { bulkMessageQueue } from './bulkMessageQueue.js';
+import { transitionRecord } from '../transition/transition.service.js';
 
 const createLead = catchAsync(async (req, res) => {
   const lead = await leadService.createLead(req.body, req.user._id, req.user.role, req.userDepartments);
@@ -47,6 +48,11 @@ const getLead = catchAsync(async (req, res) => {
 
 const updateLead = catchAsync(async (req, res) => {
   const lead = await leadService.updateLead(req.params.leadId, req.body, req.user.role, req.user._id, req.userDepartments);
+  if (req.body.status && lead && lead._id) {
+    await transitionRecord(Lead, lead._id, req.body.status, req.body, req.user?._id || req.user || null).catch(err => {
+      console.error('[transitionRecord] Lead status transition note:', err.message);
+    });
+  }
   res.json(new ApiResponse(httpStatus.OK, lead, 'Lead updated'));
 });
 
@@ -74,6 +80,11 @@ const addNote = catchAsync(async (req, res) => {
 
 const markCNP = catchAsync(async (req, res) => {
   const lead = await leadService.markCNP(req.params.leadId, req.user.role, req.user._id);
+  if (lead && lead._id) {
+    await transitionRecord(Lead, lead._id, 'cnp', { cnp: true, cnpAt: new Date() }, req.user?._id || req.user || null).catch(err => {
+      console.error('[transitionRecord] CNP transition note:', err.message);
+    });
+  }
   res.json(new ApiResponse(httpStatus.OK, lead, 'Marked as CNP'));
 });
 

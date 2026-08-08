@@ -230,15 +230,24 @@ router.get('/', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter
     if (dayFilter === 'today') {
       const start = new Date(); start.setHours(0, 0, 0, 0);
       const end = new Date(); end.setHours(23, 59, 59, 999);
-      rtsQuery.createdAt = { $gte: start, $lte: end };
+      rtsQuery.$or = [
+        { createdAt: { $gte: start, $lte: end } },
+        { updatedAt: { $gte: start, $lte: end } }
+      ];
     } else if (dayFilter === 'yesterday') {
       const start = new Date(); start.setDate(start.getDate() - 1); start.setHours(0, 0, 0, 0);
       const end = new Date(); end.setDate(end.getDate() - 1); end.setHours(23, 59, 59, 999);
-      rtsQuery.createdAt = { $gte: start, $lte: end };
+      rtsQuery.$or = [
+        { createdAt: { $gte: start, $lte: end } },
+        { updatedAt: { $gte: start, $lte: end } }
+      ];
     } else if (dayFilter === 'custom' && customDate) {
       const start = new Date(`${customDate}T00:00:00.000+05:30`);
       const end = new Date(`${customDate}T23:59:59.999+05:30`);
-      rtsQuery.createdAt = { $gte: start, $lte: end };
+      rtsQuery.$or = [
+        { createdAt: { $gte: start, $lte: end } },
+        { updatedAt: { $gte: start, $lte: end } }
+      ];
     }
 
     // Apply lead type and search keyword filter matching lead details
@@ -423,7 +432,7 @@ router.patch('/:id/sent', auth('admin', 'manager', 'sales', 'logistics'), async 
 
 router.delete('/:id', auth('admin', 'manager'), async (req, res) => {
   try {
-    const record = await ReadyToShipment.findByIdAndDelete(req.params.id);
+    const record = await ReadyToShipment.findByIdAndUpdate(req.params.id, { $set: { isArchived: true, isDeleted: true } });
     if (!record) return res.status(404).json({ status: 404, message: 'Not found' });
     await Task.findByIdAndUpdate(record.task, { status: 'cancelled' });
     res.json({ status: 200, message: 'Deleted' });

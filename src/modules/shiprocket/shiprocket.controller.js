@@ -310,11 +310,13 @@ export const createOrder = catchAsync(async (req, res) => {
   // Find verified_by and verification_id from Verification record for this lead
   let verifiedBy = null;
   let verificationId = null;
+  let taskCreatedBy = null;
   if (body.lead_id) {
-    const verif = await mongoose.model('Verification').findOne({ lead: body.lead_id }).sort({ createdAt: -1 }).lean();
+    const verif = await mongoose.model('Verification').findOne({ lead: body.lead_id }).populate('task', 'createdBy').sort({ createdAt: -1 }).lean();
     if (verif) {
       verifiedBy = verif.verifiedBy || verif.assignedTo;
       verificationId = verif._id; // Lock verification_id on order permanently
+      taskCreatedBy = verif.task?.createdBy || null;
     }
   }
 
@@ -331,6 +333,7 @@ export const createOrder = catchAsync(async (req, res) => {
       created_by: req.user?._id,
       verified_by: verifiedBy,
       verification_id: verificationId, // Permanently links order to the Closer's verification record
+      task_created_by: taskCreatedBy,
       raw_response: data,
     },
     { upsert: true, returnDocument: 'after' }

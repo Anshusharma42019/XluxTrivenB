@@ -70,6 +70,49 @@ export const getStaffStats = async (userId, targetDate, from, to, userDepartment
     Verification.countDocuments({ ...filter, ...dateFilter }),
   ]);
 
+  const { Order } = await import('../shiprocket/models/order.model.js');
+  const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
+  
+  const userLeads = await Lead.find({ assignedTo: uid }).select('_id').lean();
+  const leadIds = userLeads.map(l => l._id);
+
+  const deliveredQuery = {
+    status: { $regex: /^delivered$/i },
+    ...(isAllTime ? {} : { $or: [{ delivered_at: { $gte: start, $lte: end } }, { updatedAt: { $gte: start, $lte: end } }] })
+  };
+
+  const [ordersSR, ordersSM] = await Promise.all([
+    Order.find(deliveredQuery).select('source_order_id lead_id task_created_by verified_by created_by delivered_at updatedAt').lean(),
+    ShipmaxxOrder.find(deliveredQuery).select('source_order_id lead_id task_created_by verified_by created_by delivered_at updatedAt').lean()
+  ]);
+
+  let newDeliveredCount = 0, salesOldDeliveredCount = 0, supportOldDeliveredCount = 0;
+  const leadIdSet = new Set(leadIds.map(String));
+
+  const processUserOrder = (o) => {
+    const isOld = Boolean(o.source_order_id);
+    const lId = o.lead_id ? String(o.lead_id) : null;
+    const tId = o.task_created_by ? String(o.task_created_by) : null;
+    const vId = o.verified_by ? String(o.verified_by) : null;
+    const cId = o.created_by ? String(o.created_by) : null;
+
+    if (!isOld) {
+      if ((lId && leadIdSet.has(lId)) || (!lId && cId === String(uid)) || (tId === String(uid))) {
+        newDeliveredCount++;
+      }
+    } else {
+      if (lId && leadIdSet.has(lId)) {
+        salesOldDeliveredCount++;
+      }
+      if (vId === String(uid) || (!vId && cId === String(uid))) {
+        supportOldDeliveredCount++;
+      }
+    }
+  };
+
+  ordersSR.forEach(processUserOrder);
+  ordersSM.forEach(processUserOrder);
+
   return {
     todayVerifications,
     monthVerifications,
@@ -83,7 +126,10 @@ export const getStaffStats = async (userId, targetDate, from, to, userDepartment
     leadsAdded,
     verifiedCount,
     onHoldCount,
-    date: dateStr
+    date: dateStr,
+    newDeliveredCount,
+    salesOldDeliveredCount,
+    supportOldDeliveredCount
   };
 };
 
@@ -290,22 +336,50 @@ export const getStaffVerifications = async (userId) => {
     .lean();
 };
 
-export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
+function buildStatsDateRange(preset, fromDate, toDate) {
   const IST_OFFSET = 5.5 * 60 * 60 * 1000;
-  let startOfDay, endOfDay;
-  const target = targetDate ? new Date(targetDate) : new Date();
+  const now = new Date();
+  const istNow = new Date(now.getTime() + IST_OFFSET);
+  const y = istNow.getUTCFullYear();
+  const m = istNow.getUTCMonth();
 
-  const isAllTime = fromDate === 'all' || toDate === 'all';
-  if (isAllTime) {
-    startOfDay = new Date(Date.UTC(target.getFullYear(), target.getMonth(), target.getDate()) - IST_OFFSET);
-    endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000 - 1);
-  } else if (fromDate && toDate) {
-    startOfDay = new Date(`${fromDate}T00:00:00.000+05:30`);
-    endOfDay = new Date(`${toDate}T23:59:59.999+05:30`);
-  } else {
-    startOfDay = new Date(Date.UTC(target.getFullYear(), target.getMonth(), target.getDate()) - IST_OFFSET);
-    endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000 - 1);
+  const isAll = preset === 'all' || fromDate === 'all' || toDate === 'all';
+  if (isAll) {
+    return { isAllTime: true, start: null, end: null };
   }
+  if (preset === 'month' || preset === 'mtd' || fromDate === 'month') {
+    const start = new Date(Date.UTC(y, m, 1) - IST_OFFSET);
+    return { isAllTime: false, start: start, end: now };
+  }
+  if (preset === 'today' || fromDate === 'today') {
+    const todayStr = istNow.toISOString().slice(0, 10);
+    const start = new Date(`${todayStr}T00:00:00.000+05:30`);
+    const end = new Date(`${todayStr}T23:59:59.999+05:30`);
+    return { isAllTime: false, start: start, end: end };
+  }
+  if (preset === 'yesterday' || fromDate === 'yesterday') {
+    const yesterdayIst = new Date(istNow.getTime() - 24 * 60 * 60 * 1000);
+    const yesterdayStr = yesterdayIst.toISOString().slice(0, 10);
+    const start = new Date(`${yesterdayStr}T00:00:00.000+05:30`);
+    const end = new Date(`${yesterdayStr}T23:59:59.999+05:30`);
+    return { isAllTime: false, start: start, end: end };
+  }
+  if (fromDate && toDate && fromDate !== 'undefined' && toDate !== 'undefined') {
+    const start = new Date(`${fromDate}T00:00:00.000+05:30`);
+    const end = new Date(`${toDate}T23:59:59.999+05:30`);
+    return { isAllTime: false, start: start, end: end };
+  }
+  const todayStr = istNow.toISOString().slice(0, 10);
+  const start = new Date(`${todayStr}T00:00:00.000+05:30`);
+  const end = new Date(`${todayStr}T23:59:59.999+05:30`);
+  return { isAllTime: false, start: start, end: end };
+}
+
+export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, requestingUser) => {
+  const IST_OFFSET = 5.5 * 60 * 60 * 1000;
+  const { isAllTime, start: startOfDay, end: endOfDay } = buildStatsDateRange(preset, fromDate, toDate);
+  let target = targetDate ? new Date(targetDate) : new Date();
+  if (isNaN(target.getTime())) target = new Date();
 
   const monthStart = new Date(Date.UTC(target.getFullYear(), target.getMonth(), 1) - IST_OFFSET);
   const monthEnd = new Date(Date.UTC(target.getFullYear(), target.getMonth() + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
@@ -323,7 +397,11 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
   const { Order } = await import('../shiprocket/models/order.model.js');
   const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
 
-  const allUsers = await User.find({ role: { $in: ['sales', 'manager', 'doctor', 'support'] }, isDeleted: false }).select('_id name phone role').lean();
+  const userQuery = { role: { $in: ['sales', 'manager', 'doctor', 'support'] }, isDeleted: false };
+  if (requestingUser && ['sales', 'support', 'logistics'].includes(requestingUser.role)) {
+    userQuery._id = requestingUser._id;
+  }
+  const allUsers = await User.find(userQuery).select('_id name phone role').lean();
   
   const statsMap = {};
   for (const u of allUsers) {
@@ -331,12 +409,20 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
       user: u,
       todayVerifications: 0, monthVerifications: 0, pendingTasks: 0, todayTarget: 0,
       todayCnp: 0, todayCallAgain: 0, todayInterested: 0, todayNotInterested: 0, todayClosedLost: 0,
-      leadsAdded: 0, verifiedCount: 0, onHoldCount: 0, readyToShipmentCount: 0, deliveredCount: 0,
+      leadsAdded: 0, tasksAssigned: 0, verifiedCount: 0, onHoldCount: 0, readyToShipmentCount: 0, deliveredCount: 0,
       rtoCount: 0, monthDispatchedCount: 0, monthDeliveredCount: 0, monthRtoCount: 0,
       assignedVerifications: 0, workingHours: 0, workingPercentage: 0,
-      totalAppointments: 0, completedAppointments: 0, cancelledAppointments: 0
+      totalAppointments: 0, completedAppointments: 0, cancelledAppointments: 0,
+      newDeliveredCount: 0, salesOldDeliveredCount: 0, supportOldDeliveredCount: 0,
+      uniqueDeliveredCount: 0, // Counts each physical order exactly once (no dual-attribution inflation)
+      commentsCount: 0, cnpComments: 0, callAgainComments: 0, interestedComments: 0,
+      _noteSet: new Set(), _intSet: new Set(), _cnpSet: new Set(), _caSet: new Set()
     };
   }
+  let totalUniqueDelivered = 0; // Grand total of unique delivered orders across all staff
+
+  const queryMinStart = isAllTime ? null : (startOfDay < monthStart ? startOfDay : monthStart);
+  const queryMaxEnd = isAllTime ? null : (endOfDay > monthEnd ? endOfDay : monthEnd);
 
   // 2. Fetch Bulk Data in parallel
   const [
@@ -346,33 +432,31 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
     Attendance.find({ date: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('user checkIn checkOut workingHours').lean(),
     Appointment.find({ appointmentDate: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('doctorName status').lean(),
     StaffTarget.find({ date: { $gte: fromDate || dateStr, $lte: toDate || dateStr } }).lean(),
-    Verification.find({ isDeleted: { $ne: true }, createdAt: { $gte: monthStart, $lte: endOfDay } }).select('assignedTo status createdAt updatedAt').lean(),
+    Verification.find({ isDeleted: { $ne: true }, ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } }) }).select('assignedTo verifiedBy status createdAt updatedAt').lean(),
     Task.find({ 
       isDeleted: false, 
-      $or: [
-        { status: 'pending' }, 
-        { status: { $in: ['interested', 'cancel_call'] }, updatedAt: { $gte: startOfDay, $lte: endOfDay } }
-      ] 
-    }).select('assignedTo status updatedAt').lean(),
-    Cnp.find({ ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }).select('assignedTo').lean(),
-    CallAgain.find({ ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }).select('assignedTo').lean(),
-    Lead.find({ ...(isAllTime ? {} : { $or: [{ createdAt: { $gte: startOfDay, $lte: endOfDay } }, { updatedAt: { $gte: startOfDay, $lte: endOfDay } }] }) }).select('assignedTo status createdAt updatedAt').lean(),
+      ...(isAllTime ? {} : {
+        $or: [
+          { status: 'pending' }, 
+          { createdAt: { $gte: startOfDay, $lte: endOfDay } },
+          { updatedAt: { $gte: startOfDay, $lte: endOfDay } },
+          { 'notes.createdAt': { $gte: startOfDay, $lte: endOfDay } }
+        ]
+      })
+    }).select('lead assignedTo status notes updatedAt createdAt').lean(),
+    Cnp.find({ ...(isAllTime ? {} : { $or: [{ updatedAt: { $gte: startOfDay, $lte: endOfDay } }, { 'notes.createdAt': { $gte: startOfDay, $lte: endOfDay } }] }) }).select('assignedTo notes updatedAt').lean(),
+    CallAgain.find({ ...(isAllTime ? {} : { $or: [{ updatedAt: { $gte: startOfDay, $lte: endOfDay } }, { 'notes.createdAt': { $gte: startOfDay, $lte: endOfDay } }] }) }).select('lead assignedTo status notes updatedAt').lean(),
+    Lead.find({ ...(isAllTime ? {} : { $or: [{ createdAt: { $gte: startOfDay, $lte: endOfDay } }, { updatedAt: { $gte: startOfDay, $lte: endOfDay } }, { 'notes.createdAt': { $gte: startOfDay, $lte: endOfDay } }, { 'follow_ups.date': { $gte: startOfDay, $lte: endOfDay } }] }) }).select('assignedTo status cnp notes follow_ups createdAt updatedAt').lean(),
     Order.find({ 
       status: { $not: /^(new|pending|cancelled)$/i },
-      $or: [
-        { createdAt: { $gte: monthStart, $lte: endOfDay } },
-        { updatedAt: { $gte: startOfDay, $lte: endOfDay } }
-      ]
-    }).select('lead_id created_by status createdAt updatedAt')
+      ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
+    }).select('lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
       .populate('lead_id', 'assignedTo status')
       .lean(),
     ShipmaxxOrder.find({ 
       status: { $not: /^(new|pending|cancelled)$/i },
-      $or: [
-        { createdAt: { $gte: monthStart, $lte: endOfDay } },
-        { updatedAt: { $gte: startOfDay, $lte: endOfDay } }
-      ]
-    }).select('lead_id created_by status createdAt updatedAt')
+      ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
+    }).select('lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
       .populate('lead_id', 'assignedTo status')
       .lean()
   ]);
@@ -416,87 +500,268 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate) => {
 
   // Process Verifications
   for (const v of allVerifications) {
-    const uid = String(v.assignedTo);
+    const uid = String(v.verifiedBy || v.assignedTo);
     if (statsMap[uid] && statsMap[uid].user.role !== 'doctor') {
       statsMap[uid].assignedVerifications++;
-      if (isToday(v.createdAt)) statsMap[uid].todayVerifications++;
-      if (isMonth(v.createdAt)) statsMap[uid].monthVerifications++;
-      if (isToday(v.updatedAt)) {
-        if (v.status === 'verified' || v.status === 'rejected') statsMap[uid].verifiedCount++;
-        if (v.status === 'on_hold') statsMap[uid].onHoldCount++;
+      if (isToday(v.createdAt)) {
+        statsMap[uid].todayVerifications++;
+        statsMap[uid].verifiedCount++;
       }
+      if (isMonth(v.createdAt)) statsMap[uid].monthVerifications++;
+      if (isToday(v.updatedAt) && v.status === 'on_hold') {
+        statsMap[uid].onHoldCount++;
+      }
+    }
+  }
+
+  const addNoteStats = (uid, n, cat) => {
+    if (!statsMap[uid] || !isToday(n.createdAt)) return;
+    const key = `${new Date(n.createdAt).getTime()}_${(n.text || '').trim()}`;
+    if (!statsMap[uid]._noteSet.has(key)) {
+      statsMap[uid]._noteSet.add(key);
+      statsMap[uid].commentsCount++;
+      if (cat === 'cnp') statsMap[uid].cnpComments++;
+      else if (cat === 'call_again') statsMap[uid].callAgainComments++;
+      else if (cat === 'interested') statsMap[uid].interestedComments++;
+    }
+  };
+
+  // Process Cnp (Strict CRM rule: exclusively count updated Cnp documents)
+  for (const c of allCnps) {
+    const uid = String(c.assignedTo || '');
+    if (statsMap[uid] && isToday(c.updatedAt)) {
+      statsMap[uid].todayCnp++;
+    }
+    if (c.notes && c.notes.length) {
+      for (const n of c.notes) addNoteStats(n.createdBy ? String(n.createdBy) : uid, n, 'cnp');
+    }
+  }
+
+  // Process CallAgain (Strict CRM rule: exclusively count updated CallAgain documents)
+  for (const ca of allCallAgains) {
+    const uid = String(ca.assignedTo || '');
+    if (statsMap[uid] && isToday(ca.updatedAt)) {
+      if (ca.status !== 'interested') statsMap[uid].todayCallAgain++;
+      if (ca.status === 'interested') statsMap[uid].todayInterested++;
+    }
+    if (ca.notes && ca.notes.length) {
+      for (const n of ca.notes) addNoteStats(n.createdBy ? String(n.createdBy) : uid, n, ca.status === 'interested' ? 'interested' : 'call_again');
     }
   }
 
   // Process Tasks
   for (const t of allTasks) {
-    const uid = String(t.assignedTo);
+    const uid = String(t.assignedTo || '');
     if (statsMap[uid] && statsMap[uid].user.role !== 'doctor') {
       if (t.status === 'pending') statsMap[uid].pendingTasks++;
+      if (isAllTime || (t.createdAt && new Date(t.createdAt).getTime() >= startOfDay.getTime() && new Date(t.createdAt).getTime() <= endOfDay.getTime())) {
+        statsMap[uid].tasksAssigned++;
+      }
       if (isToday(t.updatedAt)) {
-        if (t.status === 'interested') statsMap[uid].todayInterested++;
+        if (t.status === 'interested') {
+          statsMap[uid].todayInterested++;
+        }
         if (t.status === 'cancel_call') statsMap[uid].todayNotInterested++;
+      }
+    }
+    if (t.notes && t.notes.length) {
+      const isInterestedToday = t.status === 'interested' && isToday(t.updatedAt);
+      for (const n of t.notes) {
+        addNoteStats(n.createdBy ? String(n.createdBy) : uid, n, isInterestedToday ? 'interested' : 'other');
       }
     }
   }
 
-  // Process Cnp & CallAgain
-  for (const c of allCnps) {
-    const uid = String(c.assignedTo);
-    if (statsMap[uid]) statsMap[uid].todayCnp++;
-  }
-  for (const c of allCallAgains) {
-    const uid = String(c.assignedTo);
-    if (statsMap[uid]) statsMap[uid].todayCallAgain++;
-  }
-
-  // Process Leads (added & closed_lost today)
+  // Process Leads (Strict CRM rule: only createdAt for leadsAdded / Leads Assigned)
   for (const l of allLeadsData) {
-    const uid = String(l.assignedTo);
+    const uid = String(l.assignedTo || '');
     if (statsMap[uid] && statsMap[uid].user.role !== 'doctor') {
-      if (isToday(l.createdAt)) statsMap[uid].leadsAdded++;
-      if (l.status === 'closed_lost' && isToday(l.updatedAt)) statsMap[uid].todayClosedLost++;
+      if (isToday(l.createdAt)) {
+        statsMap[uid].leadsAdded++;
+      }
+      if (isToday(l.updatedAt)) {
+        if (l.status === 'closed_lost') statsMap[uid].todayClosedLost++;
+      }
+    }
+    if (l.notes && l.notes.length) {
+      for (const n of l.notes) {
+        addNoteStats(n.createdBy ? String(n.createdBy) : uid, n, 'other');
+      }
+    }
+    if (l.follow_ups && l.follow_ups.length) {
+      for (const f of l.follow_ups) {
+        if (f.note) {
+          let cat = 'other';
+          if (l.cnp) cat = 'cnp';
+          else if (l.status === 'follow_up') cat = 'call_again';
+          else if (l.status === 'interested') cat = 'interested';
+          const noteObj = {
+            text: f.note,
+            createdAt: f.date,
+            createdBy: f.createdBy
+          };
+          addNoteStats(f.createdBy ? String(f.createdBy) : uid, noteObj, cat);
+        }
+      }
     }
   }
 
   // Process Orders (SR and SM)
   const processOrder = (o) => {
-    let uid = o.lead_id && typeof o.lead_id === 'object' ? String(o.lead_id.assignedTo) : null;
+    const lUid = o.lead_id && typeof o.lead_id === 'object' ? String(o.lead_id.assignedTo) : null;
+    let uid = lUid;
     
-    // Check if we should fallback to created_by for sales
     if (!uid && o.created_by) {
-      const createdByUid = String(o.created_by);
+      const createdByUid = String(o.created_by._id || o.created_by);
       if (statsMap[createdByUid] && statsMap[createdByUid].user.role === 'sales') {
         uid = createdByUid;
       }
-    } else if (uid && statsMap[uid] && statsMap[uid].user.role === 'sales' && o.created_by) {
-      // In old logic: "$or: u.role === 'sales' ? [{ lead_id: { $in: staffLeads } }, { lead_id: null, created_by: uid }] : [{ lead_id: { $in: staffLeads } }]"
-      // So if it has lead_id, it counts. If it doesn't, it counts if created_by. We did that above.
     }
 
     if (uid && statsMap[uid] && statsMap[uid].user.role !== 'doctor') {
-      // DR denominator (dispatched)
-      if (isToday(o.createdAt)) statsMap[uid].readyToShipmentCount++; // This is what the old code did! (Order.countDocuments { createdAt: today })
+      if (isToday(o.createdAt)) statsMap[uid].readyToShipmentCount++;
       if (isMonth(o.createdAt)) statsMap[uid].monthDispatchedCount++;
-      
-      // Deliveries
-      if (['DELIVERED', 'Delivered', 'delivered'].includes(o.status)) {
-        if (isToday(o.updatedAt)) statsMap[uid].deliveredCount++;
-        if (isMonth(o.createdAt)) statsMap[uid].monthDeliveredCount++;
-      }
-      
-      // RTOs
-      if (/^rto/i.test(o.status)) {
-        if (isToday(o.updatedAt)) statsMap[uid].rtoCount++;
-        if (isMonth(o.createdAt)) statsMap[uid].monthRtoCount++;
-      }
     }
   };
 
   for (const o of allOrdersSR) processOrder(o);
   for (const o of allOrdersSM) processOrder(o);
 
-  return Object.values(statsMap);
+  const synchronizedDeliveries = await getSynchronizedDeliveredOrders(isAllTime ? null : startOfDay, isAllTime ? null : endOfDay, Order, ShipmaxxOrder, true);
+  
+  // RTO lookback: 45 days (1 month 15 days) from the end of the period
+  const rtoLookbackStart = isAllTime ? null : new Date(endOfDay.getTime() - 45 * 24 * 60 * 60 * 1000);
+  const rtoTimeFilter = isAllTime ? {} : {
+    createdAt: { $gte: rtoLookbackStart, $lte: endOfDay }
+  };
+
+  const [rtoOrdersSM, rtoOrdersSR] = await Promise.all([
+    ShipmaxxOrder.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
+      .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by')
+      .populate('lead_id', 'assignedTo')
+      .lean(),
+    Order.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
+      .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by')
+      .populate('lead_id', 'assignedTo')
+      .lean()
+  ]);
+
+  const allRtos = [...rtoOrdersSR, ...rtoOrdersSM];
+  for (const o of allRtos) {
+    const isOldRto = Boolean(o.source_order_id);
+    const lUid = o.lead_id ? String(o.lead_id.assignedTo || '') : null;
+    const cId = o.created_by ? String(o.created_by) : null;
+    
+    // Original processOrder logic: Priority to Lead Owner (Sales), fallback to created_by (if Sales)
+    let uid = lUid;
+    if (!uid && cId) {
+      if (statsMap[cId] && statsMap[cId].user.role === 'sales') uid = cId;
+    }
+
+    if (uid && statsMap[uid]) {
+      statsMap[uid].rtoCount++;
+    }
+  }
+  
+  const { phoneToSales, leadMap: histLeadMap } = await getPhoneToSalesAgentMap(Order, ShipmaxxOrder, Lead, statsMap, synchronizedDeliveries);
+
+  // totalUniqueDelivered is already declared at line 410
+  let trueNewCount = 0;         // True count of 1st kit deliveries across all orders
+  let trueRepeatCount = 0;      // True count of 2nd+ kit deliveries across all orders
+
+  for (const o of synchronizedDeliveries) {
+    const phone = (o.billing_phone || (o.lead_id && (typeof o.lead_id === 'object' ? o.lead_id.phone : (histLeadMap[String(o.lead_id)]?.phone || ''))))?.replace(/\D/g, '').slice(-10);
+    const isOld = Boolean(o.source_order_id);
+    const tId = o.task_created_by ? String(o.task_created_by._id || o.task_created_by) : null;
+    const vId = o.verified_by ? String(o.verified_by._id || o.verified_by) : null;
+    const cId = o.created_by ? String(o.created_by._id || o.created_by) : null;
+    const lId = o.lead_id && typeof o.lead_id === 'object' ? String(o.lead_id.assignedTo || '') : (o.lead_id ? String(histLeadMap[String(o.lead_id)]?.assignedTo || '') : null);
+
+    if (isOld) trueRepeatCount++;
+    else trueNewCount++;
+
+    // Track whether this physical order has been counted in uniqueDeliveredCount for any staff
+    let uniqueCountedForStaff = null;
+
+    if (!isOld) {
+      // New order (first kit) — attribute to lead owner
+      const candidates = [tId, lId, vId, cId].filter(Boolean);
+      for (const cand of candidates) {
+        if (statsMap[cand]) {
+          if (statsMap[cand].user.role === 'support') {
+            // Support handled a new order — counts as Support's re-verification delivery
+            statsMap[cand].supportOldDeliveredCount++;
+            statsMap[cand].deliveredCount++;
+            if (!uniqueCountedForStaff) {
+              statsMap[cand].uniqueDeliveredCount++;
+              uniqueCountedForStaff = cand;
+            }
+            // Also credit the original Sales agent (dual attribution - does NOT inflate unique count)
+            if (phone && phoneToSales[phone] && statsMap[phoneToSales[phone]]) {
+              statsMap[phoneToSales[phone]].newDeliveredCount++;
+              statsMap[phoneToSales[phone]].deliveredCount++;
+            }
+          } else {
+            // Sales staff owns this lead — 1st kit delivery
+            statsMap[cand].newDeliveredCount++;
+            statsMap[cand].deliveredCount++;
+            if (!uniqueCountedForStaff) {
+              statsMap[cand].uniqueDeliveredCount++;
+              uniqueCountedForStaff = cand;
+            }
+          }
+          break;
+        }
+      }
+    } else {
+      // Reorder (2nd+ kit) — credit Support who re-verified it
+      const supportCand = [vId, cId, lId].filter(Boolean);
+      for (const cand of supportCand) {
+        if (statsMap[cand] && statsMap[cand].user.role === 'support') {
+          statsMap[cand].supportOldDeliveredCount++;
+          statsMap[cand].deliveredCount++;
+          if (!uniqueCountedForStaff) {
+            statsMap[cand].uniqueDeliveredCount++;
+            uniqueCountedForStaff = cand;
+          }
+          break;
+        }
+      }
+      // Also credit original Sales agent via phone map (dual attribution - does NOT inflate unique count)
+      if (phone && phoneToSales[phone] && statsMap[phoneToSales[phone]]) {
+        statsMap[phoneToSales[phone]].salesOldDeliveredCount++;
+        statsMap[phoneToSales[phone]].deliveredCount++;
+        // If no support was found, count unique under sales
+        if (!uniqueCountedForStaff) {
+          statsMap[phoneToSales[phone]].uniqueDeliveredCount++;
+          uniqueCountedForStaff = phoneToSales[phone];
+        }
+      }
+    }
+
+    // Count every order exactly once in the grand total
+    if (uniqueCountedForStaff) totalUniqueDelivered++;
+  }
+
+  for (const k in statsMap) {
+    delete statsMap[k]._intSet;
+    delete statsMap[k]._noteSet;
+    delete statsMap[k]._cnpSet;
+    delete statsMap[k]._caSet;
+  }
+
+  const staffStats = Object.values(statsMap);
+  
+  const isStaff = requestingUser && ['sales', 'support', 'logistics'].includes(requestingUser.role);
+
+  return {
+    staffStats, // The array of stats per staff
+    _totalUniqueDelivered: isStaff && staffStats.length ? staffStats[0].deliveredCount : synchronizedDeliveries.length,
+    _totalAttributed: isStaff && staffStats.length ? staffStats[0].deliveredCount : totalUniqueDelivered,
+    _totalUnattributed: isStaff ? 0 : synchronizedDeliveries.length - totalUniqueDelivered,
+    _totalTrueNew: isStaff && staffStats.length ? staffStats[0].newDeliveredCount : trueNewCount,
+    _totalTrueRepeat: isStaff && staffStats.length ? (staffStats[0].salesOldDeliveredCount + (staffStats[0].supportOldDeliveredCount || staffStats[0].oldDeliveredCount || 0)) : trueRepeatCount,
+  };
 };
 
 
@@ -725,8 +990,14 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
     const statusList = ['DELIVERED', 'Delivered', 'delivered', 'DEL', 'del'];
     if (isAllTime) return { status: { $in: statusList } };
 
-    // Synchronize exactly with Ops Dashboard calculation: Cohort delivered + 4-day Rollover Backlog delivered
-    return { createdAt: { $gte: start, $lte: end } };
+    return { 
+      createdAt: { $gte: start, $lte: end },
+      $or: [
+        { delivered_at: { $gte: start } },
+        { delivered_at: { $exists: false } },
+        { delivered_at: null }
+      ]
+    };
   };
 
   const currentUid = userId ? new mongoose.Types.ObjectId(userId) : null;
@@ -754,11 +1025,23 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
   const deliveredFilter = buildDeliveredMatch();
   const deliveredFilterSM = { ...deliveredFilter };
 
-  const backlogWindow = isAllTime ? null : new Date(start.getTime() - 4 * 24 * 60 * 60 * 1000);
   const backlogFilter = isAllTime ? { _id: null } : {
     status: { $in: ['DELIVERED', 'Delivered', 'delivered', 'DEL', 'del'] },
-    createdAt: { $gte: backlogWindow, $lt: start },
-    delivered_at: { $gte: start, $lte: end }
+    createdAt: { $lt: start },
+    $or: [
+      { delivered_at: { $gte: start, $lte: end } },
+      {
+        $and: [
+          { status_updated_at: { $gte: start, $lte: end } },
+          {
+            $or: [
+              { delivered_at: null },
+              { $expr: { $eq: ["$delivered_at", "$createdAt"] } }
+            ]
+          }
+        ]
+      }
+    ]
   };
 
   const { getKPIs: getOpsMonthKPIs } = await import('../ops-dashboard/opsDashboard.service.js');
@@ -790,7 +1073,13 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
     return arr.filter(o => {
       const l = o.lead_id && o.lead_id._id ? o.lead_id : null;
       if (userRole === 'sales' && currentUid) {
-        const matchesStaff = l && l.assignedTo ? String(l.assignedTo) === String(currentUid) : (o.created_by ? String(o.created_by) === String(currentUid) : false);
+        const isOld = Boolean(o.source_order_id);
+        const taskCreator = o.task_created_by ? (o.task_created_by._id ? String(o.task_created_by._id) : String(o.task_created_by)) : null;
+        const verifier = o.verified_by ? (o.verified_by._id ? String(o.verified_by._id) : String(o.verified_by)) : null;
+        const leadOwner = l && l.assignedTo ? String(l.assignedTo) : null;
+        const creator = o.created_by ? String(o.created_by) : null;
+        const assignedUser = isOld ? (verifier || leadOwner || creator) : (taskCreator || verifier || leadOwner || creator);
+        const matchesStaff = assignedUser === String(currentUid);
         if (!matchesStaff) return false;
       }
       if (userDepartments && userDepartments.length > 0) {
@@ -810,13 +1099,12 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
   const orderBreakdown = mergeBreakdown(orderBreakdownSR, orderBreakdownSM);
   
   const dedupOrders = (arr) => {
-    // Exact Ops Dashboard deduplication logic (sort descending -> lead_id -> awb_code -> order_id -> _id)
+    // Exact Ops Dashboard deduplication logic (sort descending -> awb_code -> order_id -> _id)
     arr.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
     const seen = new Set();
     const res = [];
     for (const o of arr) {
-      const leadKey = o.lead_id ? (o.lead_id._id ? String(o.lead_id._id) : String(o.lead_id)) : null;
-      const key = leadKey ? 'lead_' + leadKey : (o.awb_code ? 'awb_' + o.awb_code : (o.order_id ? 'ord_' + o.order_id : 'id_' + String(o._id)));
+      const key = o.awb_code ? 'awb_' + o.awb_code : (o.order_id ? 'ord_' + o.order_id : 'id_' + String(o._id));
       if (!seen.has(key)) {
         seen.add(key);
         res.push(o);
@@ -938,26 +1226,73 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
   };
 };
 
-const getSynchronizedDeliveredOrders = async (monthStart, monthEnd, OrderModel, ShipmaxxOrderModel, populateDetails = true) => {
-  const statusList = ['DELIVERED', 'Delivered', 'delivered', 'DEL', 'del'];
-  const backlogWindow = new Date(monthStart.getTime() - 4 * 24 * 60 * 60 * 1000);
+export async function getSynchronizedDeliveredOrders(monthStart, monthEnd, OrderModel, ShipmaxxOrderModel, populateDetails = true) {
+  // Match Ops Dashboard classifyStatus: 'DELIVERED' or 'DEL' (case-insensitive)
+  const deliveredStatus = { $in: ['DELIVERED', 'Delivered', 'delivered', 'DEL', 'del'] };
+  const selectFields = '_id lead_id task_created_by created_by verified_by source_order_id sub_total total awb_code order_id createdAt status status_updated_at delivered_at billing_customer_name billing_phone platform';
 
-  const cohortQuery = {
-    status: { $in: statusList },
-    createdAt: { $gte: monthStart, $lte: monthEnd }
+  const dedupOrders = (arr) => {
+    arr.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    const seen = new Set();
+    const res = [];
+    for (const o of arr) {
+      const key = o.awb_code ? 'awb_' + o.awb_code : (o.order_id ? 'ord_' + o.order_id : 'id_' + String(o._id));
+      if (!seen.has(key)) {
+        seen.add(key);
+        res.push(o);
+      }
+    }
+    return res;
   };
 
-  const backlogQuery = {
-    status: { $in: statusList },
-    createdAt: { $gte: backlogWindow, $lt: monthStart },
+  const popList = [
+    { path: 'lead_id', select: 'assignedTo status name phone' },
+    { path: 'created_by', select: 'name role' },
+    { path: 'verified_by', select: 'name role' }
+  ];
+
+  if (!monthStart || !monthEnd) {
+    let q1SR = OrderModel.find({ status: deliveredStatus }).select(selectFields);
+    let q1SM = ShipmaxxOrderModel.find({ status: deliveredStatus }).select(selectFields);
+    if (populateDetails) {
+      q1SR = q1SR.populate(popList);
+      q1SM = q1SM.populate(popList);
+    }
+    const [sr, sm] = await Promise.all([q1SR.lean(), q1SM.lean()]);
+    return dedupOrders([...sr, ...sm]);
+  }
+
+  // Cohort: orders CREATED this period that are delivered
+  const cohortQuery = {
+    status: deliveredStatus,
+    createdAt: { $gte: monthStart, $lte: monthEnd },
     $or: [
-      { delivered_at: { $gte: monthStart, $lte: monthEnd } },
-      { delivered_at: { $exists: false }, status_updated_at: { $gte: monthStart, $lte: monthEnd } },
-      { delivered_at: null, status_updated_at: { $gte: monthStart, $lte: monthEnd } }
+      { delivered_at: { $gte: monthStart } },
+      { delivered_at: { $exists: false } },
+      { delivered_at: null }
     ]
   };
 
-  const selectFields = '_id lead_id created_by verified_by source_order_id sub_total total awb_code order_id createdAt status status_updated_at delivered_at billing_customer_name billing_phone platform';
+  // Backlog: orders created BEFORE this period but delivered_at / status_updated_at falls within
+  // Matches Ops Dashboard backlogDeliveredFilter exactly
+  const backlogQuery = {
+    status: deliveredStatus,
+    createdAt: { $lt: monthStart },
+    $or: [
+      { delivered_at: { $gte: monthStart, $lte: monthEnd } },
+      {
+        $and: [
+          { status_updated_at: { $gte: monthStart, $lte: monthEnd } },
+          {
+            $or: [
+              { delivered_at: null },
+              { $expr: { $eq: ["$delivered_at", "$createdAt"] } }
+            ]
+          }
+        ]
+      }
+    ]
+  };
 
   let q1SR = OrderModel.find(cohortQuery).select(selectFields);
   let q2SR = OrderModel.find(backlogQuery).select(selectFields);
@@ -965,11 +1300,6 @@ const getSynchronizedDeliveredOrders = async (monthStart, monthEnd, OrderModel, 
   let q2SM = ShipmaxxOrderModel.find(backlogQuery).select(selectFields);
 
   if (populateDetails) {
-    const popList = [
-      { path: 'lead_id', select: 'assignedTo status name phone' },
-      { path: 'created_by', select: 'name role' },
-      { path: 'verified_by', select: 'name role' }
-    ];
     q1SR = q1SR.populate(popList);
     q2SR = q2SR.populate(popList);
     q1SM = q1SM.populate(popList);
@@ -980,25 +1310,63 @@ const getSynchronizedDeliveredOrders = async (monthStart, monthEnd, OrderModel, 
     q1SR.lean(), q2SR.lean(), q1SM.lean(), q2SM.lean()
   ]);
 
-  const dedupOrders = (arr) => {
-    arr.sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
-    const seen = new Set();
-    const res = [];
-    for (const o of arr) {
-      const leadKey = o.lead_id ? (o.lead_id._id ? String(o.lead_id._id) : String(o.lead_id)) : null;
-      const key = leadKey ? 'lead_' + leadKey : (o.awb_code ? 'awb_' + o.awb_code : (o.order_id ? 'ord_' + o.order_id : 'id_' + String(o._id)));
-      if (!seen.has(key)) {
-        seen.add(key);
-        res.push(o);
-      }
+  return dedupOrders([...cohortSR, ...backlogSR, ...cohortSM, ...backlogSM]);
+}
+
+export async function getPhoneToSalesAgentMap(OrderModel, ShipmaxxOrderModel, LeadModel, userOrStatsMap, targetOrders = null) {
+  let allHistory;
+  if (targetOrders && Array.isArray(targetOrders) && targetOrders.length <= 500) {
+    if (targetOrders.length === 0) return { phoneToSales: {}, leadMap: {} };
+    const phones = targetOrders.map(o => (o.billing_phone || '').replace(/\D/g, '').slice(-10)).filter(p => p.length >= 10);
+    const uniquePhones = [...new Set(phones)];
+    if (uniquePhones.length === 0) {
+      allHistory = targetOrders;
+    } else {
+      const phoneRegexes = uniquePhones.map(p => new RegExp(p + '$'));
+      const selectFields = '_id lead_id task_created_by created_by verified_by source_order_id billing_phone status createdAt';
+      const statusList = ['DELIVERED', 'Delivered', 'delivered', 'DEL', 'del'];
+      const [sr, sm] = await Promise.all([
+        OrderModel.find({ billing_phone: { $in: phoneRegexes }, status: { $in: statusList } }).select(selectFields).lean(),
+        ShipmaxxOrderModel.find({ billing_phone: { $in: phoneRegexes }, status: { $in: statusList } }).select(selectFields).lean()
+      ]);
+      allHistory = [...sr, ...sm];
     }
-    return res;
+  } else {
+    allHistory = await getSynchronizedDeliveredOrders(null, null, OrderModel, ShipmaxxOrderModel, false);
+  }
+
+  const allLeadIds = [...new Set(allHistory.map(o => o.lead_id).filter(Boolean).map(String))];
+  const allLeads = allLeadIds.length > 0 ? await LeadModel.find({ _id: { $in: allLeadIds } }).select('_id assignedTo createdBy phone').lean() : [];
+  const leadMap = {};
+  for (const l of allLeads) leadMap[String(l._id)] = l;
+
+  const phoneToSales = {};
+  const isSales = (uid) => {
+    if (!uid) return false;
+    const item = userOrStatsMap[String(uid)];
+    if (!item) return false;
+    const role = item.role || (item.user && item.user.role);
+    return role === 'sales';
   };
 
-  const cohortDelivered = dedupOrders([...cohortSR, ...cohortSM]);
-  const backlogDelivered = dedupOrders([...backlogSR, ...backlogSM]);
-  return [...cohortDelivered, ...backlogDelivered];
-};
+  for (const o of allHistory) {
+    const phone = (o.billing_phone || (o.lead_id && leadMap[String(o.lead_id)] ? leadMap[String(o.lead_id)].phone : ''))?.replace(/\D/g, '').slice(-10);
+    if (!phone || phone.length < 10) continue;
+
+    if (!phoneToSales[phone]) {
+      const isOld = Boolean(o.source_order_id);
+      const lId = o.lead_id ? leadMap[String(o.lead_id)] : null;
+      const candidates = isOld ? [o.verified_by, lId?.assignedTo, lId?.createdBy, o.created_by].filter(Boolean).map(String) : [o.task_created_by, o.verified_by, lId?.assignedTo, lId?.createdBy, o.created_by].filter(Boolean).map(String);
+      for (const cand of candidates) {
+        if (isSales(cand)) {
+          phoneToSales[phone] = cand;
+          break;
+        }
+      }
+    }
+  }
+  return { phoneToSales, leadMap };
+}
 
 export const getAllStaffCommissions = async (month, year) => {
   const User = (await import('../user/user.model.js')).default;
@@ -1078,12 +1446,16 @@ export const getAllStaffCommissions = async (month, year) => {
     let uid = null;
     let isReorder = false;
     
+    const tId = o.task_created_by ? String(o.task_created_by._id || o.task_created_by) : null;
+    const vId = o.verified_by ? String(o.verified_by._id || o.verified_by) : null;
+    const cId = o.created_by ? String(o.created_by._id || o.created_by) : null;
+
     if (o.source_order_id) {
-      uid = o.verified_by ? String(o.verified_by._id || o.verified_by) : (o.created_by ? String(o.created_by._id || o.created_by) : null);
+      uid = vId || cId;
       isReorder = true;
     } else {
       const lIdAssignedTo = o.lead_id && typeof o.lead_id === 'object' ? String(o.lead_id.assignedTo) : null;
-      uid = o.verified_by ? String(o.verified_by._id || o.verified_by) : (lIdAssignedTo ? lIdAssignedTo : (o.created_by ? String(o.created_by._id || o.created_by) : null));
+      uid = tId || vId || lIdAssignedTo || cId;
       if (o.lead_id && typeof o.lead_id === 'object' && o.lead_id.status === 'old') {
         isReorder = true;
       }
@@ -1214,6 +1586,7 @@ export const getUnassignedOrders = async (month, year) => {
   
   for (const o of allOrders) {
     let uid = null;
+    const taskCreatedBy = o.task_created_by ? (o.task_created_by._id ? String(o.task_created_by._id) : String(o.task_created_by)) : null;
     const verifiedBy = o.verified_by ? (o.verified_by._id ? String(o.verified_by._id) : String(o.verified_by)) : null;
     const createdBy = o.created_by ? (o.created_by._id ? String(o.created_by._id) : String(o.created_by)) : null;
     const leadOwner = o.lead_id && typeof o.lead_id === 'object' && o.lead_id.assignedTo
@@ -1223,7 +1596,7 @@ export const getUnassignedOrders = async (month, year) => {
     if (o.source_order_id) {
       uid = verifiedBy || createdBy;
     } else {
-      uid = verifiedBy || leadOwner || createdBy;
+      uid = taskCreatedBy || verifiedBy || leadOwner || createdBy;
     }
     
     if (!uid || !allUserIds.has(uid)) {
@@ -1266,37 +1639,34 @@ export const assignOrder = async (orderId, staffId, platform) => {
 };
 
 
-export const getStaffDeliveryStats = async (month, year, filterUserId = null) => {
+export const getStaffDeliveryStats = async (month, year, filterUserId = null, from = null, to = null, preset = null) => {
   const User = (await import('../user/user.model.js')).default;
   const Lead = (await import('../lead/lead.model.js')).default;
   const { Order } = await import('../shiprocket/models/order.model.js');
   const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
 
-  const IST_OFFSET = 5.5 * 60 * 60 * 1000;
-  const monthStart = new Date(Date.UTC(year, month, 1) - IST_OFFSET);
-  const monthEnd = new Date(Date.UTC(year, month + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
+  const { isAllTime, start: monthStart, end: monthEnd } = buildStatsDateRange(preset, from, to);
 
   const allUsers = await User.find({ role: { $in: ['sales', 'support'] }, isDeleted: false })
     .select('_id name role').lean();
 
   const statsMap = {};
   for (const u of allUsers) {
-    statsMap[String(u._id)] = { user: u, delivered: 0, rto: 0 };
+    statsMap[String(u._id)] = { user: u, delivered: 0, newDelivered: 0, oldDelivered: 0, supportOldDelivered: 0, rto: 0 };
   }
 
-  const rtoTimeFilter = {
-    $or: [
-      { delivered_at: { $gte: monthStart, $lte: monthEnd } },
-      { status_updated_at: { $gte: monthStart, $lte: monthEnd } }
-    ]
+  // RTO lookback: 45 days (1 month 15 days) from the end of the period
+  const rtoLookbackStart = isAllTime ? null : new Date(monthEnd.getTime() - 45 * 24 * 60 * 60 * 1000);
+  const rtoTimeFilter = isAllTime ? {} : {
+    createdAt: { $gte: rtoLookbackStart, $lte: monthEnd }
   };
 
   const [synchronizedDelivered, rtoOrdersSM, rtoOrdersSR] = await Promise.all([
     getSynchronizedDeliveredOrders(monthStart, monthEnd, Order, ShipmaxxOrder, false),
-    ShipmaxxOrder.find({ status: { $regex: /^rto/i }, ...rtoTimeFilter })
-      .select('_id lead_id createdAt source_order_id verified_by created_by awb_code order_id').lean(),
-    Order.find({ status: { $regex: /^rto/i }, ...rtoTimeFilter })
-      .select('_id lead_id createdAt source_order_id verified_by created_by awb_code order_id').lean(),
+    ShipmaxxOrder.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
+      .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by awb_code order_id').lean(),
+    Order.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
+      .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by awb_code order_id').lean(),
   ]);
 
   const allOrders = [
@@ -1306,7 +1676,7 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null) =>
   ];
 
   if (allOrders.length === 0) {
-    if (filterUserId) return { delivered: 0, rto: 0, deliveredOrders: [], rtoOrders: [] };
+    if (filterUserId) return { delivered: 0, newDelivered: 0, oldDelivered: 0, supportOldDelivered: 0, rto: 0, deliveredOrders: [], newDeliveredOrders: [], oldDeliveredOrders: [], rtoOrders: [] };
     return { staff: [], unassignedDelivered: 0, unassignedRto: 0, totalDelivered: 0, totalRto: 0 };
   }
 
@@ -1321,48 +1691,134 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null) =>
   let unassignedDelivered = 0;
   let unassignedRto = 0;
 
+  const { phoneToSales, leadMap: histLeadMap } = await getPhoneToSalesAgentMap(Order, ShipmaxxOrder, Lead, statsMap, allOrders);
+
   for (const o of allOrders) {
     const lId = o.lead_id ? String(o.lead_id) : null;
-    let uid = null;
+    const leadOwner = lId ? (leadAssignMap[lId] || null) : null;
+    const tId = o.task_created_by ? String(o.task_created_by) : null;
+    const vId = o.verified_by ? String(o.verified_by) : null;
+    const cId = o.created_by ? String(o.created_by) : null;
 
-    if (o.source_order_id) {
-      // Re-order (Support / old kit)
-      uid = o.verified_by ? String(o.verified_by) : (o.created_by ? String(o.created_by) : null);
-    } else {
-      // Fresh order (Sales / new kit)
-      uid = lId ? (leadAssignMap[lId] || null) : (o.created_by ? String(o.created_by) : null);
-    }
-
-    if (uid && statsMap[uid]) {
-      if (o.type === 'delivered') statsMap[uid].delivered++;
-      else statsMap[uid].rto++;
-    } else {
-      if (o.type === 'delivered') unassignedDelivered++;
+    if (o.type === 'rto') {
+      const lUid = o.lead_id ? String(leadAssignMap[String(o.lead_id)] || '') : null;
+      const cId = o.created_by ? String(o.created_by) : null;
+      let uid = lUid;
+      if (!uid && cId && statsMap[cId] && statsMap[cId].user.role === 'sales') uid = cId;
+      
+      if (uid && statsMap[uid]) statsMap[uid].rto++;
       else unassignedRto++;
+      continue;
     }
+
+    const phone = (o.billing_phone || (o.lead_id && (typeof o.lead_id === 'object' ? o.lead_id.phone : (histLeadMap[String(o.lead_id)]?.phone || ''))))?.replace(/\D/g, '').slice(-10);
+    const isOld = Boolean(o.source_order_id);
+    let handled = false;
+
+    if (!isOld) {
+      const candidates = [tId, leadOwner, vId, cId].filter(Boolean);
+      for (const cand of candidates) {
+        if (statsMap[cand]) {
+          if (statsMap[cand].user.role === 'support') {
+            statsMap[cand].supportOldDelivered++;
+            statsMap[cand].oldDelivered++;
+            statsMap[cand].delivered++;
+            if (phone && phoneToSales[phone] && statsMap[phoneToSales[phone]]) {
+              statsMap[phoneToSales[phone]].newDelivered++;
+              statsMap[phoneToSales[phone]].delivered++;
+            }
+          } else {
+            statsMap[cand].newDelivered++;
+            statsMap[cand].delivered++;
+          }
+          handled = true;
+          break;
+        }
+      }
+    } else {
+      const supportCand = [vId, cId, leadOwner].filter(Boolean);
+      for (const cand of supportCand) {
+        if (statsMap[cand] && statsMap[cand].user.role === 'support') {
+          statsMap[cand].supportOldDelivered++;
+          statsMap[cand].oldDelivered++;
+          statsMap[cand].delivered++;
+          handled = true;
+          break;
+        }
+      }
+      if (phone && phoneToSales[phone] && statsMap[phoneToSales[phone]]) {
+        statsMap[phoneToSales[phone]].oldDelivered++;
+        statsMap[phoneToSales[phone]].delivered++;
+        handled = true;
+      }
+    }
+    if (!handled) unassignedDelivered++;
   }
 
   // If personal request — return only this user's stats + order lists
   if (filterUserId) {
     const me = statsMap[String(filterUserId)];
-    if (!me) return { delivered: 0, rto: 0, deliveredOrders: [], rtoOrders: [] };
+    if (!me) return { delivered: 0, newDelivered: 0, oldDelivered: 0, supportOldDelivered: 0, rto: 0, deliveredOrders: [], newDeliveredOrders: [], oldDeliveredOrders: [], rtoOrders: [] };
 
     const myDeliveredIds = new Set();
+    const myNewDeliveredIds = new Set();
+    const myOldDeliveredIds = new Set();
     const myRtoIds = new Set();
+    const strUserId = String(filterUserId);
 
     for (const o of allOrders) {
       const lId = o.lead_id ? String(o.lead_id) : null;
-      let uid = null;
+      const leadOwner = lId ? (leadAssignMap[lId] || null) : null;
+      const tId = o.task_created_by ? String(o.task_created_by) : null;
+      const vId = o.verified_by ? String(o.verified_by) : null;
+      const cId = o.created_by ? String(o.created_by) : null;
 
-      if (o.source_order_id) {
-        uid = o.verified_by ? String(o.verified_by) : (o.created_by ? String(o.created_by) : null);
-      } else {
-        uid = o.verified_by ? String(o.verified_by) : (lId ? (leadAssignMap[lId] || null) : (o.created_by ? String(o.created_by) : null));
+      if (o.type === 'rto') {
+        const lUid = o.lead_id ? String(leadAssignMap[String(o.lead_id)] || '') : null;
+        const cId = o.created_by ? String(o.created_by) : null;
+        let uid = lUid;
+        if (!uid && cId && statsMap[cId] && statsMap[cId].user.role === 'sales') uid = cId;
+        
+        if (uid === strUserId) myRtoIds.add(String(o._id));
+        continue;
       }
 
-      if (uid === String(filterUserId)) {
-        if (o.type === 'delivered') myDeliveredIds.add(String(o._id));
-        else myRtoIds.add(String(o._id));
+      const phone = (o.billing_phone || (o.lead_id && (typeof o.lead_id === 'object' ? o.lead_id.phone : (histLeadMap[String(o.lead_id)]?.phone || ''))))?.replace(/\D/g, '').slice(-10);
+      const isOld = Boolean(o.source_order_id);
+
+      if (!isOld) {
+        const candidates = [tId, leadOwner, vId, cId].filter(Boolean);
+        for (const cand of candidates) {
+          if (statsMap[cand]) {
+            if (cand === strUserId) {
+              myDeliveredIds.add(String(o._id));
+              if (me.user.role === 'support') myOldDeliveredIds.add(String(o._id));
+              else myNewDeliveredIds.add(String(o._id));
+            } else if (statsMap[cand].user.role === 'support' && phone && phoneToSales[phone] === strUserId) {
+              myDeliveredIds.add(String(o._id));
+              myNewDeliveredIds.add(String(o._id));
+            }
+            break;
+          }
+        }
+      } else {
+        if (me.user.role === 'support') {
+          const supportCand = [vId, cId, leadOwner].filter(Boolean);
+          for (const cand of supportCand) {
+            if (statsMap[cand] && statsMap[cand].user.role === 'support') {
+              if (cand === strUserId) {
+                myOldDeliveredIds.add(String(o._id));
+                myDeliveredIds.add(String(o._id));
+              }
+              break;
+            }
+          }
+        } else {
+          if (phone && phoneToSales[phone] === strUserId) {
+            myOldDeliveredIds.add(String(o._id));
+            myDeliveredIds.add(String(o._id));
+          }
+        }
       }
     }
 
@@ -1392,10 +1848,24 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null) =>
     const allFull = [...smFull, ...srFull];
     const deliveredOrders = allFull.filter(o => myDeliveredIds.has(String(o._id))).map(formatOrder)
       .sort((a, b) => new Date(b.date) - new Date(a.date));
+    const newDeliveredOrders = allFull.filter(o => myNewDeliveredIds.has(String(o._id))).map(formatOrder)
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+    const oldDeliveredOrders = allFull.filter(o => myOldDeliveredIds.has(String(o._id))).map(formatOrder)
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
     const rtoOrders = allFull.filter(o => myRtoIds.has(String(o._id))).map(formatOrder)
       .sort((a, b) => new Date(b.date) - new Date(a.date));
 
-    return { delivered: me.delivered, rto: me.rto, deliveredOrders, rtoOrders };
+    return { 
+      delivered: me.delivered, 
+      newDelivered: me.newDelivered,
+      oldDelivered: me.oldDelivered,
+      supportOldDelivered: me.supportOldDelivered,
+      rto: me.rto, 
+      deliveredOrders, 
+      newDeliveredOrders,
+      oldDeliveredOrders,
+      rtoOrders 
+    };
   }
 
   const staffList = Object.values(statsMap)

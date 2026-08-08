@@ -94,9 +94,8 @@ const getStaffMonthlyChart = catchAsync(async (req, res) => {
 });
 
 const getAllStaffStats = catchAsync(async (req, res) => {
-  const { date, from, to } = req.query;
-  const cacheKey = `allStaffStats_${date}_${from}_${to}`;
-  const data = await withCache(cacheKey, () => dashboardService.getAllStaffStats(date, from, to));
+  const { date, from, to, preset } = req.query;
+  const data = await dashboardService.getAllStaffStats(date, from, to, preset, req.user);
   res.json(new ApiResponse(httpStatus.OK, data, 'All staff stats fetched'));
 });
 
@@ -130,8 +129,9 @@ const assignOrder = catchAsync(async (req, res) => {
 });
 
 const getStaffDeliveryStatsHandler = catchAsync(async (req, res) => {
-  const { month, year } = req.query;
-  const data = await getStaffDeliveryStats(Number(month), Number(year));
+  const { month, year, userId, from, to, preset } = req.query;
+  const targetId = (req.user.role === 'admin' || req.user.role === 'manager') ? (userId || null) : req.user._id;
+  const data = await getStaffDeliveryStats(Number(month), Number(year), targetId, from, to, preset);
   res.json(new ApiResponse(httpStatus.OK, data, 'Staff delivery stats fetched'));
 });
 

@@ -1,10 +1,9 @@
 import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
 import { BulkMessageBatch, BulkMessageRecipient } from './bulkMessage.model.js';
 import Lead from './lead.model.js';
-import { config } from 'dotenv';
-config();
+import { config } from '../../config/config.js';
 
-const throttleRate = parseInt(process.env.BULK_WHATSAPP_RATE_LIMIT) || 20;
+const throttleRate = config.whatsapp?.bulkRateLimit || config.whatsapp?.rateLimit || 20;
 // Calculate milliseconds to wait between each message to respect rate limit (e.g., 20/min = 1 every 3 seconds)
 const intervalMs = Math.floor(60000 / throttleRate);
 
