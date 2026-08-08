@@ -824,7 +824,7 @@ export const getStatusOrders = catchAsync(async (req, res) => {
   // For staff roles (non-admin), filter DELIVERED/RTO_DELIVERED by verified_by = current user
   const isDeliveredStatus = /^(delivered|rto_delivered|DEL|RTO|RTD)$/i.test(queryStatus);
   const userRole = req.user?.role;
-  const isStaff = userRole && !['admin', 'superadmin', 'super_admin', 'manager'].includes(userRole.toLowerCase());
+  const isStaff = userRole && !['admin', 'superadmin', 'super_admin', 'manager', 'logistic', 'logistics', 'ndr'].includes(userRole.toLowerCase());
   if (isDeliveredStatus && isStaff && req.user?._id) {
     match.verified_by = req.user._id;
   }

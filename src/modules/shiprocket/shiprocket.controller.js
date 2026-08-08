@@ -1482,7 +1482,7 @@ export const getStatusOrders = catchAsync(async (req, res) => {
 
   // For staff roles (non-admin), filter DELIVERED by verified_by = current user
   const userRole = req.user?.role;
-  const isStaff = userRole && !['admin', 'superadmin', 'super_admin', 'manager'].includes(userRole.toLowerCase());
+  const isStaff = userRole && !['admin', 'superadmin', 'super_admin', 'manager', 'logistic', 'logistics', 'ndr'].includes(userRole.toLowerCase());
   const staffFilter = (isDelivered && isStaff && req.user?._id) ? { verified_by: req.user._id } : {};
 
   const orders = await Order.find({ ...statusQuery, ...dateMatch, ...staffFilter })
