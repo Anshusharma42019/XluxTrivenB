@@ -237,7 +237,7 @@ export const createOrder = catchAsync(async (req, res) => {
     if (!matchedLeadId && customer && customer.phone) {
       const cleanPhone = String(customer.phone).replace(/\D/g, '');
       if (cleanPhone.length >= 10) {
-        const lead = await Lead.findOne({ phone: new RegExp(cleanPhone.slice(-10) + '$'), isDeleted: { $ne: true } }).select('_id');
+        const lead = await leadService.findLeadByPhone(cleanPhone);
         if (lead) matchedLeadId = lead._id;
       }
     }
@@ -342,7 +342,7 @@ export const createOrderAndShipment = catchAsync(async (req, res) => {
     if (!matchedLeadId && customer && customer.phone) {
       const cleanPhone = String(customer.phone).replace(/\D/g, '');
       if (cleanPhone.length >= 10) {
-        const lead = await Lead.findOne({ phone: new RegExp(cleanPhone.slice(-10) + '$'), isDeleted: { $ne: true } }).select('_id');
+        const lead = await leadService.findLeadByPhone(cleanPhone);
         if (lead) matchedLeadId = lead._id;
       }
     }
@@ -1808,7 +1808,7 @@ export const searchOrderByPhone = catchAsync(async (req, res) => {
     $or: [{ billing_phone: { $regex: last10 } }, { billing_phone: { $regex: clean } }]
   }).sort({ createdAt: -1 }).lean();
 
-  let lead = await Lead.findOne({ phone: { $regex: last10 }, isDeleted: { $ne: true } }).lean();
+  let lead = await leadService.findLeadByPhone(last10);
 
   if (!order && lead) {
     order = {
@@ -1863,7 +1863,7 @@ export const sendToVerification = catchAsync(async (req, res) => {
   if (!lead) {
     const phone = order.billing_phone;
     if (phone && String(phone).replace(/\D/g, '').length >= 10) {
-      lead = await Lead.findOne({ phone, isDeleted: { $ne: true } });
+      lead = await leadService.findLeadByPhone(phone);
     }
     if (!lead) {
       lead = await Lead.create({

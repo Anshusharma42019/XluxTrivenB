@@ -426,7 +426,13 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
   try {
     const Lead = (await import('../lead/lead.model.js')).default;
 
-    const query = { status: 'on_hold', isDeleted: { $ne: true } };
+    const query = { 
+      status: 'on_hold', 
+      $or: [
+        { isDeleted: { $ne: true } },
+        { isDeleted: true, transferredTo: 'onholdorders' }
+      ]
+    };
     if (req.query.department) {
       query.department = req.query.department;
       if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
@@ -474,7 +480,10 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
     const mongoose = (await import('mongoose')).default;
     const leadQuery = {
       status: 'on_hold',
-      isDeleted: false,
+      $or: [
+        { isDeleted: { $ne: true } },
+        { isDeleted: true, transferredTo: 'onholdorders' }
+      ],
       _id: { $nin: [...verificationLeadIds].map(id => new mongoose.Types.ObjectId(id)) },
     };
     if (req.query.department) {
@@ -734,7 +743,23 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
     if (status && record && record._id) {
       try {
         const { transitionRecord } = await import('../transition/transition.service.js');
-        await transitionRecord(Verification, record._id, status === 'rejected' ? 'closed_lost' : status, update, req.user?._id || req.user || null);
+        let transTarget = status === 'rejected' ? 'closed_lost' : status;
+        let originModel = Verification;
+        
+        if (recordBefore.status === 'on_hold') {
+          const { OnHoldOrder } = await import('../transition/statusModels.js');
+          originModel = OnHoldOrder;
+        }
+
+        if (status === 'pending') {
+          transTarget = 'verification'; // route to verifications collection
+        }
+        await transitionRecord(originModel, record._id, transTarget, update, req.user?._id || req.user || null);
+        
+        // Restore correct 'pending' status after routing if we faked the target
+        if (status === 'pending') {
+          await Verification.updateOne({ _id: record._id }, { $set: { status: 'pending' } });
+        }
       } catch (transErr) {
         console.error('[transitionRecord] Verification transition note:', transErr.message);
       }

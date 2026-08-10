@@ -153,11 +153,15 @@ const handleWebhook = catchAsync(async (req, res) => {
           console.error('[Interakt Webhook] Failed to update shipment reply:', shipErr.message);
         }
 
-        // Search only active (non-deleted) leads — match last 10 digits
-        let lead = await Lead.findOne({
-          phone: { $regex: normalizedPhone + '$' },
-          isDeleted: false,
-        });
+        // Search across all active (non-deleted) leads across all status collections
+        const statusModels = await import('../transition/statusModels.js');
+        const allModels = [Lead, statusModels.InterestedLead, statusModels.NotInterestedLead, statusModels.OnHoldOrder, statusModels.PendingOrder, statusModels.VerifiedOrder];
+        let lead = null;
+        for (const Model of allModels) {
+          if (!Model) continue;
+          lead = await Model.findOne({ phone: { $regex: normalizedPhone + '$' }, isDeleted: { $ne: true } });
+          if (lead) break;
+        }
 
         const defaultAdmin = await User.findOne({ role: 'admin', isDeleted: false }).select('_id').lean();
         
@@ -187,7 +191,12 @@ const handleWebhook = catchAsync(async (req, res) => {
             // If duplicate phone conflict — find that lead and add a note instead
             if (createErr.statusCode === 409 || createErr.message?.includes('already exists')) {
               console.log(`[Interakt Webhook] Lead already exists (race condition) — adding note instead`);
-              lead = await Lead.findOne({ phone: { $regex: normalizedPhone + '$' }, isDeleted: false });
+              lead = null;
+              for (const Model of allModels) {
+                if (!Model) continue;
+                lead = await Model.findOne({ phone: { $regex: normalizedPhone + '$' }, isDeleted: { $ne: true } });
+                if (lead) break;
+              }
               if (lead) {
                 lead.notes.push({ text: `[Interakt Message] ${messageText}`, direction: 'inbound' });
                 lead.hasUnreadReply = true;

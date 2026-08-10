@@ -226,8 +226,6 @@ router.get('/', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter
     }
     const validTaskIds = await Task.distinct('_id', taskQuery);
 
-    const rtsQuery = { sentToShiprocket: { $ne: true }, task: { $in: validTaskIds } };
-
     const getISTDateStr = (offsetDays = 0) => {
       const d = new Date();
       d.setDate(d.getDate() + offsetDays);
@@ -238,7 +236,8 @@ router.get('/', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter
       return `${y}-${m}-${day}`;
     };
 
-    // Apply date range filters based on ReadyToShipment sync date
+    // Apply date range filters based on ReadyToShipment sync date OR Verification date
+    let verifiedTaskIds = null;
     if (dayFilter === 'today' || dayFilter === 'yesterday' || (dayFilter === 'custom' && customDate)) {
       let start, end;
       if (dayFilter === 'today') {
@@ -255,14 +254,27 @@ router.get('/', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter
       }
 
       if (start && end) {
-        rtsQuery.createdAt = { $gte: start, $lte: end };
+        const Verification = (await import('../verification/verification.model.js')).default;
+        verifiedTaskIds = await Verification.distinct('task', {
+          updatedAt: { $gte: start, $lte: end }
+        });
       }
     }
+
+    // Intersect the valid tasks with verified tasks if a date filter was applied
+    let finalTaskIds = validTaskIds;
+    if (verifiedTaskIds) {
+      const validSet = new Set(validTaskIds.map(id => id.toString()));
+      finalTaskIds = verifiedTaskIds.filter(id => validSet.has(id.toString()));
+    }
+
+    const rtsQuery = { sentToShiprocket: { $ne: true }, task: { $in: finalTaskIds } };
 
     // Apply lead type and search keyword filter matching lead details
     let matchLeadIds = null;
     
     // If user wants 'all' but it's today, we still exclude 'old' leads because user expects ~15
+
     const shouldExcludeOld = (dayFilter === 'today' && (!typeFilter || typeFilter === 'all'));
     
     if (typeFilter && typeFilter !== 'all' || search || shouldExcludeOld) {

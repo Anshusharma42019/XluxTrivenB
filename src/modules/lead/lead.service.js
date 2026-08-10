@@ -71,6 +71,21 @@ const resolveLeadDocument = async (id, populateFull = false) => {
   return null;
 };
 
+export const findLeadByPhone = async (phone) => {
+  if (!phone) return null;
+  const clean = phone.replace(/\D/g, '');
+  if (clean.length < 10) return null;
+  const last10 = clean.slice(-10);
+  
+  const allModels = [Lead, InterestedLead, NotInterestedLead, OnHoldOrder, PendingOrder, VerifiedOrder];
+  for (const Model of allModels) {
+    if (!Model) continue;
+    const doc = await Model.findOne({ phone: { $regex: last10 + '$' }, isDeleted: { $ne: true } });
+    if (doc) return doc;
+  }
+  return null;
+};
+
 const notifyAdmins = async (data) => {
   const admins = await User.find({ role: { $in: ['admin', 'manager'] }, isDeleted: false }, '_id');
   await Promise.all(admins.map(a => createNotification({ ...data, user: a._id }).catch(() => {})));
@@ -198,9 +213,14 @@ export const createLead = async (data, createdBy, creatorRole, userDepartments =
 
   // Duplicate check using last-10-digits regex so +91XXXXXXXXXX and XXXXXXXXXX match the same lead
   const last10 = data.phone?.slice(-10);
-  const existingLead = last10
-    ? await Lead.findOne({ phone: { $regex: last10 + '$' }, isDeleted: false })
-    : null;
+  let existingLead = null;
+  if (last10) {
+    const allModels = [Lead, InterestedLead, NotInterestedLead, OnHoldOrder, PendingOrder, VerifiedOrder];
+    for (const Model of allModels) {
+      existingLead = await Model.findOne({ phone: { $regex: last10 + '$' }, isDeleted: { $ne: true } });
+      if (existingLead) break;
+    }
+  }
   if (existingLead) throw new ApiError(httpStatus.CONFLICT, 'A lead with this phone number already exists');
 
   if (!data.assignedTo) {

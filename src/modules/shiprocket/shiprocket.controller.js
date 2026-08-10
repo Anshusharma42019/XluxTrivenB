@@ -264,7 +264,7 @@ export const createOrder = catchAsync(async (req, res) => {
   if (!body.lead_id) {
     const cleanPhone = String(phone).replace(/\D/g, '');
     if (cleanPhone.length >= 10) {
-      const leadMatch = await Lead.findOne({ phone: new RegExp(cleanPhone.slice(-10) + '$'), isDeleted: { $ne: true } }).select('_id').lean();
+      const leadMatch = await leadService.findLeadByPhone(cleanPhone);
       if (leadMatch) body.lead_id = leadMatch._id;
     }
   }
@@ -632,7 +632,7 @@ const syncAllToLocal = async () => {
   for (const o of deliveredTodayAll) {
     let leadId = o.lead_id;
     if (!leadId && o.billing_phone && !/^x+$/i.test(o.billing_phone)) {
-      const lead = await Lead.findOne({ phone: o.billing_phone, isDeleted: { $ne: true } }).select('_id status').lean();
+      const lead = await leadService.findLeadByPhone(o.billing_phone);
       leadId = lead?._id;
     }
     if (leadId) await Lead.findByIdAndUpdate(leadId, { status: 'follow_up' });
@@ -1962,10 +1962,7 @@ export const searchOrderByPhone = catchAsync(async (req, res) => {
     ]
   }).populate('lead_id').sort({ createdAt: -1 }).lean();
 
-  let lead = await Lead.findOne({
-    phone: { $regex: last10, $options: 'i' },
-    isDeleted: { $ne: true },
-  }).lean();
+  let lead = await leadService.findLeadByPhone(last10);
 
   if (!order && lead) {
     // Construct a mock order from lead details to autofill as much as possible
@@ -2138,7 +2135,7 @@ export const webhook = catchAsync(async (req, res) => {
       });
       let lid = order.lead_id;
       if (!lid && order.billing_phone && !/^x+$/i.test(order.billing_phone)) {
-        const lead = await Lead.findOne({ phone: order.billing_phone, isDeleted: { $ne: true } }).select('_id').lean();
+        const lead = await leadService.findLeadByPhone(order.billing_phone);
         lid = lead?._id;
       }
       if (lid) await Lead.findByIdAndUpdate(lid, { status: 'follow_up' });
@@ -2160,7 +2157,7 @@ export const sendToVerification = catchAsync(async (req, res) => {
   if (!lead) {
     const phone = order.billing_phone;
     if (phone && !/^x+$/i.test(phone) && String(phone).replace(/\D/g, '').length >= 10) {
-      lead = await Lead.findOne({ phone, isDeleted: { $ne: true } });
+      lead = await leadService.findLeadByPhone(phone);
     }
     if (!lead) {
       lead = await Lead.create({

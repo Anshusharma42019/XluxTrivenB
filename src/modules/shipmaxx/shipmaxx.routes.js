@@ -112,7 +112,7 @@ router.get('/debug/backfill-leads', catchAsync(async (req, res) => {
     if (order.billing_phone) {
       const cleanPhone = String(order.billing_phone).replace(/\D/g, '');
       if (cleanPhone.length >= 10) {
-        const lead = await Lead.findOne({ phone: new RegExp(cleanPhone.slice(-10) + '$'), isDeleted: { $ne: true } }).select('_id');
+        const lead = await leadService.findLeadByPhone(cleanPhone);
         if (lead) {
           order.lead_id = lead._id;
           await order.save();

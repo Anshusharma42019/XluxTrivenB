@@ -149,15 +149,30 @@ const searchByPhone = catchAsync(async (req, res) => {
   if (!phone || phone.trim().length < 3) {
     return res.json(new ApiResponse(httpStatus.OK, [], 'Search results'));
   }
-  const leads = await Lead.find({
-    phone: { $regex: phone.trim(), $options: 'i' },
-    isDeleted: false,
-  })
-    .populate('assignedTo', 'name email')
-    .populate('createdBy', 'name')
-    .sort({ createdAt: -1 })
-    .limit(10)
-    .lean();
+
+  const phoneQuery = phone.trim();
+  const statusModels = await import('../transition/statusModels.js');
+  const allModels = [Lead, statusModels.InterestedLead, statusModels.NotInterestedLead, statusModels.OnHoldOrder, statusModels.PendingOrder, statusModels.VerifiedOrder];
+  
+  let leads = [];
+  for (const Model of allModels) {
+    if (!Model) continue;
+    const found = await Model.find({
+      phone: { $regex: phoneQuery, $options: 'i' },
+      isDeleted: { $ne: true },
+    })
+      .populate('assignedTo', 'name email')
+      .populate('createdBy', 'name')
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .lean();
+    leads = leads.concat(found);
+  }
+  
+  // Sort and limit the combined results
+  leads.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  leads = leads.slice(0, 10);
+
   res.json(new ApiResponse(httpStatus.OK, leads, 'Search results'));
 });
 
