@@ -11,6 +11,7 @@ const router = express.Router();
 router.get('/stats', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter, async (req, res) => {
   try {
     const taskQuery = { status: 'ready_to_shipment', isDeleted: false };
+    
     if (req.query.department) {
       taskQuery.department = req.query.department;
       if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
@@ -211,7 +212,10 @@ router.get('/stats', auth('admin', 'manager', 'sales', 'logistics'), departmentF
 // Fast fetch — filter at DB level, no JS filtering
 router.get('/', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter, async (req, res) => {
   try {
+    const { dayFilter, customDate, typeFilter, search } = req.query;
+
     const taskQuery = { status: 'ready_to_shipment', isDeleted: false };
+
     if (req.query.department) {
       taskQuery.department = req.query.department;
       if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
@@ -224,41 +228,51 @@ router.get('/', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter
 
     const rtsQuery = { sentToShiprocket: { $ne: true }, task: { $in: validTaskIds } };
 
-    const { dayFilter, customDate, typeFilter, search } = req.query;
+    const getISTDateStr = (offsetDays = 0) => {
+      const d = new Date();
+      d.setDate(d.getDate() + offsetDays);
+      const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(d);
+      const y = parts.find(p => p.type === 'year').value;
+      const m = parts.find(p => p.type === 'month').value;
+      const day = parts.find(p => p.type === 'day').value;
+      return `${y}-${m}-${day}`;
+    };
 
-    // Apply date range filters
-    if (dayFilter === 'today') {
-      const start = new Date(); start.setHours(0, 0, 0, 0);
-      const end = new Date(); end.setHours(23, 59, 59, 999);
-      rtsQuery.$or = [
-        { createdAt: { $gte: start, $lte: end } },
-        { updatedAt: { $gte: start, $lte: end } }
-      ];
-    } else if (dayFilter === 'yesterday') {
-      const start = new Date(); start.setDate(start.getDate() - 1); start.setHours(0, 0, 0, 0);
-      const end = new Date(); end.setDate(end.getDate() - 1); end.setHours(23, 59, 59, 999);
-      rtsQuery.$or = [
-        { createdAt: { $gte: start, $lte: end } },
-        { updatedAt: { $gte: start, $lte: end } }
-      ];
-    } else if (dayFilter === 'custom' && customDate) {
-      const start = new Date(`${customDate}T00:00:00.000+05:30`);
-      const end = new Date(`${customDate}T23:59:59.999+05:30`);
-      rtsQuery.$or = [
-        { createdAt: { $gte: start, $lte: end } },
-        { updatedAt: { $gte: start, $lte: end } }
-      ];
+    // Apply date range filters based on ReadyToShipment sync date
+    if (dayFilter === 'today' || dayFilter === 'yesterday' || (dayFilter === 'custom' && customDate)) {
+      let start, end;
+      if (dayFilter === 'today') {
+        const dateStr = getISTDateStr(0);
+        start = new Date(`${dateStr}T00:00:00.000+05:30`);
+        end = new Date(`${dateStr}T23:59:59.999+05:30`);
+      } else if (dayFilter === 'yesterday') {
+        const dateStr = getISTDateStr(-1);
+        start = new Date(`${dateStr}T00:00:00.000+05:30`);
+        end = new Date(`${dateStr}T23:59:59.999+05:30`);
+      } else if (dayFilter === 'custom' && customDate) {
+        start = new Date(`${customDate}T00:00:00.000+05:30`);
+        end = new Date(`${customDate}T23:59:59.999+05:30`);
+      }
+
+      if (start && end) {
+        rtsQuery.createdAt = { $gte: start, $lte: end };
+      }
     }
 
     // Apply lead type and search keyword filter matching lead details
     let matchLeadIds = null;
-    if (typeFilter && typeFilter !== 'all' || search) {
+    
+    // If user wants 'all' but it's today, we still exclude 'old' leads because user expects ~15
+    const shouldExcludeOld = (dayFilter === 'today' && (!typeFilter || typeFilter === 'all'));
+    
+    if (typeFilter && typeFilter !== 'all' || search || shouldExcludeOld) {
       const Lead = (await import('../lead/lead.model.js')).default;
-      const leadSubQuery = { isDeleted: { $ne: true } };
+      // We no longer filter by isDeleted: { $ne: true } because it hides active RTS tasks whose Lead was merged/deleted!
+      const leadSubQuery = {};
 
-      if (typeFilter === 'new') {
+      if (typeFilter === 'new' || shouldExcludeOld) {
         leadSubQuery.status = { $ne: 'old' };
-        leadSubQuery.pending_reorder_source = { $exists: false };
+        leadSubQuery.pending_reorder_source = { $in: [null, undefined] };
       } else if (typeFilter === 'old') {
         leadSubQuery.$or = [
           { status: 'old' },
@@ -306,6 +320,8 @@ router.get('/', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.max(1, parseInt(req.query.limit) || 15);
     const skip = (page - 1) * limit;
+
+    console.log('[DEBUG GET /]', req.query, 'rtsQuery:', JSON.stringify(rtsQuery));
 
     const [records, total] = await Promise.all([
       ReadyToShipment.find(rtsQuery)
