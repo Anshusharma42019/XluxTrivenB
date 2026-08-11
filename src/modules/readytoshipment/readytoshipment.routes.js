@@ -273,16 +273,15 @@ router.get('/', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter
     // Apply lead type and search keyword filter matching lead details
     let matchLeadIds = null;
     
-    // If user wants 'all' but it's today, we still exclude 'old' leads because user expects ~15
-
-    const shouldExcludeOld = (dayFilter === 'today' && (!typeFilter || typeFilter === 'all'));
+    // Fix: User explicitly requested "All Types" to actually show all types, even for 'today'.
+    const shouldExcludeOld = false;
     
-    if (typeFilter && typeFilter !== 'all' || search || shouldExcludeOld) {
+    if (typeFilter && typeFilter !== 'all' || search) {
       const Lead = (await import('../lead/lead.model.js')).default;
       // We no longer filter by isDeleted: { $ne: true } because it hides active RTS tasks whose Lead was merged/deleted!
       const leadSubQuery = {};
 
-      if (typeFilter === 'new' || shouldExcludeOld) {
+      if (typeFilter === 'new') {
         leadSubQuery.status = { $ne: 'old' };
         leadSubQuery.pending_reorder_source = { $in: [null, undefined] };
       } else if (typeFilter === 'old') {
@@ -317,13 +316,19 @@ router.get('/', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter
         searchConditions.push({ lead: { $in: matchLeadIds } });
       }
 
-      if (typeFilter && typeFilter !== 'all') {
-        rtsQuery.$and = [
-          { lead: { $in: matchLeadIds } },
-          { $or: searchConditions }
-        ];
+      const searchClause = (typeFilter && typeFilter !== 'all') 
+        ? { $and: [{ lead: { $in: matchLeadIds } }, { $or: searchConditions }] } 
+        : { $or: searchConditions };
+
+      if (rtsQuery.$or || rtsQuery.$and) {
+        if (!rtsQuery.$and) rtsQuery.$and = [];
+        if (rtsQuery.$or) {
+          rtsQuery.$and.push({ $or: rtsQuery.$or });
+          delete rtsQuery.$or;
+        }
+        rtsQuery.$and.push(searchClause);
       } else {
-        rtsQuery.$or = searchConditions;
+        Object.assign(rtsQuery, searchClause);
       }
     } else if (matchLeadIds) {
       rtsQuery.lead = { $in: matchLeadIds };

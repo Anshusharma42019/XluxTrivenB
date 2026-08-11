@@ -386,7 +386,7 @@ router.post('/repair', auth('admin', 'manager', 'sales', 'support'), departmentF
       }
 
       if (taskId) {
-        await Task.findByIdAndUpdate(taskId, { status: 'ready_to_shipment', assignedTo: rtsAssignedTo, isDeleted: false });
+        await Task.collection.updateOne({ _id: new mongoose.Types.ObjectId(taskId) }, { $set: { status: 'ready_to_shipment', assignedTo: new mongoose.Types.ObjectId(rtsAssignedTo), isDeleted: false } });
         await ReadyToShipment.findOneAndUpdate(
           { $or: [{ task: taskId }, { lead: leadId }] },
           {
@@ -634,6 +634,31 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
     const Task = (await import('../task/task.model.js')).default;
     const ReadyToShipment = (await import('../readytoshipment/readytoshipment.model.js')).default;
 
+    if (status && record && record._id) {
+      try {
+        const { transitionRecord } = await import('../transition/transition.service.js');
+        let transTarget = status === 'rejected' ? 'closed_lost' : status;
+        let originModel = Verification;
+        
+        if (recordBefore.status === 'on_hold') {
+          const { OnHoldOrder } = await import('../transition/statusModels.js');
+          originModel = OnHoldOrder;
+        }
+
+        if (status === 'pending') {
+          transTarget = 'verification'; // route to verifications collection
+        }
+        await transitionRecord(originModel, record._id, transTarget, update, req.user?._id || req.user || null);
+        
+        // Restore correct 'pending' status after routing if we faked the target
+        if (status === 'pending') {
+          await Verification.updateOne({ _id: record._id }, { $set: { status: 'pending' } });
+        }
+      } catch (transErr) {
+        console.error('[transitionRecord] Verification transition note:', transErr.message);
+      }
+    }
+
     if (status === 'on_hold' && record.lead) {
       const Lead = (await import('../lead/lead.model.js')).default;
       const leadId = record.lead._id || record.lead;
@@ -683,16 +708,20 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
 
       if (leadId) {
         const Lead = (await import('../lead/lead.model.js')).default;
-        await Lead.findByIdAndUpdate(leadId, { assignedTo: rtsAssignedTo, status: 'verified_order' });
+        const currentLead = await Lead.findById(leadId).lean();
+        const newStatus = currentLead?.status === 'old' ? 'old' : 'verified_order';
+        await Lead.findByIdAndUpdate(leadId, { assignedTo: rtsAssignedTo, status: newStatus });
       }
 
       if (taskId) {
-        await Task.findByIdAndUpdate(
-          taskId,
-          { status: 'ready_to_shipment', assignedTo: rtsAssignedTo, isDeleted: false, ...taskFields }
+        const updateDoc = { status: 'ready_to_shipment', assignedTo: new mongoose.Types.ObjectId(rtsAssignedTo), isDeleted: false };
+        if (taskFields) Object.assign(updateDoc, taskFields);
+        await Task.collection.updateOne(
+          { _id: new mongoose.Types.ObjectId(taskId) },
+          { $set: updateDoc }
         );
 
-        await ReadyToShipment.findOneAndUpdate(
+        const rtsDoc = await ReadyToShipment.findOneAndUpdate(
           { $or: [{ task: taskId }, { lead: leadId }] },
           {
             $set: {
@@ -713,12 +742,17 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
               isDeleted: false,
               isArchived: false,
               sentToShiprocket: false,
-              createdAt: new Date(),
-              updatedAt: new Date(),
             },
           },
           { upsert: true, returnDocument: 'after' }
         );
+
+        if (rtsDoc) {
+          await ReadyToShipment.collection.updateOne(
+            { _id: rtsDoc._id },
+            { $set: { createdAt: new Date(), updatedAt: new Date() } }
+          );
+        }
       }
 
       // WhatsApp dispatch notification - smart sender (template + chat fallback)
@@ -738,31 +772,6 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
       }
     } else if (record.task && Object.keys(taskFields).length > 0) {
       await Task.findByIdAndUpdate(record.task, taskFields);
-    }
-
-    if (status && record && record._id) {
-      try {
-        const { transitionRecord } = await import('../transition/transition.service.js');
-        let transTarget = status === 'rejected' ? 'closed_lost' : status;
-        let originModel = Verification;
-        
-        if (recordBefore.status === 'on_hold') {
-          const { OnHoldOrder } = await import('../transition/statusModels.js');
-          originModel = OnHoldOrder;
-        }
-
-        if (status === 'pending') {
-          transTarget = 'verification'; // route to verifications collection
-        }
-        await transitionRecord(originModel, record._id, transTarget, update, req.user?._id || req.user || null);
-        
-        // Restore correct 'pending' status after routing if we faked the target
-        if (status === 'pending') {
-          await Verification.updateOne({ _id: record._id }, { $set: { status: 'pending' } });
-        }
-      } catch (transErr) {
-        console.error('[transitionRecord] Verification transition note:', transErr.message);
-      }
     }
 
     res.json({ status: 200, data: record });
