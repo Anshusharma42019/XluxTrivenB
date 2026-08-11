@@ -333,7 +333,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter
     const limit = Math.max(1, parseInt(req.query.limit) || 15);
     const skip = (page - 1) * limit;
 
-    console.log('[DEBUG GET /]', req.query, 'rtsQuery:', JSON.stringify(rtsQuery));
+    // console.log('[DEBUG GET /]', req.query, 'rtsQuery:', JSON.stringify(rtsQuery));
 
     const [records, total] = await Promise.all([
       ReadyToShipment.find(rtsQuery)

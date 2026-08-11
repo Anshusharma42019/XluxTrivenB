@@ -334,7 +334,7 @@ export const sendDispatchNotification = async ({ phone, customerName, orderTitle
   }
 
   // No templates - try chat message (works only if customer messaged in 24hrs)
-  console.warn('⚠️ [WhatsApp] No approved templates found in Interakt account!');
+  // console.warn('⚠️ [WhatsApp] No approved templates found in Interakt account!');
   try {
     const chatMsg = `नमस्ते ${customerName} जी! 🎉 आपकी बुकिंग verified हो गई है और जल्द ही dispatch हो जाएगी। ऑर्डर: ${orderTitle || 'Order'}, कीमत: ₹${price || 'N/A'}। धन्यवाद! 🙏`;
     const result = await sendInteraktChatMessage({ phone, messageText: chatMsg });
@@ -343,11 +343,11 @@ export const sendDispatchNotification = async ({ phone, customerName, orderTitle
   } catch (chatErr) {
     const errMsg = chatErr?.response?.data?.message || chatErr.message;
     if (errMsg?.includes('24 hours')) {
-      console.error('❌ [WhatsApp] FAILED: Customer not active in 24hrs AND no approved template exists.');
-      console.error('👉 FIX: Create a WhatsApp template on Interakt:');
-      console.error('   1. Go to https://app.interakt.ai → Templates → New Template');
-      console.error('   2. Body: "नमस्ते {{1}} जी! आपकी बुकिंग dispatch हो चुकी है।"');
-      console.error('   3. After approval, set INTERAKT_DISPATCH_TEMPLATE=<template_name> in .env');
+      // console.error('❌ [WhatsApp] FAILED: Customer not active in 24hrs AND no approved template exists.');
+      // console.error('👉 FIX: Create a WhatsApp template on Interakt:');
+      // console.error('   1. Go to https://app.interakt.ai → Templates → New Template');
+      // console.error('   2. Body: "नमस्ते {{1}} जी! आपकी बुकिंग dispatch हो चुकी है।"');
+      // console.error('   3. After approval, set INTERAKT_DISPATCH_TEMPLATE=<template_name> in .env');
     } else {
       console.error('❌ [WhatsApp] Failed:', errMsg);
     }
@@ -386,7 +386,7 @@ export const sendVerificationConfirmation = async ({
     console.log(`[WhatsApp] Verification confirmation sent to ${phone} | problem=${problem} price=${price}`);
     return result;
   } catch (templateErr) {
-    console.warn(`[WhatsApp] Template failed for verification confirmation:`, templateErr?.response?.data || templateErr.message);
+    // console.warn(`[WhatsApp] Template failed for verification confirmation:`, templateErr?.response?.data || templateErr.message);
     // Fallback: plain chat message (needs 24-hr active window)
     try {
       const fallbackMsg = `नमस्कार ${customerName || ''} जी! आपका Treatment Plan बुक हो गया है। समस्या: ${problem || ''}, मूल्य: ₹${price || ''}। पते पर: ${address || ''}। कृपया YES या NO में जवाब दें।`;
@@ -394,7 +394,7 @@ export const sendVerificationConfirmation = async ({
       console.log(`[WhatsApp] Verification confirmation (chat fallback) sent to ${phone}`);
       return result;
     } catch (chatErr) {
-      console.error(`[WhatsApp] Verification confirmation FAILED for ${phone}:`, chatErr?.response?.data || chatErr.message);
+      // console.error(`[WhatsApp] Verification confirmation FAILED for ${phone}:`, chatErr?.response?.data || chatErr.message);
     }
   }
 };
