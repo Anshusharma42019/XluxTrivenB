@@ -11,6 +11,8 @@ import { createNotification } from '../notification/notification.service.js';
 import { Order } from '../shiprocket/models/order.model.js';
 import { ShipmaxxOrder } from '../shipmaxx/models/shipmaxxOrder.model.js';
 
+const processingWebhooks = new Set();
+
 /**
  * Handle incoming webhooks from Interakt
  */
@@ -127,8 +129,16 @@ const handleWebhook = catchAsync(async (req, res) => {
         else if (normalizedPhone.startsWith('91') && normalizedPhone.length === 12) normalizedPhone = normalizedPhone.substring(2);
         normalizedPhone = normalizedPhone.slice(-10); // always use last 10 digits
 
-        const cleanReplyText = messageText.replace(/^\[(?:Button Reply|List Selection)\]\s*/i, '').trim();
-        const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
+        let retries = 0;
+        while (processingWebhooks.has(normalizedPhone) && retries < 50) {
+          await new Promise(r => setTimeout(r, 100));
+          retries++;
+        }
+        processingWebhooks.add(normalizedPhone);
+
+        try {
+          const cleanReplyText = messageText.replace(/^\[(?:Button Reply|List Selection)\]\s*/i, '').trim();
+          const sixtyDaysAgo = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000);
         
         // Save WhatsApp reply directly to any active/recent shipments for Ops Dashboard tracking
         try {
@@ -159,8 +169,31 @@ const handleWebhook = catchAsync(async (req, res) => {
         let lead = null;
         for (const Model of allModels) {
           if (!Model) continue;
-          lead = await Model.findOne({ phone: { $regex: normalizedPhone + '$' }, isDeleted: { $ne: true } });
+          lead = await Model.findOne({ phone: { $regex: normalizedPhone + '$' }, isDeleted: { $ne: true }, isArchived: { $ne: true } });
           if (lead) break;
+        }
+
+        // Fallback 1: If only an archived lead exists
+        if (!lead) {
+          for (const Model of allModels) {
+            if (!Model) continue;
+            lead = await Model.findOne({ phone: { $regex: normalizedPhone + '$' }, isDeleted: { $ne: true } });
+            if (lead) break;
+          }
+        }
+
+        // Fallback 2: Even if deleted, find it to strictly prevent duplicates
+        if (!lead) {
+          for (const Model of allModels) {
+            if (!Model) continue;
+            lead = await Model.findOne({ phone: { $regex: normalizedPhone + '$' } });
+            if (lead) break;
+          }
+          if (lead && lead.isDeleted) {
+            // Undelete it so staff can see they replied again
+            lead.isDeleted = false;
+            // Optionally reset status if needed, but keeping existing status is usually safer unless it's lost
+          }
         }
 
         const defaultAdmin = await User.findOne({ role: 'admin', isDeleted: false }).select('_id').lean();
@@ -194,30 +227,36 @@ const handleWebhook = catchAsync(async (req, res) => {
               lead = null;
               for (const Model of allModels) {
                 if (!Model) continue;
-                lead = await Model.findOne({ phone: { $regex: normalizedPhone + '$' }, isDeleted: { $ne: true } });
+                lead = await Model.findOne({ phone: { $regex: normalizedPhone + '$' } }); // strict find everywhere
                 if (lead) break;
               }
               if (lead) {
+                if (lead.isDeleted) lead.isDeleted = false; // Undelete just in case
+                
+                const hadUnread = lead.hasUnreadReply;
                 lead.notes.push({ text: `[Interakt Message] ${messageText}`, direction: 'inbound' });
                 lead.hasUnreadReply = true;
                 await lead.save();
-                const notifyUser = lead.assignedTo || (defaultAdmin ? defaultAdmin._id : null);
-                if (notifyUser) {
-                  await createNotification({
-                    user: notifyUser,
-                    title: lead.lastMessageWasBulk ? 'New Bulk WhatsApp Reply' : 'New WhatsApp Reply',
-                    message: `${lead.name || lead.phone} replied: ${messageText}`,
-                    type: 'task',
-                    relatedLead: lead._id
-                  });
-                  if (defaultAdmin && notifyUser.toString() !== defaultAdmin._id.toString()) {
+                
+                if (!hadUnread) {
+                  const notifyUser = lead.assignedTo || (defaultAdmin ? defaultAdmin._id : null);
+                  if (notifyUser) {
                     await createNotification({
-                      user: defaultAdmin._id,
+                      user: notifyUser,
                       title: lead.lastMessageWasBulk ? 'New Bulk WhatsApp Reply' : 'New WhatsApp Reply',
                       message: `${lead.name || lead.phone} replied: ${messageText}`,
                       type: 'task',
                       relatedLead: lead._id
                     });
+                    if (defaultAdmin && notifyUser.toString() !== defaultAdmin._id.toString()) {
+                      await createNotification({
+                        user: defaultAdmin._id,
+                        title: lead.lastMessageWasBulk ? 'New Bulk WhatsApp Reply' : 'New WhatsApp Reply',
+                        message: `${lead.name || lead.phone} replied: ${messageText}`,
+                        type: 'task',
+                        relatedLead: lead._id
+                      });
+                    }
                   }
                 }
               }
@@ -227,6 +266,8 @@ const handleWebhook = catchAsync(async (req, res) => {
           }
         } else {
           console.log(`[Interakt Webhook] Adding note to existing lead ${lead._id}`);
+          const hadUnread = lead.hasUnreadReply;
+          
           lead.notes.push({
             text: `[Interakt Message] ${messageText}`,
             direction: 'inbound',
@@ -235,31 +276,36 @@ const handleWebhook = catchAsync(async (req, res) => {
           await lead.save();
           console.log(`[Interakt Webhook] Lead found, lastMessageWasBulk: ${lead.lastMessageWasBulk}`);
 
-          const notifyUser = lead.assignedTo || (defaultAdmin ? defaultAdmin._id : null);
-          const titleStr = lead.lastMessageWasBulk ? 'New Bulk WhatsApp Reply' : 'New WhatsApp Reply';
-          const messageStr = `${lead.name || lead.phone} replied: ${messageText}`;
-          
-          if (notifyUser) {
-            console.log(`[Interakt Webhook] Creating notification for user ${notifyUser} with title ${titleStr}`);
-            await createNotification({
-              user: notifyUser,
-              title: titleStr,
-              message: messageStr,
-              type: 'task',
-              relatedLead: lead._id
-            });
-          }
+          if (!hadUnread) {
+            const notifyUser = lead.assignedTo || (defaultAdmin ? defaultAdmin._id : null);
+            const titleStr = lead.lastMessageWasBulk ? 'New Bulk WhatsApp Reply' : 'New WhatsApp Reply';
+            const messageStr = `${lead.name || lead.phone} replied: ${messageText}`;
+            
+            if (notifyUser) {
+              console.log(`[Interakt Webhook] Creating notification for user ${notifyUser} with title ${titleStr}`);
+              await createNotification({
+                user: notifyUser,
+                title: titleStr,
+                message: messageStr,
+                type: 'task',
+                relatedLead: lead._id
+              });
+            }
 
-          if (defaultAdmin && notifyUser && notifyUser.toString() !== defaultAdmin._id.toString()) {
-            console.log(`[Interakt Webhook] Also notifying admin ${defaultAdmin._id} for Reply`);
-            await createNotification({
-              user: defaultAdmin._id,
-              title: titleStr,
-              message: messageStr,
-              type: 'task',
-              relatedLead: lead._id
-            });
+            if (defaultAdmin && notifyUser && notifyUser.toString() !== defaultAdmin._id.toString()) {
+              console.log(`[Interakt Webhook] Also notifying admin ${defaultAdmin._id} for Reply`);
+              await createNotification({
+                user: defaultAdmin._id,
+                title: titleStr,
+                message: messageStr,
+                type: 'task',
+                relatedLead: lead._id
+              });
+            }
           }
+        }
+        } finally {
+          processingWebhooks.delete(normalizedPhone);
         }
       }
     } else {
