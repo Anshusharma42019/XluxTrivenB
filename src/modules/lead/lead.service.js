@@ -321,9 +321,12 @@ export const distributeUnassignedLeads = async (adminId) => {
       // Create a Call Task only if no active task already exists for this lead
       const existingTask = await Task.findOne({ lead: lead._id, status: { $in: ['pending', 'overdue', 'verification', 'ready_to_shipment', 'cnp', 'interested', 'on_hold'] }, isDeleted: false });
       const dueDate = new Date(Date.now() + 2 * 60 * 60 * 1000);
-      const task = existingTask
-        ? existingTask
-        : await Task.create({
+      let task = existingTask;
+      if (existingTask) {
+        existingTask.assignedTo = assignedToId;
+        await existingTask.save();
+      } else {
+        task = await Task.create({
           title: lead.name,
           description: `Phone: ${lead.phone}${lead.problem ? ' | ' + lead.problem : ''}`,
           type: 'call',
@@ -336,6 +339,14 @@ export const distributeUnassignedLeads = async (adminId) => {
           status: 'pending',
           isDeleted: false,
         });
+      }
+
+      const leadObjId = new mongoose.Types.ObjectId(String(lead._id));
+      await Promise.all([
+        Verification.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo: assignedToId }),
+        Cnp.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo: assignedToId }),
+        CallAgain.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo: assignedToId }),
+      ]).catch(err => console.error('Cascading reassignment error:', err));
 
       // Send notification
       await createNotification({
@@ -437,6 +448,13 @@ export const distributeAbsentSalesLeads = async () => {
           isDeleted: false,
         });
       }
+
+      const leadObjId = new mongoose.Types.ObjectId(String(lead._id));
+      await Promise.all([
+        Verification.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo: assignedToId }),
+        Cnp.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo: assignedToId }),
+        CallAgain.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo: assignedToId }),
+      ]).catch(err => console.error('Cascading reassignment error:', err));
 
       // Send notification
       await createNotification({
@@ -693,6 +711,7 @@ export const updateLead = async (id, data, userRole, userId, userDepartments = [
   }
   const oldStatus = lead.status;
 
+  const oldAssignedTo = lead.assignedTo ? String(lead.assignedTo._id || lead.assignedTo) : null;
   const leadObjId = mongoose.Types.ObjectId.isValid(String(id)) ? new mongoose.Types.ObjectId(String(id)) : id;
   const matchIds = [id, leadObjId];
 
@@ -714,6 +733,17 @@ export const updateLead = async (id, data, userRole, userId, userDepartments = [
   Object.assign(lead, data);
   await lead.save();
   await syncPilesLead(lead);
+
+  const newAssignedTo = lead.assignedTo ? String(lead.assignedTo._id || lead.assignedTo) : null;
+  if (oldAssignedTo !== newAssignedTo && newAssignedTo) {
+    const leadObjIdToUpdate = new mongoose.Types.ObjectId(String(id));
+    await Promise.all([
+      Task.updateMany({ lead: leadObjIdToUpdate, isDeleted: false }, { assignedTo: lead.assignedTo }),
+      Verification.updateMany({ lead: leadObjIdToUpdate, isDeleted: false }, { assignedTo: lead.assignedTo }),
+      Cnp.updateMany({ lead: leadObjIdToUpdate, isDeleted: false }, { assignedTo: lead.assignedTo }),
+      CallAgain.updateMany({ lead: leadObjIdToUpdate, isDeleted: false }, { assignedTo: lead.assignedTo }),
+    ]).catch(err => console.error('Cascading reassignment error in updateLead:', err));
+  }
 
   // Track the update event in Interakt
   interaktService.trackEvent(lead._id, 'Lead Updated', {
@@ -917,6 +947,15 @@ export const assignLead = async (leadId, assignedTo) => {
       isDeleted: false,
     });
   }
+
+  // Update associated records to new assignedTo
+  const leadObjId = new mongoose.Types.ObjectId(String(lead._id));
+  await Promise.all([
+    Task.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo }),
+    Verification.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo }),
+    Cnp.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo }),
+    CallAgain.updateMany({ lead: leadObjId, isDeleted: false }, { assignedTo }),
+  ]).catch(err => console.error('Cascading reassignment error:', err));
 
   return lead;
 };

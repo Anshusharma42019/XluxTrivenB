@@ -8,12 +8,14 @@ export const checkIn = {
   body: z.object({
     notes: z.string().optional(),
     checkInLocation: z.string().optional(),
+    userId: z.string().regex(/^[0-9a-fA-F]{24}$/).optional(),
   }),
 };
 
 export const checkOut = {
   body: z.object({
     notes: z.string().optional(),
+    userId: z.string().regex(/^[0-9a-fA-F]{24}$/).optional(),
   }),
 };
 

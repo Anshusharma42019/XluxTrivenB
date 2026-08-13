@@ -125,8 +125,16 @@ export const createTask = async (data, createdBy, creatorRole, userDepartments =
   if (data.lead) {
     const existingTask = await Task.findOne({ lead: data.lead, isDeleted: false });
     if (existingTask) {
+      const oldAssignedTo = existingTask.assignedTo ? String(existingTask.assignedTo._id || existingTask.assignedTo) : null;
       Object.assign(existingTask, data, { status: data.status || 'pending', isDeleted: false });
       task = await existingTask.save();
+
+      const newAssignedTo = task.assignedTo ? String(task.assignedTo._id || task.assignedTo) : null;
+      if (oldAssignedTo !== newAssignedTo && newAssignedTo) {
+        const { assignLead } = await import('../lead/lead.service.js');
+        await assignLead(data.lead, task.assignedTo).catch(e => console.error('Error syncing assignment:', e));
+      }
+
       await Cnp.updateMany({ lead: data.lead }, { $set: { isArchived: true, isDeleted: true } });
     } else {
       task = await Task.create({ ...data, createdBy });
@@ -248,8 +256,17 @@ export const updateTask = async (id, data, userRole, userId, userDepartments = [
   const task = await getTaskById(id, userRole, userId, userDepartments);
   // Sales staff cannot reassign tasks to other users
   if (userRole === 'sales') delete data.assignedTo;
+  const oldAssignedTo = task.assignedTo ? String(task.assignedTo._id || task.assignedTo) : null;
   Object.assign(task, data);
   await task.save();
+
+  const newAssignedTo = task.assignedTo ? String(task.assignedTo._id || task.assignedTo) : null;
+  if (oldAssignedTo !== newAssignedTo && newAssignedTo && task.lead) {
+    const { assignLead } = await import('../lead/lead.service.js');
+    await assignLead(task.lead._id || task.lead, task.assignedTo).catch(err => {
+      console.error('Failed to sync task reassignment to lead:', err);
+    });
+  }
 
   // Sync to dedicated collections on status change
   const record = {

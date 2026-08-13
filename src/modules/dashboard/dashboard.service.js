@@ -396,8 +396,9 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   const CallAgain = (await import('../callagain/callagain.model.js')).default;
   const { Order } = await import('../shiprocket/models/order.model.js');
   const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
+  const ReorderCommission = (await import('../commission/reorderCommission.model.js')).default;
 
-  const userQuery = { role: { $in: ['sales', 'manager', 'doctor', 'support'] }, isDeleted: false };
+  const userQuery = { role: { $in: ['sales', 'manager', 'doctor', 'support', 'logistics'] }, isDeleted: false };
   if (requestingUser && ['sales', 'support', 'logistics'].includes(requestingUser.role)) {
     userQuery._id = requestingUser._id;
   }
@@ -416,6 +417,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
       newDeliveredCount: 0, salesOldDeliveredCount: 0, supportOldDeliveredCount: 0,
       uniqueDeliveredCount: 0, // Counts each physical order exactly once (no dual-attribution inflation)
       commentsCount: 0, cnpComments: 0, callAgainComments: 0, interestedComments: 0,
+      commission: 0,
       _noteSet: new Set(), _intSet: new Set(), _cnpSet: new Set(), _caSet: new Set()
     };
   }
@@ -427,7 +429,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   // 2. Fetch Bulk Data in parallel
   const [
     allAttendances, allAppointments, allTargets, allVerifications, allTasks, 
-    allCnps, allCallAgains, allLeadsData, allOrdersSR, allOrdersSM
+    allCnps, allCallAgains, allLeadsData, allOrdersSR, allOrdersSM, allCommissions
   ] = await Promise.all([
     Attendance.find({ date: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('user checkIn checkOut workingHours').lean(),
     Appointment.find({ appointmentDate: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('doctorName status').lean(),
@@ -458,8 +460,23 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
       ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
     }).select('lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
       .populate('lead_id', 'assignedTo status')
-      .lean()
+      .lean(),
+    ReorderCommission.aggregate([
+      { $match: { 
+          status: { $in: ['pending', 'paid'] },
+          ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } }) 
+      }},
+      { $group: { _id: '$staff_id', totalCommission: { $sum: '$commission_amount' } } }
+    ])
   ]);
+
+  // Process Commissions
+  for (const c of allCommissions) {
+    const uid = String(c._id);
+    if (statsMap[uid]) {
+      statsMap[uid].commission = c.totalCommission || 0;
+    }
+  }
 
   // Helper to check date range
   const isToday = (date) => isAllTime || (new Date(date) >= startOfDay && new Date(date) <= endOfDay);
@@ -688,8 +705,8 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
       const candidates = [tId, lId, vId, cId].filter(Boolean);
       for (const cand of candidates) {
         if (statsMap[cand]) {
-          if (statsMap[cand].user.role === 'support') {
-            // Support handled a new order — counts as Support's re-verification delivery
+          if (statsMap[cand].user.role === 'support' || statsMap[cand].user.role === 'logistics') {
+            // Support/Logistics handled a new order — counts as Support's re-verification delivery
             statsMap[cand].supportOldDeliveredCount++;
             statsMap[cand].deliveredCount++;
             if (!uniqueCountedForStaff) {
@@ -714,10 +731,10 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
         }
       }
     } else {
-      // Reorder (2nd+ kit) — credit Support who re-verified it
+      // Reorder (2nd+ kit) — credit Support/Logistics who re-verified it
       const supportCand = [vId, cId, lId].filter(Boolean);
       for (const cand of supportCand) {
-        if (statsMap[cand] && statsMap[cand].user.role === 'support') {
+        if (statsMap[cand] && (statsMap[cand].user.role === 'support' || statsMap[cand].user.role === 'logistics')) {
           statsMap[cand].supportOldDeliveredCount++;
           statsMap[cand].deliveredCount++;
           if (!uniqueCountedForStaff) {
@@ -1487,7 +1504,7 @@ export const getAllStaffCommissions = async (month, year) => {
     
     s.revenueCommission = s.user.role === 'support'
       ? s.totalDeliveries * 50
-      : Math.round(s.totalRevenue * ((s.commissionRate ?? 5) / 100));
+      : Math.round(s.totalRevenue * ((s.user.commissionRate ?? 5) / 100));
       
     s.totalCommission = s.override?.manualCommission ?? (s.revenueCommission + s.reorderCommission);
     s.totalPay = s.basePay + s.totalCommission;
@@ -1644,11 +1661,16 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
   const Lead = (await import('../lead/lead.model.js')).default;
   const { Order } = await import('../shiprocket/models/order.model.js');
   const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
+  const FollowupCommissionSettings = (await import('../commission/followupCommissionSettings.model.js')).default;
+  let reorderSettings = await FollowupCommissionSettings.findOne().sort({ createdAt: -1 }).lean();
+  if (!reorderSettings) {
+    reorderSettings = { reorder_commission_amount: 0, reorder_commission_percent: 0, commission_type: 'flat' };
+  }
 
   const { isAllTime, start: monthStart, end: monthEnd } = buildStatsDateRange(preset, from, to);
 
   const allUsers = await User.find({ role: { $in: ['sales', 'support'] }, isDeleted: false })
-    .select('_id name role').lean();
+    .select('_id name role commissionRate').lean();
 
   const statsMap = {};
   for (const u of allUsers) {
@@ -1824,6 +1846,11 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
 
     // Fetch full details for these orders
     const allIds = [...myDeliveredIds, ...myRtoIds];
+    const ReorderCommission = (await import('../commission/reorderCommission.model.js')).default;
+    const commissions = await ReorderCommission.find({ order_id: { $in: allIds }, staff_id: strUserId }).lean();
+    const commissionMap = {};
+    for (const c of commissions) commissionMap[String(c.order_id)] = c.commission_amount;
+
     const [smFull, srFull] = await Promise.all([
       ShipmaxxOrder.find({ _id: { $in: allIds } })
         .select('_id billing_customer_name billing_phone awb_code sub_total total status delivered_at createdAt lead_id')
@@ -1835,15 +1862,48 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
         .lean(),
     ]);
 
-    const formatOrder = (o) => ({
-      _id: o._id,
-      name: o.lead_id?.name || o.billing_customer_name || '—',
-      phone: o.lead_id?.phone || o.billing_phone || '—',
-      awb: o.awb_code || '—',
-      amount: Number(o.sub_total) || Number(o.total) || 0,
-      status: o.status,
-      date: o.delivered_at || o.createdAt,
-    });
+    const formatOrder = (o) => {
+      let comm = commissionMap[String(o._id)];
+      
+      // If no explicit commission record exists, calculate dynamically
+      if (comm === undefined) {
+        comm = 0;
+        const amt = Number(o.sub_total) || Number(o.total) || 0;
+        if (myNewDeliveredIds.has(String(o._id))) {
+          if (me.user.role === 'support') {
+            comm = 50;
+          } else {
+            comm = Math.round(amt * ((me.user.commissionRate ?? 5) / 100));
+          }
+        } else if (myOldDeliveredIds.has(String(o._id))) {
+          // Dynamic calculation for Repeat / Re-Ver
+          const isOriginal = (me.user.role === 'sales'); 
+          
+          const slab = (reorderSettings.price_slabs || []).find(s =>
+            amt >= s.min_price && (s.max_price === null || s.max_price === undefined || amt <= s.max_price)
+          );
+          const src = slab || reorderSettings;
+          
+          if (reorderSettings.commission_type === 'percent') {
+            const pct = isOriginal ? src.original_staff_commission_percent : src.reorder_commission_percent;
+            comm = Math.round((amt * (pct || 0)) / 100);
+          } else {
+            comm = isOriginal ? src.original_staff_commission_amount : src.reorder_commission_amount;
+          }
+        }
+      }
+      
+      return {
+        _id: o._id,
+        name: o.lead_id?.name || o.billing_customer_name || '—',
+        phone: o.lead_id?.phone || o.billing_phone || '—',
+        awb: o.awb_code || '—',
+        amount: Number(o.sub_total) || Number(o.total) || 0,
+        status: o.status,
+        date: o.delivered_at || o.createdAt,
+        commission: comm
+      };
+    };
 
     const allFull = [...smFull, ...srFull];
     const deliveredOrders = allFull.filter(o => myDeliveredIds.has(String(o._id))).map(formatOrder)
@@ -1855,6 +1915,10 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
     const rtoOrders = allFull.filter(o => myRtoIds.has(String(o._id))).map(formatOrder)
       .sort((a, b) => new Date(b.date) - new Date(a.date));
 
+    const newCommissionTotal = newDeliveredOrders.reduce((sum, o) => sum + (o.commission || 0), 0);
+    const oldCommissionTotal = oldDeliveredOrders.reduce((sum, o) => sum + (o.commission || 0), 0);
+    const totalCommission = deliveredOrders.reduce((sum, o) => sum + (o.commission || 0), 0);
+
     return { 
       delivered: me.delivered, 
       newDelivered: me.newDelivered,
@@ -1864,7 +1928,10 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
       deliveredOrders, 
       newDeliveredOrders,
       oldDeliveredOrders,
-      rtoOrders 
+      rtoOrders,
+      newCommissionTotal,
+      oldCommissionTotal,
+      totalCommission
     };
   }
 

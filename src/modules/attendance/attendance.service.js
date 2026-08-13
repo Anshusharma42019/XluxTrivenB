@@ -32,13 +32,13 @@ const checkIn = async (userId, body = {}) => {
       throw new ApiError(400, 'Already checked in today');
     }
 
-    // Checked out already — allow re-check-in: reset checkIn, clear checkOut & duration
+    // Checked out already — allow re-check-in: reset checkIn, clear checkOut (but preserve workingHours)
     const now = new Date();
     existing.checkIn = now;
     existing.checkOut = null;
-    existing.workingHours = 0;
-    existing.sessionDuration = '';
-    if (body.notes) existing.notes = body.notes;
+    if (body.notes) {
+      existing.notes = existing.notes ? `${existing.notes} | ${body.notes}` : body.notes;
+    }
     await existing.save();
     return existing;
   }
@@ -90,10 +90,14 @@ const checkOut = async (userId, body = {}) => {
   if (attendance.checkIn) {
     const diffMs = checkOutTime - attendance.checkIn;
     const diffHrs = diffMs / (1000 * 60 * 60);
-    attendance.workingHours = Math.round(diffHrs * 100) / 100;
     
-    const h = Math.floor(diffHrs);
-    const m = Math.floor((diffHrs - h) * 60);
+    const previousHours = attendance.workingHours || 0;
+    const totalHrs = previousHours + diffHrs;
+    
+    attendance.workingHours = Math.round(totalHrs * 100) / 100;
+    
+    const h = Math.floor(totalHrs);
+    const m = Math.floor((totalHrs - h) * 60);
     attendance.sessionDuration = `${h}h ${m}m`;
   }
 
@@ -205,11 +209,14 @@ const autoCheckOutByDuration = async (maxHours = 10) => {
       
       if (diffMs >= maxMs) {
         const diffHrs = diffMs / (1000 * 60 * 60);
-        attendance.checkOut = now;
-        attendance.workingHours = Math.round(diffHrs * 100) / 100;
+        const previousHours = attendance.workingHours || 0;
+        const totalHrs = previousHours + diffHrs;
         
-        const h = Math.floor(diffHrs);
-        const m = Math.floor((diffHrs - h) * 60);
+        attendance.checkOut = now;
+        attendance.workingHours = Math.round(totalHrs * 100) / 100;
+        
+        const h = Math.floor(totalHrs);
+        const m = Math.floor((totalHrs - h) * 60);
         attendance.sessionDuration = `${h}h ${m}m`;
         
         attendance.notes = attendance.notes ? `${attendance.notes} (Auto Checked-out after ${maxHours}h)` : `Auto Checked-out after ${maxHours}h`;

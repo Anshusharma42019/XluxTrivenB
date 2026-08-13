@@ -6,7 +6,11 @@ import ApiResponse from '../../utils/ApiResponse.js';
  * Staff clocks in.
  */
 const checkIn = catchAsync(async (req, res) => {
-  const attendance = await attendanceService.checkIn(req.user._id, req.body);
+  let userId = req.user._id;
+  if (req.body.userId && ['admin', 'manager'].includes(req.user.role)) {
+    userId = req.body.userId;
+  }
+  const attendance = await attendanceService.checkIn(userId, req.body);
   res.status(201).send(new ApiResponse(201, attendance, 'Checked in successfully'));
 });
 
@@ -14,7 +18,11 @@ const checkIn = catchAsync(async (req, res) => {
  * Staff clocks out.
  */
 const checkOut = catchAsync(async (req, res) => {
-  const attendance = await attendanceService.checkOut(req.user._id, req.body);
+  let userId = req.user._id;
+  if (req.body.userId && ['admin', 'manager'].includes(req.user.role)) {
+    userId = req.body.userId;
+  }
+  const attendance = await attendanceService.checkOut(userId, req.body);
   res.send(new ApiResponse(200, attendance, 'Checked out successfully'));
 });
 

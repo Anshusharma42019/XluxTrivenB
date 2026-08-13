@@ -110,6 +110,11 @@ export const generateReorderCommissions = async () => {
     }
     logs.push(`[Commission] reorders identified: ${reorders.length}`);
 
+    const User = (await import('../user/user.model.js')).default;
+    const salesUsers = await User.find({ role: 'sales' }).select('_id').lean();
+    const salesUserIds = new Set(salesUsers.map(u => String(u._id)));
+
+
     for (const order of reorders) {
       const deliveredAt = order.delivered_at || order.createdAt || new Date();
       const month = deliveredAt.getMonth();
@@ -122,23 +127,65 @@ export const generateReorderCommissions = async () => {
       }
 
       // ── Staff A: original order staff — CLOSER who verified the original order ─────────
-      // verified_by pehle check karo (actual Sales Closer), created_by sirf fallback hai
-      // (created_by Dispatcher ka ho sakta hai — isliye pehle verified_by)
       let staffA = null;
-      if (order.source_order_id) {
-        let sourceOrder = null;
-        if (order._model === 'shipmaxx') {
-          sourceOrder = await ShipmaxxOrder.findById(order.source_order_id).select('created_by verified_by lead_id').lean();
-        } else {
-          sourceOrder = await Order.findById(order.source_order_id).select('created_by verified_by lead_id').lean();
+
+      const phoneRaw = order.billing_phone || (order.lead_id?.phone);
+      if (phoneRaw) {
+        const phoneClean = phoneRaw.replace(/\\D/g, '').slice(-10);
+        if (phoneClean) {
+          const phoneRegex = new RegExp(phoneClean + '$');
+          
+          // First, check historical orders for this phone number to find a Sales agent
+          const [srOrders, smOrders] = await Promise.all([
+            Order.find({ billing_phone: phoneRegex }).select('task_created_by verified_by created_by').lean(),
+            ShipmaxxOrder.find({ billing_phone: phoneRegex }).select('task_created_by verified_by created_by').lean()
+          ]);
+          
+          const allOrders = [...srOrders, ...smOrders];
+          for (const o of allOrders) {
+            const cands = [o.task_created_by, o.verified_by, o.created_by].filter(Boolean);
+            for (const cand of cands) {
+              if (salesUserIds.has(String(cand))) {
+                staffA = cand;
+                break;
+              }
+            }
+            if (staffA) break;
+          }
+
+          // If not found in orders, check leads
+          if (!staffA) {
+            const leads = await Lead.find({ phone: phoneRegex }).sort({ createdAt: 1 }).select('assignedTo createdBy').lean();
+            for (const l of leads) {
+              if (l.createdBy && salesUserIds.has(String(l.createdBy))) {
+                staffA = l.createdBy;
+                break;
+              }
+              if (l.assignedTo && salesUserIds.has(String(l.assignedTo))) {
+                staffA = l.assignedTo;
+                break;
+              }
+            }
+          }
         }
-        staffA = sourceOrder?.verified_by || sourceOrder?.created_by; // verified_by first = actual closer
-        if (!staffA && sourceOrder?.lead_id) {
-          const srcLead = await Lead.findById(sourceOrder.lead_id).select('assignedTo createdBy').lean();
-          staffA = srcLead?.assignedTo || srcLead?.createdBy;
+      }
+
+      if (!staffA) {
+        if (order.source_order_id) {
+          let sourceOrder = null;
+          if (order._model === 'shipmaxx') {
+            sourceOrder = await ShipmaxxOrder.findById(order.source_order_id).select('created_by verified_by lead_id').lean();
+          } else {
+            sourceOrder = await Order.findById(order.source_order_id).select('created_by verified_by lead_id').lean();
+          }
+          staffA = sourceOrder?.verified_by || sourceOrder?.created_by; // verified_by first = actual closer
+          if (!staffA && sourceOrder?.lead_id) {
+            const srcLead = await Lead.findById(sourceOrder.lead_id).select('assignedTo createdBy').lean();
+            staffA = srcLead?.assignedTo || srcLead?.createdBy;
+          }
+        } else if (order.lead_id?.status === 'old') {
+          staffA = order.lead_id.createdBy || order.lead_id.assignedTo;
         }
-      } else if (order.lead_id?.status === 'old') {
-        staffA = order.lead_id.createdBy || order.lead_id.assignedTo;
       }
 
       const calcAmount = (isOriginal) => {

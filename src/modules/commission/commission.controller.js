@@ -13,6 +13,38 @@ export const getCommissionSettings = catchAsync(async (req, res) => {
   res.json(new ApiResponse(200, settings, 'Commission settings fetched'));
 });
 
+// ── Helper: Recalculate pending commissions when settings change ───────────
+const recalculatePendingCommissions = async (settings) => {
+  try {
+    const pendingComms = await ReorderCommission.find({ status: 'pending' });
+    if (!pendingComms.length) return;
+
+    let updatedCount = 0;
+    for (const comm of pendingComms) {
+      const price = comm.order_sub_total || 0;
+      const isOriginal = comm.commission_role === 'original';
+      
+      const slab = (settings.price_slabs || []).find(s =>
+        price >= s.min_price && (s.max_price === null || s.max_price === undefined || price <= s.max_price)
+      );
+      const src = slab || settings;
+      const amt = isOriginal ? src.original_staff_commission_amount : src.reorder_commission_amount;
+      const pct = isOriginal ? src.original_staff_commission_percent : src.reorder_commission_percent;
+      const newAmount = settings.commission_type === 'percent' ? Math.round((price * (pct || 0)) / 100) : (amt || 0);
+      
+      if (comm.commission_amount !== newAmount || comm.commission_type !== settings.commission_type) {
+        comm.commission_amount = newAmount;
+        comm.commission_type = settings.commission_type;
+        await comm.save();
+        updatedCount++;
+      }
+    }
+    console.log(`[Commission] Successfully updated ${updatedCount} pending commissions based on new settings.`);
+  } catch (error) {
+    console.error('[Commission] Error recalculating pending commissions:', error);
+  }
+};
+
 // ── Admin: Update commission settings ────────────────────────────────────────
 export const updateCommissionSettings = catchAsync(async (req, res) => {
   const { reorder_commission_amount, reorder_commission_percent, original_staff_commission_amount,
@@ -28,6 +60,9 @@ export const updateCommissionSettings = catchAsync(async (req, res) => {
   if (is_active !== undefined) settings.is_active = is_active;
   settings.updated_by = req.user._id;
   await settings.save();
+  
+  // Dynamically recalculate all pending (unpaid) commissions using the new settings
+  await recalculatePendingCommissions(settings);
   res.json(new ApiResponse(200, settings, 'Commission settings updated'));
 });
 

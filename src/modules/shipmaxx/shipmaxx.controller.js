@@ -1094,17 +1094,24 @@ export const importByIds = catchAsync(async (req, res) => {
     errors: errors.slice(0, 20),
   }, `Done: ${imported} new, ${updated} updated, ${failed} failed out of ${ids.length} order IDs`));
 });
+let isSyncingRunning = false;
 
 export const runSyncInBackground = async (mode = 'quick') => {
-  const syncStart = Date.now();
-  const MAX_SYNC_MS = 4 * 60 * 1000;
-  const isTimedOut = () => (Date.now() - syncStart) > MAX_SYNC_MS;
-  let updatedCount = 0;
-  const isFullSync = mode === 'full';
+  if (isSyncingRunning) {
+    console.log('[Sync ShipMaxx] ⚠ Sync already running, skipping this trigger.');
+    return;
+  }
+  isSyncingRunning = true;
+  try {
+    const syncStart = Date.now();
+    const MAX_SYNC_MS = 4 * 60 * 1000;
+    const isTimedOut = () => (Date.now() - syncStart) > MAX_SYNC_MS;
+    let updatedCount = 0;
+    const isFullSync = mode === 'full';
 
-  console.log(`[Sync ShipMaxx] ▶ Starting ${isFullSync ? 'FULL' : 'QUICK'} sync in background...`);
+    console.log(`[Sync ShipMaxx] ▶ Starting ${isFullSync ? 'FULL' : 'QUICK'} sync in background...`);
 
-  // Status normalization (fast, DB only)
+    // Status normalization (fast, DB only)
   await Order.updateMany({ platform: 'shipmaxx', status: 'SHIPMENT_BOOKED' }, { $set: { status: 'NEW' } }).catch(() => {});
   await Order.updateMany({ platform: 'shipmaxx', status: 'SHIPMENT_CANCELLED' }, { $set: { status: 'CANCELLED' } }).catch(() => {});
   await Order.updateMany({ platform: 'shipmaxx', status: 'RTO_INTRANSIT' }, { $set: { status: 'RTO_IN_TRANSIT' } }).catch(() => {});
@@ -1201,7 +1208,11 @@ export const runSyncInBackground = async (mode = 'quick') => {
         let sua = ndr.attemptDate ? parseShipMaxxDate(`${ndr.attemptDate} ${ndr.attemptTime || '00:00:00'}`) : null;
         if (!sua && existing?.status_updated_at) sua = existing.status_updated_at; else if (!sua) sua = new Date();
         const ud = { order_id: String(ndr.orderId || ndr.awb), awb_code: String(ndr.awb || ''), delivery_attempt: attemptNumber, status_updated_at: sua, platform: 'shipmaxx' };
-        if (!existing || (existing.status !== 'DELIVERED' && existing.status !== 'RTO_DELIVERED')) ud.status = mappedStatus;
+        const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED', 'OUT_FOR_DELIVERY'];
+        if (!existing || !protectedStatuses.includes(existing.status)) ud.status = mappedStatus;
+        if (mappedStatus === 'DELIVERED' || mappedStatus === 'RTO_DELIVERED') {
+          ud.delivered_at = sua;
+        }
         if (ndr.customer) { if (ndr.customer.name) ud.billing_customer_name = ndr.customer.name; if (ndr.customer.phone) ud.billing_phone = ndr.customer.phone; if (ndr.customer.city) ud.billing_city = ndr.customer.city; if (ndr.customer.state) ud.billing_state = ndr.customer.state; }
         await Order.updateWithTransaction(query, { $set: ud }, { upsert: true }).catch(() => {});
       }
@@ -1253,6 +1264,9 @@ export const runSyncInBackground = async (mode = 'quick') => {
 
   const elapsed = Math.round((Date.now() - syncStart) / 1000);
   console.log(`[Sync ShipMaxx] ✅ ${isFullSync ? 'Full' : 'Quick'} sync done! ${updatedCount} updated in ${elapsed}s`);
+  } finally {
+    isSyncingRunning = false;
+  }
 };
 
 export const syncShipmaxx = catchAsync(async (req, res) => {
