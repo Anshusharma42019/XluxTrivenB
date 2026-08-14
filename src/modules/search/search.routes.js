@@ -42,19 +42,23 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
   } catch (e) {}
 
   const limit = 20; 
-  
-  const leadMatch = { isDeleted: false, $or: [{ name: regex }, { phone: regex }, { email: regex }, { problem: regex }] };
-  if (isValidObjectId) leadMatch.$or.push({ _id: queryStr });
+
+  const baseMatch = { $or: [{ name: regex }, { phone: regex }, { email: regex }, { problem: regex }] };
+  if (isValidObjectId) baseMatch.$or.push({ _id: queryStr });
+
+  const leadMatch = { isDeleted: false, ...baseMatch };
   
   const orderMatch = { $or: [{ billing_customer_name: regex }, { billing_phone: regex }, { order_id: regex }, { awb_code: regex }] };
 
   try {
-    const [leadPhones, orderPhones, maxxPhones, srDelivered, smDelivered] = await Promise.all([
-      Lead.find(leadMatch).select('phone').limit(10).lean(),
+    const [leadPhones, orderPhones, maxxPhones, srDelivered, smDelivered, interested, notInterested] = await Promise.all([
+      Lead.find(baseMatch).select('phone').limit(10).lean(),
       ShiprocketOrder.find(orderMatch).select('billing_phone').limit(10).lean(),
       ShipmaxxOrder.find(orderMatch).select('billing_phone').limit(10).lean(),
       (getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch).select('billing_phone').limit(10).lean(),
       (getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch).select('billing_phone').limit(10).lean(),
+      InterestedLead.find(baseMatch).select('phone').limit(10).lean(),
+      NotInterestedLead.find(baseMatch).select('phone').limit(10).lean()
     ]);
     const phoneSet = new Set();
     const addPhone = (p) => { if (p) phoneSet.add(p.replace(/\D/g, '')); };
@@ -63,6 +67,8 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     maxxPhones.forEach(o => addPhone(o.billing_phone));
     srDelivered.forEach(o => addPhone(o.billing_phone));
     smDelivered.forEach(o => addPhone(o.billing_phone));
+    interested.forEach(l => addPhone(l.phone));
+    notInterested.forEach(l => addPhone(l.phone));
     
     const expandedPhones = Array.from(phoneSet).filter(Boolean);
     if (expandedPhones.length > 0) {
@@ -100,11 +106,11 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     Task.find({ isDeleted: false, $or: [{ title: regex }, { phone: regex }] }).populate('assignedTo', 'name').populate('lead', 'name phone problem department address cityVillage state pincode').sort({ updatedAt: -1 }).limit(limit).lean(),
     Verification.find({ isDeleted: false, $or: [{ title: regex }] }).populate('assignedTo', 'name').populate('lead', 'name phone problem department address cityVillage state pincode').sort({ updatedAt: -1 }).limit(limit).lean(),
     ReadyToShipment.find({ $or: [{ title: regex }] }).populate('lead', 'name phone problem department address cityVillage state pincode').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    Lead.find(leadMatch).select('_id').lean().then(matchedLeads => 
-      CallAgain.find({ lead: { $in: matchedLeads.map(l => l._id) } }).populate('lead', 'name phone problem department address cityVillage state pincode').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean()
+    Lead.find(baseMatch).select('_id').lean().then(matchedLeads => 
+      CallAgain.find({ lead: { $in: matchedLeads.map(l => l._id) }, isDeleted: false }).populate('lead', 'name phone problem department address cityVillage state pincode').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean()
     ),
-    Lead.find(leadMatch).select('_id').lean().then(matchedLeads => 
-      Cnp.find({ lead: { $in: matchedLeads.map(l => l._id) } }).populate('lead', 'name phone problem department address cityVillage state pincode').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean()
+    Lead.find(baseMatch).select('_id').lean().then(matchedLeads => 
+      Cnp.find({ lead: { $in: matchedLeads.map(l => l._id) }, isDeleted: false }).populate('lead', 'name phone problem department address cityVillage state pincode').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean()
     ),
     Appointment.find({ isDeleted: false, $or: [{ patientName: regex }, { phone: regex }] }).populate('createdBy', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
     
