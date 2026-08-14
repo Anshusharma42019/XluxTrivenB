@@ -104,8 +104,12 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
   ] = await Promise.all([
     Lead.find(leadMatch).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
     Task.find({ isDeleted: false, $or: [{ title: regex }, { phone: regex }] }).populate('assignedTo', 'name').populate('lead', 'name phone problem department address cityVillage state pincode').sort({ updatedAt: -1 }).limit(limit).lean(),
-    Verification.find({ isDeleted: false, $or: [{ title: regex }] }).populate('assignedTo', 'name').populate('lead', 'name phone problem department address cityVillage state pincode').sort({ updatedAt: -1 }).limit(limit).lean(),
-    ReadyToShipment.find({ $or: [{ title: regex }] }).populate('lead', 'name phone problem department address cityVillage state pincode').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
+    Lead.find(baseMatch).select('_id').lean().then(matchedLeads => 
+      Verification.find({ isDeleted: false, $or: [{ title: regex }, { lead: { $in: matchedLeads.map(l => l._id) } }] }).populate('assignedTo', 'name').populate('lead', 'name phone problem department address cityVillage state pincode').sort({ updatedAt: -1 }).limit(limit).lean()
+    ),
+    Lead.find(baseMatch).select('_id').lean().then(matchedLeads => 
+      ReadyToShipment.find({ $or: [{ title: regex }, { lead: { $in: matchedLeads.map(l => l._id) } }] }).populate('lead', 'name phone problem department address cityVillage state pincode').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean()
+    ),
     Lead.find(baseMatch).select('_id').lean().then(matchedLeads => 
       CallAgain.find({ lead: { $in: matchedLeads.map(l => l._id) }, isDeleted: false }).populate('lead', 'name phone problem department address cityVillage state pincode').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean()
     ),
