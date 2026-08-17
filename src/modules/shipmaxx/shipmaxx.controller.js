@@ -1120,11 +1120,12 @@ export const runSyncInBackground = async (mode = 'quick') => {
     await Order.updateMany({ platform: 'shipmaxx', status: new RegExp(`^${sc}$`, 'i') }, { $set: { status: fs } }).catch(() => {});
   }
 
-  // ─── FULL ONLY: Import all shipments + orders from ShipMaxx API ─────────
-  if (isFullSync && !isTimedOut()) {
+  // ─── Import shipments + orders from ShipMaxx API ─────────
+  const maxPages = isFullSync ? 50 : 2;
+  if (!isTimedOut()) {
     try {
       let page = 1;
-      while (!isTimedOut()) {
+      while (!isTimedOut() && page <= maxPages) {
         const shipRes = await smx.getShipments({ limit: 50, per_page: 50, page });
         const shipments = shipRes?.data?.data || shipRes?.data || [];
         if (shipments.length === 0) break;
@@ -1145,14 +1146,14 @@ export const runSyncInBackground = async (mode = 'quick') => {
           await Order.updateWithTransaction(query, { $set: updateData }, { upsert: true }).catch(() => {});
           updatedCount++;
         }
-        console.log(`[Sync Full] shipments page ${page}`);
-        await new Promise(r => setTimeout(r, 200)); page++; if (page > 50) break;
+        console.log(`[Sync ${isFullSync ? 'Full' : 'Quick'}] shipments page ${page}`);
+        await new Promise(r => setTimeout(r, 200)); page++;
       }
-    } catch (err) { console.error('[Sync Full] Shipments error:', err.message); }
+    } catch (err) { console.error(`[Sync ${isFullSync ? 'Full' : 'Quick'}] Shipments error:`, err.message); }
 
     try {
       let op = 1;
-      while (!isTimedOut()) {
+      while (!isTimedOut() && op <= maxPages) {
         const ordersRes = await smx.fetchAllOrders({ limit: 50, per_page: 50, page: op });
         const orders = ordersRes?.data?.data || ordersRes?.data || ordersRes?.orders || [];
         if (orders.length === 0) break;
@@ -1161,12 +1162,23 @@ export const runSyncInBackground = async (mode = 'quick') => {
           const ud = { platform: 'shipmaxx', billing_customer_name: o.customer_name || '', billing_phone: o.phone || '', billing_address: o.address || '', billing_pincode: o.billing_zip || o.shipping_zip || '', sub_total: Number(o.total_price) || 0 };
           const c = o.carrier_name || o.courier_name || o.carrier; if (c) ud.courier_name = c;
           if (o.created_at) ud.createdAt = new Date(o.created_at); if (o.awb) ud.awb_code = String(o.awb);
+          if (o.status) {
+            ud.status = normalizeShipmaxxStatus(o.status);
+          }
+          if (o.order_products && Array.isArray(o.order_products)) {
+            ud.order_items = o.order_products.map(p => ({
+              name: p.title || p.name || '',
+              sku: p.sku || '',
+              units: Number(p.quantity) || 1,
+              selling_price: Number(p.price) || 0
+            }));
+          }
           await Order.updateWithTransaction({ platform: 'shipmaxx', order_id: String(o.order_id) }, { $set: ud }, { upsert: true }).catch(() => {});
         }
-        console.log(`[Sync Full] orders page ${op}`);
-        await new Promise(r => setTimeout(r, 200)); op++; if (op > 50) break;
+        console.log(`[Sync ${isFullSync ? 'Full' : 'Quick'}] orders page ${op}`);
+        await new Promise(r => setTimeout(r, 200)); op++;
       }
-    } catch (err) { console.error('[Sync Full] Orders error:', err.message); }
+    } catch (err) { console.error(`[Sync ${isFullSync ? 'Full' : 'Quick'}] Orders error:`, err.message); }
 
     // Bulk courier update
     try {

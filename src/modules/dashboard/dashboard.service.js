@@ -282,15 +282,22 @@ export const getStaffTodayLists = async (userRole, userId, targetDate, targetSta
     taskFilter.department = { $in: userDepartments };
   }
 
+  // Build base filters (assignedTo + department only, no date) for queue-type statuses
+  const baseFilter = {};
+  if (sid) baseFilter.assignedTo = sid;
+  if (userDepartments && userDepartments.length > 0) baseFilter.department = { $in: userDepartments };
+
   const [cnpList, callAgainList, interestedList, notInterestedList, onHoldList, verificationList] = await Promise.all([
     Cnp.find(updateFilter)
       .populate('lead', 'name phone').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(100).lean(),
     CallAgain.find(updateFilter)
       .populate('lead', 'name phone').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(100).lean(),
+    // Interested & Not Interested: date-filtered by updatedAt — shows leads marked interested in selected period
     Task.find({ ...taskFilter, status: 'interested' })
       .populate('lead', 'name phone').sort({ updatedAt: -1 }).limit(100).lean(),
     Task.find({ ...taskFilter, status: 'cancel_call' })
       .populate('lead', 'name phone').sort({ updatedAt: -1 }).limit(100).lean(),
+    // On Hold: date-filtered — verifications put on hold within selected period
     Verification.find({ ...updateFilter, status: 'on_hold' })
       .populate('lead', 'name phone').sort({ updatedAt: -1 }).limit(100).lean(),
     Verification.find({ ...filter })

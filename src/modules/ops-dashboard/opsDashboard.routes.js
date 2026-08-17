@@ -19,4 +19,7 @@ router.get('/alerts',      opsAuth, c.getAlerts);
 router.post('/rto-verification', opsAuth, c.submitRtoVerification);
 router.post('/send-interakt-messages', opsAuth, c.sendInteraktMessages);
 
+router.post('/invoice-history', opsAuth, c.createInvoiceHistory);
+router.get('/invoice-history',  opsAuth, c.getInvoiceHistory);
+
 export default router;

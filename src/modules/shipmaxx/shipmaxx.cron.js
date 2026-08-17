@@ -1,8 +1,51 @@
 import cron from 'node-cron';
+import mongoose from 'mongoose';
 import { ShipmaxxOrder as Order } from './models/shipmaxxOrder.model.js';
 import smx from './shipmaxx.service.js';
 import { normalizeShipmaxxStatus, parseShipMaxxDate, extractStatusUpdatedAt } from './shipmaxx.controller.js';
 import { generateReorderCommissions } from '../shiprocket/shiprocket.controller.js';
+import { Lead } from '../lead/lead.model.js';
+
+/**
+ * Given a customer phone number, find the matching lead and fetch
+ * verification staff details (task_created_by, verified_by, verification_id).
+ * Returns a partial order update object with CRM fields set.
+ */
+async function linkCrmFields(phone) {
+  const fields = {};
+  if (!phone) return fields;
+
+  const cleanPhone = String(phone).replace(/\D/g, '');
+  if (cleanPhone.length < 10) return fields;
+
+  // Try exact last-10-digits match first
+  const last10 = cleanPhone.slice(-10);
+  let lead = await Lead.findOne({
+    phone: { $regex: last10, $options: 'i' },
+    isDeleted: { $ne: true },
+  }).select('_id').lean();
+
+  if (!lead) return fields;
+
+  fields.lead_id = lead._id;
+
+  // Look up the latest verification record for this lead
+  try {
+    const Verification = mongoose.model('Verification');
+    const verif = await Verification.findOne({ lead: lead._id, isDeleted: { $ne: true } })
+      .populate('task', 'createdBy')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (verif) {
+      fields.verified_by = verif.verifiedBy || verif.assignedTo || null;
+      fields.verification_id = verif._id;
+      fields.task_created_by = verif.task?.createdBy || null;
+    }
+  } catch (_) { /* Verification model may not be loaded yet */ }
+
+  return fields;
+}
 
 export const runCronSync = async () => {
   try {
@@ -30,7 +73,7 @@ export const runCronSync = async () => {
           else query.awb_code = String(s.awb);
 
           const newStatus = normalizeShipmaxxStatus(s.status);
-          const existing = await Order.findOne(query).select('status status_updated_at').lean();
+          const existing = await Order.findOne(query).select('status status_updated_at lead_id').lean();
           
           if (existing) {
             existingCountInPage++;
@@ -65,6 +108,14 @@ export const runCronSync = async () => {
               name: p.name, sku: p.sku, units: p.quantity
             }));
           }
+
+          // For new (or unlinked) orders, resolve lead + CRM staff details from phone
+          if (!existing || !existing.lead_id) {
+            const phone = s.phone || s.customer_phone || s.billing_phone;
+            const crmFields = await linkCrmFields(phone);
+            Object.assign(updateData, crmFields);
+          }
+
           await Order.updateWithTransaction(query, { $set: updateData }, { upsert: true }).catch(() => {});
         }
         
@@ -76,6 +127,72 @@ export const runCronSync = async () => {
       }
     } catch (err) {
       console.error('[Cron] Error fetching new ShipMaxx shipments:', err.message);
+    }
+
+    // 1.5. Fetch new orders from ShipMaxx (Auto-sync new unshipped orders)
+    try {
+      let page = 1;
+      let keepFetching = true;
+      while (keepFetching && page <= 4) {
+        const ordersRes = await smx.fetchAllOrders({ limit: 50, per_page: 50, page });
+        const orders = ordersRes?.data?.data || ordersRes?.data || ordersRes?.orders || [];
+        if (orders.length === 0) break;
+        
+        let existingCountInPage = 0;
+        
+        for (const o of orders) {
+          if (!o.order_id) continue;
+          const query = { platform: 'shipmaxx', order_id: String(o.order_id) };
+          const existing = await Order.findOne(query).select('status lead_id').lean();
+          
+          if (existing) {
+            existingCountInPage++;
+          }
+          
+          const ud = {
+            platform: 'shipmaxx',
+            billing_customer_name: o.customer_name || '',
+            billing_phone: o.phone || '',
+            billing_address: o.address || '',
+            billing_pincode: o.billing_zip || o.shipping_zip || '',
+            sub_total: Number(o.total_price) || 0
+          };
+          const c = o.carrier_name || o.courier_name || o.carrier;
+          if (c) ud.courier_name = c;
+          if (o.created_at) ud.createdAt = new Date(o.created_at);
+          if (o.awb) ud.awb_code = String(o.awb);
+          
+          if (o.status) {
+            ud.status = normalizeShipmaxxStatus(o.status);
+          }
+          
+          if (o.order_products && Array.isArray(o.order_products)) {
+            ud.order_items = o.order_products.map(p => ({
+              name: p.title || p.name || '',
+              sku: p.sku || '',
+              units: Number(p.quantity) || 1,
+              selling_price: Number(p.price) || 0
+            }));
+          }
+
+          // For new (or unlinked) orders, resolve lead + CRM staff details from phone
+          if (!existing || !existing.lead_id) {
+            const phone = o.phone || o.customer_phone;
+            const crmFields = await linkCrmFields(phone);
+            Object.assign(ud, crmFields);
+          }
+          
+          await Order.updateWithTransaction(query, { $set: ud }, { upsert: true }).catch(() => {});
+        }
+        
+        if (existingCountInPage >= 40) {
+           keepFetching = false;
+        }
+        page++;
+      }
+      console.log(`[Cron] Fetching new orders done`);
+    } catch (err) {
+      console.error('[Cron] Error fetching new ShipMaxx orders:', err.message);
     }
 
     // 2. Track existing active orders

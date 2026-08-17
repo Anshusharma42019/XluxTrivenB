@@ -55,3 +55,13 @@ export const sendInteraktMessages = catchAsync(async (req, res) => {
   res.json(new ApiResponse(200, result, 'Interakt template messages processed successfully'));
 });
 
+export const createInvoiceHistory = catchAsync(async (req, res) => {
+  const result = await svc.createInvoiceHistory(req.body, req.user?._id);
+  res.json(new ApiResponse(200, result, 'Invoice history saved successfully'));
+});
+
+export const getInvoiceHistory = catchAsync(async (req, res) => {
+  const result = await svc.getInvoiceHistory(req.query);
+  res.json(new ApiResponse(200, result, 'Invoice history fetched successfully'));
+});
+

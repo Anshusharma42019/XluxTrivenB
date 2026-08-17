@@ -6,6 +6,7 @@ import { ShipmaxxRtoOrder } from '../shipmaxx/models/shipmaxxRtoOrder.model.js';
 import Verification from '../verification/verification.model.js';
 import { NdrNote } from '../shiprocket/models/ndrNote.model.js';
 import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
+import { InvoiceHistory } from './invoiceHistory.model.js';
 
 /* ─── IST helpers ──────────────────────────────────────────────────────────── */
 const IST = 5.5 * 60 * 60 * 1000;
@@ -157,7 +158,7 @@ function classifyStatus(s = '') {
  * Backlog activity (orders created in previous months) are fetched separately.
  */
 async function fetchOrderStats(filter) {
-  const proj = { status: 1, delivery_attempt: 1, delivered_at: 1, createdAt: 1, sub_total: 1, total: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1, interakt_reply_text: 1, interakt_reply_at: 1 };
+  const proj = { status: 1, delivery_attempt: 1, delivered_at: 1, createdAt: 1, sub_total: 1, total: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1, interakt_reply_text: 1, interakt_reply_at: 1, task_created_by: 1 };
   const populates = [
     { path: 'lead_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
     { path: 'verified_by', select: 'role' },
@@ -250,10 +251,156 @@ function pctChange(curr, prev) {
   return +(((curr - prev) / prev) * 100).toFixed(1);
 }
 
+// ─── Lead lookup cache (refreshed every 5 minutes) ─────────────────────────
+let _leadCacheData = null;
+let _leadCacheAt   = 0;
+const LEAD_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+async function getLeadLookup() {
+  if (_leadCacheData && (Date.now() - _leadCacheAt) < LEAD_CACHE_TTL) {
+    return _leadCacheData;
+  }
+  const { Lead } = await import('../lead/lead.model.js');
+  const allLeads = await Lead.find({ isDeleted: { $ne: true } })
+    .select('name phone address pincode assignedTo')
+    .lean();
+
+  const byPhone = {};
+  const byName  = {};
+  const byPin   = {};
+  const pinCount = {};
+
+  for (const l of allLeads) {
+    if (l.phone) {
+      const clean = String(l.phone).replace(/\D/g, '');
+      if (clean.length >= 10) byPhone[clean.slice(-10)] = l;
+      byPhone[clean] = l;
+    }
+    if (l.name) byName[l.name.toLowerCase().trim()] = l;
+    const pin = l.pincode || (l.address || '').match(/\b(\d{6})\b/)?.[1];
+    if (pin) { pinCount[pin] = (pinCount[pin] || 0) + 1; byPin[pin] = l; }
+  }
+  for (const pin of Object.keys(pinCount)) {
+    if (pinCount[pin] > 1) delete byPin[pin];
+  }
+
+  _leadCacheData = { allLeads, byPhone, byName, byPin };
+  _leadCacheAt   = Date.now();
+  return _leadCacheData;
+}
+
+async function autoLinkOrders() {
+  try {
+    const unlinkedSr = await Order.findOne({ lead_id: null }).select('_id').lean();
+    const unlinkedSm = await ShipmaxxOrder.findOne({ lead_id: null }).select('_id').lean();
+    if (!unlinkedSr && !unlinkedSm) return; // nothing to do
+
+    await import('../task/task.model.js');
+    const { allLeads, byPhone, byName, byPin } = await getLeadLookup();
+
+    const models = [
+      { name: 'Shiprocket Order', model: Order },
+      { name: 'Shipmaxx Order',   model: ShipmaxxOrder }
+    ];
+
+    // ── Step 1: match unlinked orders to leads ──────────────────────────────
+    for (const { model } of models) {
+      const unlinked = await model.find({ lead_id: null })
+        .select('_id billing_customer_name billing_phone billing_pincode raw_response')
+        .lean();
+      if (unlinked.length === 0) continue;
+
+      const bulkOps = [];
+      for (const o of unlinked) {
+        const phone        = o.billing_phone || o.raw_response?.customer_phone || o.raw_response?.phone;
+        const customerName = o.billing_customer_name || o.raw_response?.customer_name || o.raw_response?.name;
+        const pincode      = o.billing_pincode || o.raw_response?.customer_pincode || o.raw_response?.billing_zip;
+
+        let matchedLead = null;
+
+        if (phone) {
+          const cleanPhone = String(phone).replace(/\D/g, '');
+          if (cleanPhone.length >= 10) matchedLead = byPhone[cleanPhone.slice(-10)];
+          if (!matchedLead) matchedLead = byPhone[cleanPhone];
+          if (!matchedLead && cleanPhone.length >= 10) {
+            matchedLead = allLeads.find(l => {
+              const lp = String(l.phone).replace(/\D/g, '');
+              return lp.length >= 10 && (lp.includes(cleanPhone) || cleanPhone.includes(lp));
+            });
+          }
+        }
+        if (!matchedLead && customerName) {
+          const lowerName = customerName.toLowerCase().trim();
+          matchedLead = byName[lowerName];
+          if (!matchedLead) {
+            const words = lowerName.split(/\s+/).filter(w => w.length > 2);
+            if (words.length > 0) {
+              matchedLead = allLeads.find(l => {
+                const ln = (l.name || '').toLowerCase();
+                return words.every(w => ln.includes(w));
+              });
+            }
+          }
+        }
+        if (!matchedLead && pincode) {
+          const pin = String(pincode).trim();
+          if (pin.length === 6) matchedLead = byPin[pin];
+        }
+
+        if (matchedLead) {
+          bulkOps.push({ updateOne: { filter: { _id: o._id }, update: { $set: { lead_id: matchedLead._id } } } });
+        }
+      }
+      if (bulkOps.length > 0) await model.bulkWrite(bulkOps).catch(() => {});
+    }
+
+    // ── Step 2: link staff details for orders missing them ──────────────────
+    for (const { model } of models) {
+      const orders = await model.find({
+        lead_id:          { $ne: null },
+        $or: [
+          { verified_by:     null },
+          { verification_id: null },
+          { task_created_by: null }
+        ]
+      }).select('_id lead_id').lean();
+      if (orders.length === 0) continue;
+
+      const bulkOps = [];
+      for (const o of orders) {
+        const verif = await Verification.findOne({ lead: o.lead_id })
+          .populate('task', 'createdBy')
+          .sort({ createdAt: -1 })
+          .lean();
+        if (verif) {
+          bulkOps.push({
+            updateOne: {
+              filter: { _id: o._id },
+              update: {
+                $set: {
+                  verified_by:     verif.verifiedBy || verif.assignedTo || null,
+                  verification_id: verif._id,
+                  task_created_by: verif.task?.createdBy || null,
+                }
+              }
+            }
+          });
+        }
+      }
+      if (bulkOps.length > 0) await model.bulkWrite(bulkOps).catch(() => {});
+    }
+  } catch (err) {
+    console.error('[autoLinkOrders] error:', err.message);
+  }
+}
+
 /* ══════════════════════════════════════════════════════════════════════════════
    1. KPI Cards
 ══════════════════════════════════════════════════════════════════════════════ */
 export async function getKPIs(params) {
+  // Fire-and-forget: do NOT await so dashboard responds immediately.
+  // autoLinkOrders runs in background and DB gets updated for next load.
+  autoLinkOrders().catch(err => console.error('[autoLinkOrders bg]', err.message));
   const { preset, from, to, hub, courier, awb, state, staffId } = params;
   const { start, end } = buildDateRange(preset, from, to);
   const { start: ps, end: pe } = buildPrevRange(start, end);
@@ -279,7 +426,7 @@ export async function getKPIs(params) {
   ]);
 
   // Backlog fetches (Orders created BEFORE start, but had activity THIS period)
-  const projBl = { status: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1, interakt_reply_text: 1, interakt_reply_at: 1 };
+  const projBl = { status: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1, interakt_reply_text: 1, interakt_reply_at: 1, task_created_by: 1 };
   const populates = [
     { path: 'lead_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
     { path: 'verified_by', select: 'role' },
@@ -615,6 +762,7 @@ export async function getLeaderboard(params) {
    7. Shipment List
 ══════════════════════════════════════════════════════════════════════════════ */
 export async function getShipments(params) {
+  autoLinkOrders().catch(err => console.error('[autoLinkOrders bg]', err.message));
   const { preset, from, to, hub, courier, awb, state, status, page = 1, limit = 50, platform, staffId } = params;
   const { start, end } = buildDateRange(preset, from, to);
   const staffScope = await getStaffScope(staffId);
@@ -658,7 +806,7 @@ export async function getShipments(params) {
       const User = (await import('../user/user.model.js')).default;
       const Lead = (await import('../lead/lead.model.js')).default;
       const salesUsers = await User.find({ role: 'sales' }, '_id').lean();
-      const supportUsers = await User.find({ role: { $in: ['support', 'admin', 'manager'] } }, '_id').lean();
+      const supportUsers = await User.find({ role: { $ne: 'sales' } }, '_id').lean();
       const salesUserIds = salesUsers.map(u => u._id);
       const supportUserIds = supportUsers.map(u => u._id);
       
@@ -667,19 +815,64 @@ export async function getShipments(params) {
       const salesLeadIds = salesLeads.map(l => l._id);
       const supportLeadIds = supportLeads.map(l => l._id);
 
+      const salesVerifications = await Verification.find({ assignedTo: { $in: salesUserIds } }, '_id').lean();
+      const supportVerifications = await Verification.find({ assignedTo: { $in: supportUserIds } }, '_id').lean();
+      const salesVerificationIds = salesVerifications.map(v => v._id);
+      const supportVerificationIds = supportVerifications.map(v => v._id);
+
       baseFilter.$and = baseFilter.$and || [];
       if (status.includes('Sales') || status.includes('sales')) {
         baseFilter.$and.push({
           $or: [
-            { lead_id: { $in: salesLeadIds }, source_order_id: null },
-            { verified_by: { $in: salesUserIds }, source_order_id: { $ne: null } }
+            // Old orders
+            {
+              source_order_id: { $ne: null },
+              $or: [
+                { verified_by: { $in: salesUserIds } },
+                { verified_by: null, verification_id: { $in: salesVerificationIds } },
+                { verified_by: null, verification_id: null, lead_id: { $in: salesLeadIds } },
+                { verified_by: null, verification_id: null, lead_id: null, created_by: { $in: salesUserIds } }
+              ]
+            },
+            // New orders
+            {
+              source_order_id: null,
+              $or: [
+                { task_created_by: { $in: salesUserIds } },
+                { task_created_by: null, verified_by: { $in: salesUserIds } },
+                { task_created_by: null, verified_by: null, verification_id: { $in: salesVerificationIds } },
+                { task_created_by: null, verified_by: null, verification_id: null, lead_id: { $in: salesLeadIds } },
+                { task_created_by: null, verified_by: null, verification_id: null, lead_id: null, created_by: { $in: salesUserIds } }
+              ]
+            }
           ]
         });
       } else {
         baseFilter.$and.push({
           $or: [
-            { lead_id: { $in: supportLeadIds }, source_order_id: null },
-            { verified_by: { $in: supportUserIds }, source_order_id: { $ne: null } },
+            // Old orders
+            {
+              source_order_id: { $ne: null },
+              $or: [
+                { verified_by: { $in: supportUserIds } },
+                { verified_by: null, verification_id: { $in: supportVerificationIds } },
+                { verified_by: null, verification_id: null, lead_id: { $in: supportLeadIds } },
+                { verified_by: null, verification_id: null, lead_id: null, created_by: { $in: supportUserIds } },
+                { verified_by: null, verification_id: null, lead_id: null, created_by: null }
+              ]
+            },
+            // New orders
+            {
+              source_order_id: null,
+              $or: [
+                { task_created_by: { $in: supportUserIds } },
+                { task_created_by: null, verified_by: { $in: supportUserIds } },
+                { task_created_by: null, verified_by: null, verification_id: { $in: supportVerificationIds } },
+                { task_created_by: null, verified_by: null, verification_id: null, lead_id: { $in: supportLeadIds } },
+                { task_created_by: null, verified_by: null, verification_id: null, lead_id: null, created_by: { $in: supportUserIds } },
+                { task_created_by: null, verified_by: null, verification_id: null, lead_id: null, created_by: null }
+              ]
+            },
             { lead_id: { $exists: false } },
             { lead_id: null }
           ]
@@ -986,6 +1179,39 @@ export async function sendInteraktTemplateMessages({ items = [], filterParams = 
     excluded_count,
     errors,
     message: `Processed ${targetShipments.length} shipments: ${sent_count} sent, ${failed_count} failed, ${excluded_count} excluded.`
+  };
+}
+
+export async function createInvoiceHistory(data, userId) {
+  return await InvoiceHistory.findOneAndUpdate(
+    { billNumber: data.billNumber },
+    { ...data, generatedBy: userId },
+    { upsert: true, new: true, runValidators: true }
+  );
+}
+
+export async function getInvoiceHistory(params) {
+  const query = {};
+  if (params.orderId) query.orderId = params.orderId;
+  if (params.billNumber) query.billNumber = params.billNumber;
+  
+  const page = Math.max(1, parseInt(params.page) || 1);
+  const limit = Math.max(1, parseInt(params.limit) || 50);
+  const skip = (page - 1) * limit;
+
+  const total = await InvoiceHistory.countDocuments(query);
+  const invoices = await InvoiceHistory.find(query)
+    .populate('generatedBy', 'name email role')
+    .sort({ createdAt: -1 })
+    .skip(skip)
+    .limit(limit)
+    .lean();
+
+  return {
+    invoices,
+    total,
+    page,
+    pages: Math.ceil(total / limit)
   };
 }
 
