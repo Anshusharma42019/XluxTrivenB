@@ -54,14 +54,21 @@ const handleWebhook = catchAsync(async (req, res) => {
           } else if (msgObj.interactive?.button_reply?.title) {
             extractedText = `[Button Reply] ${msgObj.interactive.button_reply.title}`;
           }
-        } else if (msgObj?.type === 'image' || msgObj?.image) {
-          extractedText = '[Image Attached]';
-        } else if (msgObj?.type === 'audio' || msgObj?.audio) {
-          extractedText = '[Audio Attached]';
-        } else if (msgObj?.type === 'video' || msgObj?.video) {
-          extractedText = '[Video Attached]';
-        } else if (msgObj?.type === 'document' || msgObj?.document) {
-          extractedText = '[Document Attached]';
+        } else if (msgObj?.type === 'image' || msgObj?.image || msgObj?.message_content_type === 'Image') {
+          const mediaUrl = msgObj?.media_url || msgObj?.image?.link || msgObj?.image?.url || '';
+          const caption = msgObj?.message || msgObj?.image?.caption || '';
+          extractedText = mediaUrl ? `[Image: ${mediaUrl}]${caption ? ' ' + caption : ''}` : '[Image Attached]';
+        } else if (msgObj?.type === 'video' || msgObj?.video || msgObj?.message_content_type === 'Video') {
+          const mediaUrl = msgObj?.media_url || msgObj?.video?.link || msgObj?.video?.url || '';
+          const caption = msgObj?.message || msgObj?.video?.caption || '';
+          extractedText = mediaUrl ? `[Video: ${mediaUrl}]${caption ? ' ' + caption : ''}` : '[Video Attached]';
+        } else if (msgObj?.type === 'audio' || msgObj?.audio || msgObj?.message_content_type === 'Audio') {
+          const mediaUrl = msgObj?.media_url || msgObj?.audio?.link || msgObj?.audio?.url || '';
+          extractedText = mediaUrl ? `[Audio: ${mediaUrl}]` : '[Audio Attached]';
+        } else if (msgObj?.type === 'document' || msgObj?.document || msgObj?.message_content_type === 'Document') {
+          const mediaUrl = msgObj?.media_url || msgObj?.document?.link || msgObj?.document?.url || '';
+          const filename = msgObj?.document?.filename || '';
+          extractedText = mediaUrl ? `[Document: ${mediaUrl}]${filename ? ' ' + filename : ''}` : '[Document Attached]';
         } else if (msgObj?.type === 'location' || msgObj?.location) {
           extractedText = '[Location Attached]';
         } else if (msgObj?.type === 'contacts' || msgObj?.contacts) {
