@@ -640,15 +640,30 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
   }
 
   if (!isExport) {
+    const selectFields = isWhatsapp ? '-follow_ups' : '-notes -follow_ups';
     const [leads, total] = await Promise.all([
       Lead.find(pipeline[0].$match)
         .sort(sortCriteria).skip(skip).limit(limit)
-        .select('-notes -follow_ups')
+        .select(selectFields)
         .populate('assignedTo', 'name email role')
         .populate('createdBy', 'name email')
         .lean(),
       Lead.countDocuments(pipeline[0].$match)
     ]);
+
+    // For whatsapp view: trim notes to only direction+createdAt+text for performance
+    if (isWhatsapp) {
+      leads.forEach(lead => {
+        if (lead.notes && lead.notes.length > 0) {
+          lead.notes = lead.notes.slice(-20).map(n => ({
+            direction: n.direction,
+            createdAt: n.createdAt,
+            text: n.text ? n.text.substring(0, 80) : ''
+          }));
+        }
+      });
+    }
+
     return { leads, total, page, limit, totalPages: Math.ceil(total / limit) };
   } else {
     const leads = await Lead.find(pipeline[0].$match)

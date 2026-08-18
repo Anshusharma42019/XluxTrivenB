@@ -36,8 +36,17 @@ const checkIn = async (userId, body = {}) => {
     const now = new Date();
     existing.checkIn = now;
     existing.checkOut = null;
-    if (body.notes) {
-      existing.notes = existing.notes ? `${existing.notes} | ${body.notes}` : body.notes;
+    let recheckinNote = body.notes;
+    if (!recheckinNote) {
+      recheckinNote = 'Self Checkin';
+    } else if (!recheckinNote.includes('Checked in by Admin')) {
+      recheckinNote = `Self Checkin - ${recheckinNote}`;
+    }
+
+    if (existing.notes) {
+      existing.notes = `${existing.notes} | ${recheckinNote}`;
+    } else {
+      existing.notes = recheckinNote;
     }
     await existing.save();
     return existing;
@@ -58,11 +67,18 @@ const checkIn = async (userId, body = {}) => {
     status = 'late';
   }
 
+  let initialNote = body.notes;
+  if (!initialNote) {
+    initialNote = 'Self Checkin';
+  } else if (!initialNote.includes('Checked in by Admin')) {
+    initialNote = `Self Checkin - ${initialNote}`;
+  }
+
   const attendance = await Attendance.create({
     user: userId,
     date: today,
     checkIn: new Date(),
-    notes: body.notes || '',
+    notes: initialNote,
     checkInLocation: body.checkInLocation || '',
     status,
   });
@@ -101,7 +117,18 @@ const checkOut = async (userId, body = {}) => {
     attendance.sessionDuration = `${h}h ${m}m`;
   }
 
-  if (body.notes) attendance.notes = body.notes;
+  let newNote = body.notes;
+  if (!newNote) {
+    newNote = 'Self Checkout';
+  } else if (!newNote.includes('Checked out by Admin') && !newNote.includes('Auto Checked-out')) {
+    newNote = `Self Checkout - ${newNote}`;
+  }
+
+  if (attendance.notes) {
+    attendance.notes = `${attendance.notes} | ${newNote}`;
+  } else {
+    attendance.notes = newNote;
+  }
   await attendance.save();
 
   return attendance;
