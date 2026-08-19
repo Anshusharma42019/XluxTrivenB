@@ -48,8 +48,20 @@ const handleVerificationSync = async (task, userId) => {
     reminderAt: task.reminderAt,
     notes: task.notes,
   };
-  const existing = await Verification.findOne({ task: task._id }, '_id');
-  await Verification.findOneAndUpdate({ task: task._id }, record, { upsert: true, returnDocument: 'after' });
+  const existing = await Verification.findOne({ task: task._id }, '_id assignedTo');
+  
+  // For existing records: preserve the original assignedTo (closer's name).
+  // Only overwrite task metadata fields (address, price, etc.), NOT who owns the record.
+  if (existing) {
+    const { assignedTo: _drop, ...updateFields } = record;
+    await Verification.findOneAndUpdate(
+      { task: task._id },
+      { $set: updateFields },
+      { returnDocument: 'after' }
+    );
+  } else {
+    await Verification.findOneAndUpdate({ task: task._id }, record, { upsert: true, returnDocument: 'after' });
+  }
   await Cnp.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
   await ReadyToShipment.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
 

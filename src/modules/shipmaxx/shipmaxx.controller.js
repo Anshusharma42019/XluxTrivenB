@@ -723,13 +723,18 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
     // Active/in-progress statuses (OUT_FOR_DELIVERY, IN_TRANSIT, UNDELIVERED_*, etc.)
     // always show because they represent the current live state of the order.
     match.$or = [
-      // DELIVERED orders only
+      // DELIVERED orders: prefer delivered_at, fallback to status_updated_at, then createdAt
       { status: /^delivered$/i, delivered_at: dateFilter },
-      // RTO_DELIVERED orders separately
+      { status: /^delivered$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], status_updated_at: dateFilter },
+      { status: /^delivered$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], $and: [{ $or: [{ status_updated_at: { $exists: false } }, { status_updated_at: null }] }], createdAt: dateFilter },
+      // RTO_DELIVERED orders: same fallback logic
       { status: /^rto_delivered$/i, delivered_at: dateFilter },
+      { status: /^rto_delivered$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], status_updated_at: dateFilter },
       // Short codes
       { status: /^DEL$/i, delivered_at: dateFilter },
+      { status: /^DEL$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], status_updated_at: dateFilter },
       { status: /^RTD$/i, delivered_at: dateFilter },
+      { status: /^RTD$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], status_updated_at: dateFilter },
       // CANCELLED orders: date-filter by status_updated_at or createdAt
       { status: /^cancell?ed$/i, status_updated_at: dateFilter },
       { status: /^cancell?ed$/i, status_updated_at: { $exists: false }, createdAt: dateFilter },
@@ -740,10 +745,21 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
   }
 
   // Build a clean DELIVERED-only date query (independent of the main match $or)
-  const deliveredOnlyMatch = { platform: 'shipmaxx', status: /^delivered$/i };
+  // Fallback: if delivered_at is null/missing, use status_updated_at, then createdAt
+  let deliveredOnlyMatch;
   if (from && to) {
     const dateFilter = { $gte: new Date(from + 'T00:00:00.000+05:30'), $lte: new Date(to + 'T23:59:59.999+05:30') };
-    deliveredOnlyMatch.delivered_at = dateFilter;
+    deliveredOnlyMatch = {
+      platform: 'shipmaxx',
+      status: /^delivered$/i,
+      $or: [
+        { delivered_at: dateFilter },
+        { $and: [{ $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }] }, { status_updated_at: dateFilter }] },
+        { $and: [{ $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }] }, { $or: [{ status_updated_at: { $exists: false } }, { status_updated_at: null }] }, { createdAt: dateFilter }] },
+      ],
+    };
+  } else {
+    deliveredOnlyMatch = { platform: 'shipmaxx', status: /^delivered$/i };
   }
 
   const [deliveredCountResult, statusBreakdown, revenueAggregation] = await Promise.all([
@@ -808,8 +824,12 @@ export const getStatusOrders = catchAsync(async (req, res) => {
     };
     
     if (/^(delivered|rto_delivered|DEL|RTO|RTD)$/i.test(queryStatus)) {
-      // Terminal status: apply date filter on delivered_at only
-      match.delivered_at = dateFilter;
+      // Terminal status: prefer delivered_at, fallback to status_updated_at, then createdAt
+      match.$or = [
+        { delivered_at: dateFilter },
+        { $and: [{ $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }] }, { status_updated_at: dateFilter }] },
+        { $and: [{ $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }] }, { $or: [{ status_updated_at: { $exists: false } }, { status_updated_at: null }] }, { createdAt: dateFilter }] },
+      ];
     } else if (/^cancell?ed$/i.test(queryStatus)) {
       // Cancelled: apply date filter
       match.$or = [
@@ -1159,7 +1179,8 @@ export const runSyncInBackground = async (mode = 'quick') => {
         if (orders.length === 0) break;
         for (const o of orders) {
           if (!o.order_id) continue;
-          const ud = { platform: 'shipmaxx', billing_customer_name: o.customer_name || '', billing_phone: o.phone || '', billing_address: o.address || '', billing_pincode: o.billing_zip || o.shipping_zip || '', sub_total: Number(o.total_price) || 0 };
+          const cCust = o.customer || o.billing_address || {};
+          const ud = { platform: 'shipmaxx', billing_customer_name: o.customer_name || cCust.name || cCust.first_name || '', billing_phone: o.phone || cCust.phone || '', billing_address: o.address || cCust.address || '', billing_pincode: o.billing_zip || o.shipping_zip || cCust.zip || cCust.pincode || '', sub_total: Number(o.total_price || (o.totals?.find?.(t => t.code === 'total')?.value)) || 0 };
           const c = o.carrier_name || o.courier_name || o.carrier; if (c) ud.courier_name = c;
           if (o.created_at) ud.createdAt = new Date(o.created_at); if (o.awb) ud.awb_code = String(o.awb);
           if (o.status) {
@@ -1189,13 +1210,23 @@ export const runSyncInBackground = async (mode = 'quick') => {
 
     // Missing details
     try {
-      const missing = await Order.find({ platform: 'shipmaxx', order_id: { $exists: true, $ne: '' }, $or: [{ billing_address: { $in: [null, '', '-'] } }, { billing_address: { $exists: false } }, { billing_city: { $in: [null, '', '-'] } }, { billing_city: { $exists: false } }] }).select('order_id').lean().limit(30);
+      const missing = await Order.find({ platform: 'shipmaxx', order_id: { $exists: true, $ne: '' }, $or: [{ billing_address: { $in: [null, '', '-'] } }, { billing_address: { $exists: false } }, { billing_city: { $in: [null, '', '-'] } }, { billing_city: { $exists: false } }, { billing_customer_name: { $in: [null, '', '-'] } }, { billing_customer_name: { $exists: false } }] }).select('order_id').lean().limit(50);
       for (const o of missing) {
         if (isTimedOut()) break;
-        try { const raw = await smx.getOrder(o.order_id); const d = raw?.data || raw || {};
-          if (d.customer || d.billing_address || d.shipping_address) {
-            const u = { billing_address: d.address || d.billing_address?.address || d.customer?.address || '', billing_city: d.city || d.billing_address?.city || d.customer?.city || '', billing_state: d.state || d.billing_address?.state || d.customer?.state || '', billing_pincode: d.billing_zip || d.shipping_zip || d.billing_address?.zip || d.customer?.zip || '', sub_total: Number(d.total_price || d.totals?.find(t => t.code === 'total')?.value) || 0 };
+        try { const raw = await smx.getOrder(o.order_id); const d = raw?.data?.order || raw?.data || raw || {};
+          if (d.billing_customer_name || d.shipping_customer_name || d.customer || d.billing_address || d.shipping_address) {
+            const u = { 
+              billing_customer_name: d.billing_customer_name || d.shipping_customer_name || d.customer_name || d.customer?.name || d.billing_address?.name || '', 
+              billing_phone: d.billing_phone || d.shipping_phone || d.phone || d.customer?.phone || d.billing_address?.phone || '', 
+              billing_address: d.billing_address || d.shipping_address || d.address || d.billing_address?.address || d.customer?.address || '', 
+              billing_city: d.billing_city || d.shipping_city || d.city || d.billing_address?.city || d.customer?.city || '', 
+              billing_state: d.billing_state || d.shipping_state || d.state || d.billing_address?.state || d.customer?.state || '', 
+              billing_pincode: d.billing_pincode || d.shipping_pincode || d.billing_zip || d.shipping_zip || d.billing_address?.zip || d.customer?.zip || '', 
+              sub_total: Number(d.sub_total || d.total_price || d.totals?.find(t => t.code === 'total')?.value) || 0 
+            };
             if (d.products?.length > 0) u.order_items = d.products.map(p => ({ name: p.name || 'Product', sku: p.sku || '', units: Number(p.quantity) || 1, selling_price: Number(p.price || p.selling_price) || 0 }));
+            // Remove empty fields to avoid overwriting existing valid data with blanks
+            Object.keys(u).forEach(k => { if (u[k] === '' || u[k] === null || u[k] === undefined) delete u[k]; });
             await Order.updateWithTransaction({ _id: o._id }, { $set: u });
           }
         } catch (e) {}

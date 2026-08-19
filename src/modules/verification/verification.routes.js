@@ -90,6 +90,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
     const total = await Verification.countDocuments(query);
     const records = await Verification.find(query)
       .populate('assignedTo', 'name email departments')
+      .populate('verifiedBy', 'name email')
       .populate({
         path: 'lead',
         select: 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem department createdBy pending_reorder_source',
@@ -320,7 +321,9 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'support'), departmentFil
             filter: { task: task._id },
             update: {
               $set: {
-                title: task.title, assignedTo: task.assignedTo, lead: task.lead,
+                // NOTE: assignedTo is intentionally excluded here to preserve the original
+                // closer's name. Only metadata/content fields are synced.
+                title: task.title, lead: task.lead,
                 age: task.age, weight: task.weight, height: task.height, price: task.price,
                 problem: task.problem, otherProblems: task.otherProblems,
                 problemDuration: task.problemDuration, description: task.description,
@@ -454,6 +457,7 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
     // Get verification on-hold records
     const verificationRecords = await Verification.find(query)
       .populate('assignedTo', 'name email departments')
+      .populate('verifiedBy', 'name email')
       .populate({
         path: 'lead',
         select: 'name phone status onHoldReason onHoldUntil address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem createdBy pending_reorder_source',
@@ -603,20 +607,27 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
     const recordBefore = await Verification.findById(req.params.id);
     if (!recordBefore) return res.status(404).json({ message: 'Not found' });
 
-    const { status, onHoldUntil, onHoldReason, ...taskFields } = req.body;
+    const { status, onHoldUntil, onHoldReason, assignedTo: incomingAssignedTo, ...taskFields } = req.body;
     const update = { ...taskFields };
+
+    // assignedTo: only admin can explicitly change it (via assign modal).
+    // For all other updates (price, address, etc.) preserve the original owner.
+    if (incomingAssignedTo && req.user.role === 'admin') {
+      update.assignedTo = incomingAssignedTo;
+    }
+
     if (status) {
       update.status = status;
       if (status === 'verified') {
-        // NAYA RULE: Jisne lead ko Verification me laya tha (assignedTo), 100% credit usi ka hoga!
-        // Button koi bhi dabaye, original owner change nahi hoga.
+        // Jo bhi verification me laya tha (assignedTo) — usi ko 100% credit.
+        // Button koi bhi dabaye, original owner ka verifiedBy set hoga.
         update.verifiedBy = recordBefore.assignedTo || req.user._id;
-        
+        // Agar koi owner hi nahi tha, to verify karne wala hi owner ban jaaye
         if (!recordBefore.assignedTo && !update.assignedTo) {
           update.assignedTo = req.user._id;
         }
       } else if (!update.assignedTo && !recordBefore.assignedTo) {
-        // For non-verified status changes: only assign if no owner exists yet
+        // Pehli baar koi action le raha hai aur koi owner nahi — use hi assign karo
         update.assignedTo = req.user._id;
       }
     }
@@ -628,7 +639,10 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
       req.params.id,
       update,
       { returnDocument: 'after' }
-    ).populate('assignedTo', 'name email').populate('lead', 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem createdBy assignedTo pending_reorder_source');
+    )
+      .populate('assignedTo', 'name email')
+      .populate('verifiedBy', 'name email')
+      .populate('lead', 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem createdBy assignedTo pending_reorder_source');
     if (!record) return res.status(404).json({ message: 'Not found' });
 
     const Task = (await import('../task/task.model.js')).default;

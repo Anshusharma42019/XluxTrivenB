@@ -66,7 +66,10 @@ async function getStaffScope(staffId) {
 async function buildOrderFilter(start, end, { hub, courier, awb, state, staffId, staffScope } = {}) {
   const f = { createdAt: { $gte: start, $lte: end } };
   if (courier) f.courier_name    = { $regex: courier, $options: 'i' };
-  if (awb)     f.awb_code        = { $regex: awb,     $options: 'i' };
+  if (awb) {
+    f.awb_code = { $regex: awb, $options: 'i' };
+    delete f.createdAt;
+  }
   if (hub)     f.pickup_location = { $regex: hub,     $options: 'i' };
   if (state)   f.billing_state   = { $regex: state,   $options: 'i' };
 
