@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import mongoose from 'mongoose';
 import { ShipmaxxOrder as Order } from './models/shipmaxxOrder.model.js';
 import smx from './shipmaxx.service.js';
-import { normalizeShipmaxxStatus, parseShipMaxxDate, extractStatusUpdatedAt } from './shipmaxx.controller.js';
+import { normalizeShipmaxxStatus, parseShipMaxxDate, extractStatusUpdatedAt, setAutoFollowUps } from './shipmaxx.controller.js';
 import { generateReorderCommissions } from '../shiprocket/shiprocket.controller.js';
 import { Lead } from '../lead/lead.model.js';
 import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
@@ -254,26 +254,12 @@ export const runCronSync = async () => {
           }
           await Order.updateWithTransaction({ _id: o._id }, { $set: update }).catch(() => {});
 
-          // ── Real-time WhatsApp on first DELIVERED detection ──────────────────
+          // ── Real-time WhatsApp + Followups on first DELIVERED detection ──────
           if (status === 'DELIVERED' && o.status !== 'DELIVERED') {
-            const templateName = process.env.INTERAKT_1ST_FOLLOWUP_TEMPLATE;
-            if (templateName && o.billing_phone) {
-              // Check if 1st followup already messaged (avoid duplicate if auto-set already fired)
-              const fu1 = await Followup.findOne({ order_id: String(o._id), followup_number: 1 }).select('auto_message_sent').lean();
-              if (!fu1 || !fu1.auto_message_sent) {
-                // Mark it immediately to prevent cron sending duplicate
-                await Followup.findOneAndUpdate(
-                  { order_id: String(o._id), followup_number: 1 },
-                  { $set: { auto_message_sent: true } }
-                );
-                sendWhatsAppMessage({
-                  phone: o.billing_phone,
-                  templateName,
-                  languageCode: 'en',
-                  bodyValues: [o.billing_customer_name || 'Customer']
-                }).then(() => console.log(`[ShipMaxx Cron] ✅ 1st followup WA sent to ${o.billing_phone}`))
-                  .catch(err => console.error('[ShipMaxx Cron] WA error:', err.message));
-              }
+            if (!o.auto_followups_set) {
+              await setAutoFollowUps(o._id, update.delivered_at || new Date()).catch(err => {
+                console.error('[ShipMaxx Cron] Failed to set auto followups:', err.message);
+              });
             }
           }
 

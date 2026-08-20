@@ -990,7 +990,13 @@ const setAutoFollowUps = async (orderId, deliveredAt) => {
           templateName,
           languageCode: 'en',
           bodyValues: [order.billing_customer_name || 'Customer']
-        }).catch(err => console.error('[Shiprocket] Real-time 1st followup WA error:', err.message));
+        }).catch(async (err) => {
+          console.error('[Shiprocket] Real-time 1st followup WA error:', err.message);
+          await Followup.updateOne(
+            { order_id: orderId, followup_number: 1 },
+            { $set: { auto_message_sent: false } }
+          ).catch(() => {});
+        });
         console.log(`[Shiprocket] 1st followup WA message sent to ${order.billing_phone}`);
       }
     } catch (err) {

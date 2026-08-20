@@ -79,7 +79,7 @@ const guessCourierByAwb = (awb) => {
   return '';
 };
 
-const setAutoFollowUps = async (orderId, deliveredAt) => {
+export const setAutoFollowUps = async (orderId, deliveredAt) => {
   const total = DEFAULT_FOLLOWUP_TOTAL;
   const gap   = DEFAULT_FOLLOWUP_GAP_DAYS;
   const base  = new Date(deliveredAt);
@@ -114,7 +114,13 @@ const setAutoFollowUps = async (orderId, deliveredAt) => {
           templateName,
           languageCode: 'en',
           bodyValues: [order.billing_customer_name || 'Customer']
-        }).catch(err => console.error('[ShipMaxx] Real-time 1st followup WA error:', err.message));
+        }).catch(async (err) => {
+          console.error('[ShipMaxx] Real-time 1st followup WA error:', err.message);
+          await Followup.updateOne(
+            { order_id: orderId, followup_number: 1 },
+            { $set: { auto_message_sent: false } }
+          ).catch(() => {});
+        });
         console.log(`[ShipMaxx] 1st followup WA message sent to ${order.billing_phone}`);
       }
     } catch (err) {
@@ -2221,7 +2227,13 @@ export const shipmaxxWebhook = catchAsync(async (req, res) => {
             languageCode: 'en',
             bodyValues: [updated.billing_customer_name || 'Customer']
           }).then(() => console.log(`[ShipMaxx Webhook] ✅ WA sent to ${updated.billing_phone}`))
-            .catch(err => console.error('[ShipMaxx Webhook] WA error:', err.message));
+            .catch(async (err) => {
+              console.error('[ShipMaxx Webhook] WA error:', err.message);
+              await Followup.findOneAndUpdate(
+                { order_id: String(updated._id), followup_number: 1 },
+                { $set: { auto_message_sent: false } }
+              ).catch(() => {});
+            });
         }
       }
     }
