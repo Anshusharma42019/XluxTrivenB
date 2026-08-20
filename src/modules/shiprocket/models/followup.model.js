@@ -13,6 +13,7 @@ const followupSchema = new mongoose.Schema({
   notes: { type: String, default: '' },
   note: { type: String, default: '' },
   relief_percentage: { type: Number, default: null },
+  auto_message_sent: { type: Boolean, default: false },
 }, { timestamps: true });
 
 followupSchema.index({ order_id: 1, followup_number: 1 }, { unique: true });

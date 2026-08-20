@@ -17,6 +17,7 @@ import Task from '../task/task.model.js';
 import Verification from '../verification/verification.model.js';
 import FollowupCommissionSettings from '../commission/followupCommissionSettings.model.js';
 import ReorderCommission from '../commission/reorderCommission.model.js';
+import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
 
 const DEFAULT_FOLLOWUP_TOTAL = 5;
 const DEFAULT_FOLLOWUP_GAP_DAYS = 6;
@@ -956,21 +957,46 @@ const setAutoFollowUps = async (orderId, deliveredAt) => {
   const total = Number(settings.total_followups) || DEFAULT_FOLLOWUP_TOTAL;
   const gap = Number(settings.followup_gap_days) || DEFAULT_FOLLOWUP_GAP_DAYS;
   const base = new Date(deliveredAt);
+  const templateName = process.env.INTERAKT_1ST_FOLLOWUP_TEMPLATE;
+
   const ops = Array.from({ length: total }, (_, i) => {
     const scheduled_date = new Date(base);
     scheduled_date.setDate(scheduled_date.getDate() + (i + 1) * gap);
     const next_followup_date = i + 1 < total ? new Date(base) : null;
     if (next_followup_date) next_followup_date.setDate(next_followup_date.getDate() + (i + 2) * gap);
+    const insertDoc = { order_id: orderId, followup_number: i + 1, scheduled_date, next_followup_date, completed: false, status: 'scheduled' };
+    // Mark 1st followup as already messaged so cron doesn't send again
+    if (i === 0 && templateName) insertDoc.auto_message_sent = true;
     return {
       updateOne: {
         filter: { order_id: orderId, followup_number: i + 1 },
-        update: { $setOnInsert: { order_id: orderId, followup_number: i + 1, scheduled_date, next_followup_date, completed: false, status: 'scheduled' } },
+        update: { $setOnInsert: insertDoc },
         upsert: true,
       },
     };
   });
-  await Followup.bulkWrite(ops);
+
+  const bulkResult = await Followup.bulkWrite(ops);
   await Order.findByIdAndUpdate(orderId, { auto_followups_set: true });
+
+  // Only send WA if the 1st followup was actually newly inserted (not pre-existing)
+  const was1stInserted = bulkResult.upsertedIds && bulkResult.upsertedIds[0] !== undefined;
+  if (templateName && was1stInserted) {
+    try {
+      const order = await Order.findById(orderId).select('billing_phone billing_customer_name').lean();
+      if (order && order.billing_phone) {
+        sendWhatsAppMessage({
+          phone: order.billing_phone,
+          templateName,
+          languageCode: 'en',
+          bodyValues: [order.billing_customer_name || 'Customer']
+        }).catch(err => console.error('[Shiprocket] Real-time 1st followup WA error:', err.message));
+        console.log(`[Shiprocket] 1st followup WA message sent to ${order.billing_phone}`);
+      }
+    } catch (err) {
+      console.error('[Shiprocket] setAutoFollowUps WA send error:', err.message);
+    }
+  }
 };
 
 export const completeFollowUp = catchAsync(async (req, res) => {
@@ -2333,5 +2359,12 @@ export const createManualFollowup = catchAsync(async (req, res) => {
 
   await Followup.insertMany(followups);
 
-  res.json({ status: 200, message: 'Manual followup added successfully', data: newOrder });
+  res.json(new ApiResponse(201, newOrder, 'Manual follow-up added successfully'));
+});
+
+export const readReply = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  const order = await Order.findByIdAndUpdate(id, { interakt_reply_read: true }, { new: true });
+  if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
+  res.json(new ApiResponse(200, order, 'Reply marked as read'));
 });

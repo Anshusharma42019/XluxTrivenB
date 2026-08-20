@@ -316,6 +316,7 @@ router.post('/orders/sync', auth(), c.syncShipmaxx);
 router.post('/orders/import', auth(), c.importOrders);
 router.post('/orders/import-by-ids', auth(), c.importByIds);
 router.post('/orders/manual-followup', auth(), c.createManualFollowup);
+router.patch('/orders/:id/read-reply', auth(), c.readReply);
 
 router.get('/orders/:order_id', auth(), c.getOrder);
 router.put('/orders/:order_id', auth(), c.updateOrder);
@@ -331,6 +332,7 @@ router.patch('/orders/:id/followup-relief', auth(), c.updateFollowupRelief);
 router.patch('/orders/:id/contact', auth(), c.updateOrderContact);
 router.get('/orders/:id/activity', auth(), c.getOrderActivity);
 router.post('/orders/:id/send-to-verification', auth(), c.sendToVerification);
+router.patch('/orders/:id/read-reply', auth(), c.readReply);
 
 // ── Shipping ──────────────────────────────────────────────────────────────────
 router.post('/shipping/create-shipment', auth(), c.createShipment);

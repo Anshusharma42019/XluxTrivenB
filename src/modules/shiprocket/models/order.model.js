@@ -79,6 +79,7 @@ const orderSchema = new mongoose.Schema({
   rto_verification_action: { type: String, enum: ['wants_again', 'no_need'], default: null },
   interakt_reply_text: { type: String, default: null, index: true },
   interakt_reply_at: { type: Date, default: null },
+  interakt_reply_read: { type: Boolean, default: false },
   raw_response: mongoose.Schema.Types.Mixed,
 }, { timestamps: true });
 

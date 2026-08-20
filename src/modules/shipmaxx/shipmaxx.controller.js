@@ -13,6 +13,7 @@ import { Lead } from '../lead/lead.model.js';
 import Task from '../task/task.model.js';
 import Verification from '../verification/verification.model.js';
 import { getNextOrderId } from '../shiprocket/counter/counter.model.js';
+import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
 
 const DEFAULT_FOLLOWUP_TOTAL = 5;
 const DEFAULT_FOLLOWUP_GAP_DAYS = 6;
@@ -82,19 +83,44 @@ const setAutoFollowUps = async (orderId, deliveredAt) => {
   const total = DEFAULT_FOLLOWUP_TOTAL;
   const gap   = DEFAULT_FOLLOWUP_GAP_DAYS;
   const base  = new Date(deliveredAt);
+  const templateName = process.env.INTERAKT_1ST_FOLLOWUP_TEMPLATE;
+
   const ops = Array.from({ length: total }, (_, i) => {
     const scheduled_date = new Date(base);
     scheduled_date.setDate(scheduled_date.getDate() + (i * gap)); // 1st call on day 0, 2nd on day 6, etc.
+    const insertDoc = { order_id: orderId, followup_number: i + 1, scheduled_date, status: 'scheduled', completed: false };
+    // Mark 1st followup as already messaged so cron doesn't send again
+    if (i === 0 && templateName) insertDoc.auto_message_sent = true;
     return {
       updateOne: {
         filter: { order_id: orderId, followup_number: i + 1 },
-        update: { $setOnInsert: { order_id: orderId, followup_number: i + 1, scheduled_date, status: 'scheduled', completed: false } },
+        update: { $setOnInsert: insertDoc },
         upsert: true,
       },
     };
   });
-  await Followup.bulkWrite(ops);
+
+  const bulkResult = await Followup.bulkWrite(ops);
   await Order.findByIdAndUpdate(orderId, { auto_followups_set: true });
+
+  // Only send WA if the 1st followup was actually newly inserted (not pre-existing)
+  const was1stInserted = bulkResult.upsertedIds && bulkResult.upsertedIds[0] !== undefined;
+  if (templateName && was1stInserted) {
+    try {
+      const order = await Order.findById(orderId).select('billing_phone billing_customer_name').lean();
+      if (order && order.billing_phone) {
+        sendWhatsAppMessage({
+          phone: order.billing_phone,
+          templateName,
+          languageCode: 'en',
+          bodyValues: [order.billing_customer_name || 'Customer']
+        }).catch(err => console.error('[ShipMaxx] Real-time 1st followup WA error:', err.message));
+        console.log(`[ShipMaxx] 1st followup WA message sent to ${order.billing_phone}`);
+      }
+    } catch (err) {
+      console.error('[ShipMaxx] setAutoFollowUps WA send error:', err.message);
+    }
+  }
 };
 
 // Helper to safely parse ShipMaxx timestamps which might be in DD-MM-YYYY HH:mm:ss format
@@ -1675,6 +1701,7 @@ export const completeFollowUp = catchAsync(async (req, res) => {
   current.staff = req.user?._id;
   current.followup_date = new Date();
   current.completed_at = new Date();
+
   if (req.body?.note) { current.note = req.body.note; current.notes = req.body.note; }
   if (current.followup_number >= total) await Order.findByIdAndUpdate(id, { followup_done: true });
   await current.save();
@@ -2102,4 +2129,106 @@ export const debugBackfillDelivered = catchAsync(async (req, res) => {
     }
   }
   res.json({ checked: orders.length, fixed });
+});
+
+export const readReply = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  const order = await Order.findByIdAndUpdate(id, { interakt_reply_read: true }, { new: true });
+  if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
+  res.json(new ApiResponse(200, order, 'Reply marked as read'));
+});
+
+/**
+ * ShipMaxx Webhook Handler
+ * ShipMaxx calls this URL when order status changes.
+ * Set this URL in ShipMaxx panel: https://yourdomain.com/webhook/shipmaxx
+ *
+ * Expected payload fields (ShipMaxx may vary):
+ *   awb, order_id, status (or current_status), timestamp
+ */
+export const shipmaxxWebhook = catchAsync(async (req, res) => {
+  // Acknowledge immediately so ShipMaxx doesn't retry
+  res.json({ success: true });
+
+  const payload = req.body;
+  console.log('[ShipMaxx Webhook] Received:', JSON.stringify(payload).substring(0, 300));
+
+  // Extract fields — ShipMaxx uses various field names
+  const rawStatus = payload.status || payload.current_status || payload.shipment_status || payload.delivery_status || '';
+  const awb       = payload.awb || payload.awb_code || payload.tracking_number || '';
+  const orderId   = payload.order_id ? String(payload.order_id) : '';
+  const phone     = payload.phone || payload.customer_phone || payload.billing_phone || '';
+  const name      = payload.customer_name || payload.name || '';
+  const eventDate = payload.timestamp || payload.updated_at || payload.date ? new Date(payload.timestamp || payload.updated_at || payload.date) : new Date();
+
+  if (!rawStatus || (!awb && !orderId)) {
+    console.log('[ShipMaxx Webhook] Missing status/awb/orderId — ignoring');
+    return;
+  }
+
+  const status = normalizeShipmaxxStatus(rawStatus);
+
+  // Find existing order
+  const query = [];
+  if (orderId) query.push({ order_id: orderId, platform: 'shipmaxx' });
+  if (awb)     query.push({ awb_code: awb, platform: 'shipmaxx' });
+  if (!query.length) return;
+
+  const existing = await Order.findOne({ $or: query }).lean();
+
+  const update = { status, status_updated_at: eventDate };
+  if (awb) update.awb_code = awb;
+  if (phone && !existing?.billing_phone) update.billing_phone = phone;
+  if (name && !existing?.billing_customer_name) update.billing_customer_name = name;
+
+  if (status === 'DELIVERED') {
+    update.delivered_at = eventDate;
+  }
+
+  // Upsert the order
+  const updated = await Order.findOneAndUpdate(
+    query.length === 1 ? query[0] : { $or: query },
+    { $set: update },
+    { returnDocument: 'after', upsert: false }
+  );
+
+  if (!updated) {
+    console.log('[ShipMaxx Webhook] Order not found in DB for', { orderId, awb });
+    return;
+  }
+
+  // ── DELIVERED: send WhatsApp + set followups ──────────────────────────────
+  if (status === 'DELIVERED' && existing?.status !== 'DELIVERED') {
+    console.log('[ShipMaxx Webhook] Order newly DELIVERED:', updated.order_id);
+
+    // Set followups if not already set — this also sends WA message
+    if (!updated.auto_followups_set) {
+      await setAutoFollowUps(updated._id, eventDate);
+    } else {
+      // Followups already set but maybe WA not sent — check and send
+      const templateName = process.env.INTERAKT_1ST_FOLLOWUP_TEMPLATE;
+      if (templateName && updated.billing_phone) {
+        const fu1 = await Followup.findOne({ order_id: String(updated._id), followup_number: 1 })
+          .select('auto_message_sent').lean();
+        if (!fu1 || !fu1.auto_message_sent) {
+          await Followup.findOneAndUpdate(
+            { order_id: String(updated._id), followup_number: 1 },
+            { $set: { auto_message_sent: true } }
+          );
+          sendWhatsAppMessage({
+            phone: updated.billing_phone,
+            templateName,
+            languageCode: 'en',
+            bodyValues: [updated.billing_customer_name || 'Customer']
+          }).then(() => console.log(`[ShipMaxx Webhook] ✅ WA sent to ${updated.billing_phone}`))
+            .catch(err => console.error('[ShipMaxx Webhook] WA error:', err.message));
+        }
+      }
+    }
+
+    // Update lead status
+    if (updated.lead_id) {
+      Lead.findByIdAndUpdate(updated.lead_id, { status: 'follow_up' }).catch(() => {});
+    }
+  }
 });

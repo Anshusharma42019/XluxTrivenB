@@ -6,6 +6,7 @@ import { errorConverter, errorHandler } from "./middleware/error.js";
 import ApiError from "./utils/ApiError.js";
 import routes from "./routes/index.js";
 import { webhook } from "./modules/shiprocket/shiprocket.controller.js";
+import { shipmaxxWebhook } from "./modules/shipmaxx/shipmaxx.controller.js";
 import { cacheInvalidatorMiddleware } from "./middleware/cache.js";
 
 const app = express();
@@ -66,6 +67,10 @@ app.get("/", (req, res) => res.json({
 
 // Shiprocket webhook (no auth — Shiprocket calls this directly)
 app.post("/webhook/shiprocket", webhook);
+
+// ShipMaxx webhook (no auth — ShipMaxx calls this directly)
+// Set this URL in ShipMaxx panel: https://xluxtriven.de/webhook/shipmaxx
+app.post("/webhook/shipmaxx", shipmaxxWebhook);
 
 // v1 api routes
 app.use(cacheInvalidatorMiddleware);

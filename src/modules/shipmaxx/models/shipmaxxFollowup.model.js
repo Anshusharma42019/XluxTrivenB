@@ -13,7 +13,8 @@ const shipmaxxFollowupSchema = new mongoose.Schema({
   notes: { type: String, default: '' },
   note: String,
   relief_percentage: { type: Number, default: null },
-  type: { type: String, enum: ['automatic', 'manual'], default: 'automatic' }
+  type: { type: String, enum: ['automatic', 'manual'], default: 'automatic' },
+  auto_message_sent: { type: Boolean, default: false }
 }, { timestamps: true });
 
 export const ShipmaxxFollowup = mongoose.model('ShipmaxxFollowup', shipmaxxFollowupSchema);

@@ -39,6 +39,7 @@ router.patch('/orders/:id/notes', auth(), c.saveOrderNote);
 router.patch('/orders/:id/contact', auth(), c.updateOrderContact);
 router.get('/orders/:id/activity', auth(), c.getOrderActivity);
 router.post('/orders/:id/send-to-verification', auth(), c.sendToVerification);
+router.patch('/orders/:id/read-reply', auth(), c.readReply);
 router.post('/orders/manual-followup', auth(), c.createManualFollowup);
 
 // ── Courier ───────────────────────────────────────────────────────────────────
