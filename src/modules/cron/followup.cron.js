@@ -9,13 +9,17 @@ const processFollowups = async () => {
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
 
+  // Look back 3 days to catch up on missed followups (e.g., due to local dev system shutdowns over nights/weekends)
+  const catchUpStart = new Date(todayStart);
+  catchUpStart.setDate(catchUpStart.getDate() - 3);
+
   const todayEnd = new Date();
   todayEnd.setHours(23, 59, 59, 999);
 
   // Shiprocket
   const srFollowups = await ShiprocketFollowup.find({
     followup_number: { $in: [1, 2, 3, 4, 5] },
-    scheduled_date: { $gte: todayStart, $lte: todayEnd },
+    scheduled_date: { $gte: catchUpStart, $lte: todayEnd },
     completed: false,
     auto_message_sent: { $ne: true }
   });
@@ -49,7 +53,7 @@ const processFollowups = async () => {
   // Shipmaxx
   const smxFollowups = await ShipmaxxFollowup.find({
     followup_number: { $in: [1, 2, 3, 4, 5] },
-    scheduled_date: { $gte: todayStart, $lte: todayEnd },
+    scheduled_date: { $gte: catchUpStart, $lte: todayEnd },
     completed: false,
     auto_message_sent: { $ne: true }
   });
