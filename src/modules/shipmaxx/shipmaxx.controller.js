@@ -1619,6 +1619,7 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
   };
 
   const delivered = await Order.find(query)
+    .select('-raw_response')
     .populate({ path: 'lead_id', select: 'assignedTo createdBy status problem note', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'createdBy', select: 'name role' }] })
     .populate('created_by', 'name role')
     .sort({ delivered_at: -1, createdAt: -1 }).lean();
@@ -1844,14 +1845,16 @@ export const getOrderActivity = catchAsync(async (req, res) => {
     .select('comments notes order_id billing_customer_name status createdAt')
     .populate('comments.createdBy', 'name role').lean();
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
-  const activity = (order.comments || []).map(c => ({
-    _id: c._id,
-    type: c.type || 'general',
-    title: c.type === 'followup' ? 'Follow-up Note' : 'Note Added',
-    description: c.text || '',
-    actor: c.createdBy,
-    createdAt: c.createdAt,
-  }));
+  const activity = (order.comments || [])
+    .filter(c => !c.text?.startsWith('[WhatsApp Reply]'))
+    .map(c => ({
+      _id: c._id,
+      type: c.type || 'general',
+      title: c.type === 'followup' ? 'Follow-up Note' : 'Note Added',
+      description: c.text || '',
+      actor: c.createdBy,
+      createdAt: c.createdAt,
+    }));
   res.json(new ApiResponse(200, activity, 'Activity fetched'));
 });
 

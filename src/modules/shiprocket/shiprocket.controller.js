@@ -1084,14 +1084,16 @@ export const getOrderActivity = catchAsync(async (req, res) => {
     .populate('comments.createdBy', 'name role')
     .lean();
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
-  const activity = (order.comments || []).map(c => ({
-    _id: c._id,
-    type: c.type || 'general',
-    title: c.type === 'followup' ? 'Follow-up Note' : 'Note Added',
-    description: c.text || '',
-    actor: c.createdBy,
-    createdAt: c.createdAt,
-  }));
+  const activity = (order.comments || [])
+    .filter(c => !c.text?.startsWith('[WhatsApp Reply]'))
+    .map(c => ({
+      _id: c._id,
+      type: c.type || 'general',
+      title: c.type === 'followup' ? 'Follow-up Note' : 'Note Added',
+      description: c.text || '',
+      actor: c.createdBy,
+      createdAt: c.createdAt,
+    }));
   res.json(new ApiResponse(200, activity, 'Activity fetched'));
 });
 

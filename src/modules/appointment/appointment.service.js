@@ -34,12 +34,6 @@ export const getDoctorBookedSlots = async (date, doctorName) => {
 };
 
 export const createAppointment = async (body, userId) => {
-  const { doctorName, appointmentDate, timeSlot } = body;
-  const dateStr = new Date(appointmentDate).toISOString().split('T')[0];
-  const bookedDoctors = await getDoctorAvailability(dateStr, timeSlot);
-  if (bookedDoctors.includes(doctorName)) {
-    throw new ApiError(400, `Dr. ${doctorName} already has an appointment within 10 minutes of this time. Please choose a different time or doctor.`);
-  }
   return Appointment.create({ ...body, createdBy: userId });
 };
 
