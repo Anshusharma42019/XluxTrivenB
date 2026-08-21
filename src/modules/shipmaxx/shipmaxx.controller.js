@@ -14,6 +14,7 @@ import Task from '../task/task.model.js';
 import Verification from '../verification/verification.model.js';
 import { getNextOrderId } from '../shiprocket/counter/counter.model.js';
 import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
+import * as leadService from '../lead/lead.service.js';
 
 const DEFAULT_FOLLOWUP_TOTAL = 5;
 const DEFAULT_FOLLOWUP_GAP_DAYS = 6;

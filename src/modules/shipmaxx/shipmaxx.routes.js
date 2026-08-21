@@ -5,6 +5,7 @@ import { ShipmaxxOrder as Order } from './models/shipmaxxOrder.model.js';
 import Verification from '../verification/verification.model.js';
 import { Lead } from '../lead/lead.model.js';
 import catchAsync from '../../utils/catchAsync.js';
+import * as leadService from '../lead/lead.service.js';
 
 const router = express.Router();
 

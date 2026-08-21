@@ -1,4 +1,4 @@
- import Attendance from './attendance.model.js';
+import Attendance from './attendance.model.js';
 import ApiError from '../../utils/ApiError.js';
 
 /**
