@@ -22,33 +22,37 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
 // enable cors
 const allowedOrigins = [
-  'http://localhost:3000', 
-  'http://localhost:5173', 
+  'http://localhost:3000',
+  'http://localhost:5173',
   'http://localhost:5174',
+  'http://localhost:5000',
   'http://127.0.0.1:5500',
   'http://localhost:5500',
-  'https://triven-backend.vercel.app',
-  'https://trivenayurveda.vercel.app',
-  'https://triven-website.vercel.app',
+  'https://xluxtriven.de',
+  'https://www.xluxtriven.de',
+  'https://support.trivenayurveda.in',
   'https://trivenayurveda.com',
   'https://www.trivenayurveda.com',
   'https://www.trivenayurveda.in',
   'https://www.triven.in',
   'https://triven.in',
+  'https://triven-backend.vercel.app',
+  'https://trivenayurveda.vercel.app',
+  'https://triven-website.vercel.app',
   'https://your-hostinger-domain.com',
-  'https://support.trivenayurveda.in',
 ];
 app.use(
   cors({
     origin: (origin, callback) => {
       if (
         !origin ||
+        config.cors.origin === '*' ||
         allowedOrigins.includes(origin) ||
-        origin.includes("vercel.app")
+        origin.includes("vercel.app") ||
+        origin.includes("xluxtriven.de")
       ) {
         callback(null, true);
       } else {
-        // Pass 'false' instead of throwing an Error to prevent 500 Internal Server errors
         callback(null, false);
       }
     },
