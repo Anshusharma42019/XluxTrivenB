@@ -31,6 +31,7 @@ const allowedOrigins = [
   'https://xluxtriven.de',
   'https://www.xluxtriven.de',
   'https://support.trivenayurveda.in',
+  'https://support.triven.in',
   'https://trivenayurveda.com',
   'https://www.trivenayurveda.com',
   'https://www.trivenayurveda.in',
