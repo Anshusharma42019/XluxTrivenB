@@ -63,9 +63,11 @@ export const STATUS_ROUTING_MATRIX = {
   closed_won: { model: VerifiedOrder, collection: 'verifiedorders' },
   approved: { model: VerifiedOrder, collection: 'verifiedorders' },
 
-  ready_to_shipment: { model: ReadyToShipment, collection: 'readytoshipments' },
-  rts: { model: ReadyToShipment, collection: 'readytoshipments' },
-  readytoshipment: { model: ReadyToShipment, collection: 'readytoshipments' }
+  ready_to_shipment: { model: VerifiedOrder, collection: 'verifiedorders' },
+  rts: { model: VerifiedOrder, collection: 'verifiedorders' },
+  readytoshipment: { model: VerifiedOrder, collection: 'verifiedorders' },
+  dispatch: { model: VerifiedOrder, collection: 'verifiedorders' },
+  dispatched: { model: VerifiedOrder, collection: 'verifiedorders' }
 };
 
 /**
@@ -217,12 +219,23 @@ export const transitionRecord = async (arg1, arg2, arg3, arg4 = {}, arg5 = null)
       }
     }
 
+    let targetId = originDoc._id;
+    let existingWrapper = null;
+    if (isTargetWrapper && !isOriginWrapper) {
+      existingWrapper = await TargetModel.findOne({ lead: originDoc._id }).lean();
+      if (existingWrapper) {
+        targetId = existingWrapper._id;
+      } else {
+        targetId = new mongoose.Types.ObjectId();
+      }
+    }
+
     // Step 2: Build field-for-field record preserving exact MongoDB _id and appending audit envelope
     const now = new Date();
     const migratedPayload = {
       ...originDoc,
       ...updatedFields,
-      _id: originDoc._id,
+      _id: targetId,
       status: targetStatus,
       isArchived: false,
       isDeleted: false,
@@ -242,10 +255,10 @@ export const transitionRecord = async (arg1, arg2, arg3, arg4 = {}, arg5 = null)
         migratedPayload.title = originDoc.title || originDoc.name || originDoc.phone || 'Status Transition Record';
       }
       if (!migratedPayload.task && TargetModel.schema.paths && TargetModel.schema.paths.task) {
-        migratedPayload.task = originDoc.task || (originCollectionName === 'tasks' ? originDoc._id : originDoc._id);
+        migratedPayload.task = originDoc.task || (originCollectionName === 'tasks' ? originDoc._id : (existingWrapper ? existingWrapper.task : null));
       }
       if (!migratedPayload.lead && TargetModel.schema.paths && TargetModel.schema.paths.lead) {
-        migratedPayload.lead = originDoc.lead || (originCollectionName === 'leads' ? originDoc._id : originDoc._id);
+        migratedPayload.lead = originDoc.lead || (originCollectionName === 'leads' ? originDoc._id : (existingWrapper ? existingWrapper.lead : null));
       }
     } else {
       // Cleanly remove wrapper pointer attributes so lead profiles don't become corrupted or shadow themselves

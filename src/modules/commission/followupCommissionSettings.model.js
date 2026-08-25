@@ -26,6 +26,12 @@ const followupCommissionSettingsSchema = new mongoose.Schema({
 
   is_active:   { type: Boolean, default: true },
   updated_by:  { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+
+  // ── Rule versioning ───────────────────────────────────────────────────────
+  // Bump this manually when business rules change (e.g. 'v1.0' → 'v1.1').
+  // Every CommissionRecord snapshots this value at creation time so historical
+  // records always display the rule that was active when they were created.
+  version:     { type: String, default: 'v1.0' },
 }, { timestamps: true });
 
 export default mongoose.model('FollowupCommissionSettings', followupCommissionSettingsSchema);

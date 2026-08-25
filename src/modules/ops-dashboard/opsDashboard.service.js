@@ -212,8 +212,13 @@ function calcKPIs(orders, startPeriod) {
       staffRole = o.task_created_by?.role || o.verified_by?.role || o.verification_id?.assignedTo?.role || o.lead_id?.assignedTo?.role || o.created_by?.role || '';
     }
     
-    if (staffRole === 'sales') totalSales++;
-    else totalSupport++;
+    // An order is classified as Support if:
+    // 1. It is explicitly created/verified by a Support team member (role === 'support'), OR
+    // 2. It is a re-order (source_order_id set / isOld) and NOT explicitly created by Sales team.
+    const isSupportOrder = (staffRole === 'support') || (isOld && staffRole !== 'sales');
+
+    if (isSupportOrder) totalSupport++;
+    else totalSales++;
 
     const cat = classifyStatus(o.status);
     if (cat === 'delivered') {
@@ -223,8 +228,8 @@ function calcKPIs(orders, startPeriod) {
       delivered++;
       deliveredRevenue += (Number(o.sub_total) || Number(o.total) || 0);
       
-      if (staffRole === 'sales') salesDelivered++;
-      else supportDelivered++;
+      if (isSupportOrder) supportDelivered++;
+      else salesDelivered++;
       
       // Only count first-attempt for orders where delivery_attempt is explicitly set
       if (o.delivery_attempt !== null && o.delivery_attempt !== undefined) {
@@ -294,8 +299,8 @@ async function getLeadLookup() {
 
 async function autoLinkOrders() {
   try {
-    const unlinkedSr = await Order.findOne({ lead_id: null }).select('_id').lean();
-    const unlinkedSm = await ShipmaxxOrder.findOne({ lead_id: null }).select('_id').lean();
+    const unlinkedSr = await Order.findOne({ $or: [{ lead_id: null }, { verified_by: null }] }).select('_id').lean();
+    const unlinkedSm = await ShipmaxxOrder.findOne({ $or: [{ lead_id: null }, { verified_by: null }] }).select('_id').lean();
     if (!unlinkedSr && !unlinkedSm) return; // nothing to do
 
     await import('../task/task.model.js');
@@ -421,12 +426,30 @@ export async function getKPIs(params) {
     verFPrv.$or = [{ verifiedBy: id }, { assignedTo: id }];
   }
 
-  const [orders, prevOrders, verified, prevVerified] = await Promise.all([
+  const [orders, prevOrders, verifications, prevVerifications] = await Promise.all([
     fetchOrderStats(f),
     fetchOrderStats(fPrv),
-    Verification.countDocuments(verF),
-    Verification.countDocuments(verFPrv)
+    Verification.find(verF).populate('verifiedBy', 'role').populate('assignedTo', 'role').lean(),
+    Verification.find(verFPrv).populate('verifiedBy', 'role').populate('assignedTo', 'role').lean()
   ]);
+
+  let verifiedSales = 0;
+  let verifiedSupport = 0;
+  for (const v of verifications) {
+    const role = v.verifiedBy?.role || v.assignedTo?.role || '';
+    if (role === 'support') verifiedSupport++;
+    else verifiedSales++;
+  }
+  const verified = verifications.length;
+
+  let prevVerifiedSales = 0;
+  let prevVerifiedSupport = 0;
+  for (const v of prevVerifications) {
+    const role = v.verifiedBy?.role || v.assignedTo?.role || '';
+    if (role === 'support') prevVerifiedSupport++;
+    else prevVerifiedSales++;
+  }
+  const prevVerified = prevVerifications.length;
 
   // Backlog fetches (Orders created BEFORE start, but had activity THIS period)
   const projBl = { status: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1, interakt_reply_text: 1, interakt_reply_at: 1, task_created_by: 1 };
@@ -498,7 +521,7 @@ export async function getKPIs(params) {
   const totalShipments = curr.total;
   const prevTotalShipments = prev.total;
 
-  // Actual total delivered this period = cohort delivered (222) + backlog delivered (30) = 252
+  // Actual total delivered this period = cohort delivered (3) + backlog delivered (1) = 4
   const totalDelivered    = curr.delivered + (backlogDel.delivered || 0);
   const totalSalesDeliv   = curr.salesDelivered + (backlogDel.salesDelivered || 0);
   const totalSupportDeliv = curr.supportDelivered + (backlogDel.supportDelivered || 0);
@@ -520,6 +543,8 @@ export async function getKPIs(params) {
       totalSales:       { value: curr.totalSales,      change: pctChange(curr.totalSales,      prev.totalSales)              },
       totalSupport:     { value: curr.totalSupport,    change: pctChange(curr.totalSupport,    prev.totalSupport)            },
       verified:         { value: verified,              change: pctChange(verified,             prevVerified)                 },
+      verifiedSales:    { value: verifiedSales,         change: pctChange(verifiedSales,        prevVerifiedSales)            },
+      verifiedSupport:  { value: verifiedSupport,       change: pctChange(verifiedSupport,      prevVerifiedSupport)          },
       inTransit:        { value: curr.inTransit,        change: pctChange(curr.inTransit,       prev.inTransit)               },
       ofd:              { value: curr.ofd,              change: pctChange(curr.ofd,             prev.ofd)                     },
       // Total delivered completed during this period (cohort + backlog delivered)
@@ -807,77 +832,33 @@ export async function getShipments(params) {
   } else if (status && status !== 'totalShipments') {
     if (['totalSales', 'totalSupport', 'salesDelivered', 'supportDelivered'].includes(status)) {
       const User = (await import('../user/user.model.js')).default;
-      const Lead = (await import('../lead/lead.model.js')).default;
       const salesUsers = await User.find({ role: 'sales' }, '_id').lean();
-      const supportUsers = await User.find({ role: { $ne: 'sales' } }, '_id').lean();
+      const supportUsers = await User.find({ role: 'support' }, '_id').lean();
       const salesUserIds = salesUsers.map(u => u._id);
       const supportUserIds = supportUsers.map(u => u._id);
-      
-      const salesLeads = await Lead.find({ assignedTo: { $in: salesUserIds } }, '_id').lean();
-      const supportLeads = await Lead.find({ assignedTo: { $in: supportUserIds } }, '_id').lean();
-      const salesLeadIds = salesLeads.map(l => l._id);
-      const supportLeadIds = supportLeads.map(l => l._id);
-
-      const salesVerifications = await Verification.find({ assignedTo: { $in: salesUserIds } }, '_id').lean();
-      const supportVerifications = await Verification.find({ assignedTo: { $in: supportUserIds } }, '_id').lean();
-      const salesVerificationIds = salesVerifications.map(v => v._id);
-      const supportVerificationIds = supportVerifications.map(v => v._id);
 
       baseFilter.$and = baseFilter.$and || [];
       if (status.includes('Sales') || status.includes('sales')) {
         baseFilter.$and.push({
           $or: [
-            // Old orders
-            {
-              source_order_id: { $ne: null },
-              $or: [
-                { verified_by: { $in: salesUserIds } },
-                { verified_by: null, verification_id: { $in: salesVerificationIds } },
-                { verified_by: null, verification_id: null, lead_id: { $in: salesLeadIds } },
-                { verified_by: null, verification_id: null, lead_id: null, created_by: { $in: salesUserIds } }
-              ]
-            },
-            // New orders
+            { task_created_by: { $in: salesUserIds } },
+            { verified_by: { $in: salesUserIds } },
+            { created_by: { $in: salesUserIds } },
             {
               source_order_id: null,
-              $or: [
-                { task_created_by: { $in: salesUserIds } },
-                { task_created_by: null, verified_by: { $in: salesUserIds } },
-                { task_created_by: null, verified_by: null, verification_id: { $in: salesVerificationIds } },
-                { task_created_by: null, verified_by: null, verification_id: null, lead_id: { $in: salesLeadIds } },
-                { task_created_by: null, verified_by: null, verification_id: null, lead_id: null, created_by: { $in: salesUserIds } }
-              ]
+              task_created_by: { $nin: supportUserIds },
+              verified_by: { $nin: supportUserIds },
+              created_by: { $nin: supportUserIds }
             }
           ]
         });
       } else {
         baseFilter.$and.push({
           $or: [
-            // Old orders
-            {
-              source_order_id: { $ne: null },
-              $or: [
-                { verified_by: { $in: supportUserIds } },
-                { verified_by: null, verification_id: { $in: supportVerificationIds } },
-                { verified_by: null, verification_id: null, lead_id: { $in: supportLeadIds } },
-                { verified_by: null, verification_id: null, lead_id: null, created_by: { $in: supportUserIds } },
-                { verified_by: null, verification_id: null, lead_id: null, created_by: null }
-              ]
-            },
-            // New orders
-            {
-              source_order_id: null,
-              $or: [
-                { task_created_by: { $in: supportUserIds } },
-                { task_created_by: null, verified_by: { $in: supportUserIds } },
-                { task_created_by: null, verified_by: null, verification_id: { $in: supportVerificationIds } },
-                { task_created_by: null, verified_by: null, verification_id: null, lead_id: { $in: supportLeadIds } },
-                { task_created_by: null, verified_by: null, verification_id: null, lead_id: null, created_by: { $in: supportUserIds } },
-                { task_created_by: null, verified_by: null, verification_id: null, lead_id: null, created_by: null }
-              ]
-            },
-            { lead_id: { $exists: false } },
-            { lead_id: null }
+            { source_order_id: { $ne: null } },
+            { task_created_by: { $in: supportUserIds } },
+            { verified_by: { $in: supportUserIds } },
+            { created_by: { $in: supportUserIds } }
           ]
         });
       }
@@ -964,14 +945,35 @@ export async function getShipments(params) {
 
   let srOrders = [], smOrders = [], verOrders = [], srTotal = 0, smTotal = 0, verTotal = 0;
   
-  if (status === 'verified') {
+  if (['verified', 'verifiedSales', 'verifiedSupport'].includes(status)) {
     const verF = { createdAt: { $gte: start, $lte: end } };
     if (staffId) verF.assignedTo = new mongoose.Types.ObjectId(staffId);
+
+    const User = (await import('../user/user.model.js')).default;
+    const salesUsers = await User.find({ role: 'sales' }, '_id').lean();
+    const supportUsers = await User.find({ role: 'support' }, '_id').lean();
+    const salesUserIds = salesUsers.map(u => u._id);
+    const supportUserIds = supportUsers.map(u => u._id);
+
+    if (status === 'verifiedSales') {
+      verF.$or = [
+        { verifiedBy: { $in: salesUserIds } },
+        { assignedTo: { $in: salesUserIds } },
+        { verifiedBy: null, assignedTo: { $nin: supportUserIds } }
+      ];
+    } else if (status === 'verifiedSupport') {
+      verF.$or = [
+        { verifiedBy: { $in: supportUserIds } },
+        { assignedTo: { $in: supportUserIds } }
+      ];
+    }
     
     const [total, records] = await Promise.all([
       Verification.countDocuments(verF),
       Verification.find(verF)
-        .populate('lead', 'name phone')
+        .populate('lead', 'name phone price amount')
+        .populate('verifiedBy', 'name role')
+        .populate('assignedTo', 'name role')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(Number(limit))
@@ -986,16 +988,16 @@ export async function getShipments(params) {
       billing_phone: v.lead?.phone || '',
       billing_city: v.cityVillage || '',
       billing_state: v.state || '',
-      sub_total: v.price || 0,
+      sub_total: Number(v.price || v.lead?.price || v.lead?.amount || 0),
       createdAt: v.createdAt,
       awb_code: '',
-      courier_name: '',
+      courier_name: v.verifiedBy?.name ? `Verifier: ${v.verifiedBy.name}` : (v.assignedTo?.name ? `Staff: ${v.assignedTo.name}` : '—'),
       delivery_attempt: 0
     }));
   }
 
   let combined = [];
-  if (status === 'verified') {
+  if (['verified', 'verifiedSales', 'verifiedSupport'].includes(status)) {
     combined = verOrders;
   } else {
     const sortField = ['interaktReplies', 'reply_reattempt', 'reply_dawa'].includes(status) ? 'interakt_reply_at' : ((status && status !== 'totalShipments') ? 'status_updated_at' : 'createdAt');

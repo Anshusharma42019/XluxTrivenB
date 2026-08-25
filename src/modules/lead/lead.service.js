@@ -730,12 +730,22 @@ export const updateLead = async (id, data, userRole, userId, userDepartments = [
   const leadObjId = mongoose.Types.ObjectId.isValid(String(id)) ? new mongoose.Types.ObjectId(String(id)) : id;
   const matchIds = [id, leadObjId];
 
-  if (data.status && ['interested', 'on_hold', 'closed_lost', 'pending_order', 'verified_order', 'closed_won', 'rejected'].includes(String(data.status).toLowerCase())) {
+  if (data.status && ['interested', 'on_hold', 'closed_lost', 'pending_order', 'verified_order', 'ready_to_shipment', 'dispatch', 'dispatched', 'closed_won', 'rejected'].includes(String(data.status).toLowerCase())) {
     data.cnp = false;
   }
 
-  // When moving out of active CNP/new status or clearing CNP flag, soft-archive related CNP, CallAgain, and Tasks
-  if (data.cnp === false || (data.status && data.status !== oldStatus && ['interested', 'on_hold', 'closed_lost', 'follow_up', 'pending_order', 'verified_order'].includes(String(data.status).toLowerCase()))) {
+  // When clearing CNP flag (e.g. converting CNP to active task), soft-archive related CNP and CallAgain records and tasks with status 'cnp'
+  if (data.cnp === false) {
+    await Cnp.updateMany({ lead: { $in: matchIds } }, { $set: { isArchived: true, isDeleted: true } });
+    await CallAgain.updateMany({ lead: { $in: matchIds } }, { $set: { isArchived: true, isDeleted: true } });
+    await Task.updateMany(
+      { lead: { $in: matchIds }, status: 'cnp', isDeleted: false },
+      { $set: { isArchived: true, isDeleted: true } }
+    );
+  }
+
+  // When moving to terminal/pipeline stages, soft-archive related active tasks
+  if (data.status && data.status !== oldStatus && ['interested', 'on_hold', 'closed_lost', 'follow_up', 'pending_order', 'verified_order', 'ready_to_shipment', 'dispatch', 'dispatched'].includes(String(data.status).toLowerCase())) {
     await Cnp.updateMany({ lead: { $in: matchIds } }, { $set: { isArchived: true, isDeleted: true } });
     await CallAgain.updateMany({ lead: { $in: matchIds } }, { $set: { isArchived: true, isDeleted: true } });
     await Task.updateMany(

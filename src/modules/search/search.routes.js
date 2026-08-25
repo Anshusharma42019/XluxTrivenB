@@ -21,6 +21,7 @@ import {
   OnHoldOrder,
   VerifiedOrder,
 } from '../transition/statusModels.js';
+// ── Commission chain ── imported lazily below to avoid circular dep issues
 
 const getModel = (name) => {
   try { return mongoose.model(name); } catch(e) { return null; }
@@ -198,7 +199,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     let moduleName = 'Tasks';
     let link = `/tasks?openId=${t._id}`;
     
-    if (t.status === 'ready_to_shipment') {
+    if (['ready_to_shipment', 'dispatch', 'dispatched'].includes(t.status)) {
       moduleName = 'Ready To Shipment';
       link = `/ready-to-shipment?openId=${t._id}`;
     } else if (t.status === 'verification') {
@@ -403,6 +404,99 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     
     return new Date(b.latestStatus.updatedAt) - new Date(a.latestStatus.updatedAt);
   });
+
+  // ── Commission chain: attach full order chain + submitter details to each result group ──
+  // This satisfies requirement #8: global search shows the full order chain and all
+  // submitter details together in one view, searchable by order ID, customer, or salesperson.
+  try {
+    const OrderChain     = (await import('../commission/orderChain.model.js')).default;
+    const CommissionRecord = (await import('../commission/commissionRecord.model.js')).default;
+
+    // Collect all lead IDs from the search result set
+    const leadIdSet = new Set();
+    for (const group of finalResults) {
+      for (const rec of group.history || []) {
+        // Extract lead _id from history records where available
+        const r = rec;
+        if (r.lead_id) leadIdSet.add(String(r.lead_id));
+      }
+    }
+
+    // Also search leads directly by phone to catch all linked leads
+    const matchingLeadsByPhone = await Lead.find(leadMatch).select('_id phone').lean();
+    for (const l of matchingLeadsByPhone) leadIdSet.add(String(l._id));
+
+    // Also search chains by submitter name (salesperson search)
+    const matchingUsers = await (await import('../user/user.model.js')).default
+      .find({ name: regex }).select('_id').lean();
+    const matchingUserIds = matchingUsers.map(u => u._id);
+    if (matchingUserIds.length > 0) {
+      const chainsByUser = await OrderChain.find({ submitter_id: { $in: matchingUserIds } })
+        .select('lead_id').lean();
+      for (const c of chainsByUser) leadIdSet.add(String(c.lead_id));
+    }
+
+    const allLeadIds = Array.from(leadIdSet).filter(Boolean);
+
+    if (allLeadIds.length > 0) {
+      // Fetch all chain entries for found leads in one query
+      const mongoose = (await import('mongoose')).default;
+      const chainEntries = await OrderChain.find({
+        lead_id: { $in: allLeadIds.map(id => { try { return new mongoose.Types.ObjectId(id); } catch { return null; } }).filter(Boolean) },
+      })
+        .populate('submitter_id', 'name role')
+        .populate('order_id', 'order_id billing_customer_name sub_total status delivered_at awb_code')
+        .sort({ chain_seq: 1 })
+        .lean();
+
+      // Fetch all commission records for these chain entries
+      const chainIds = chainEntries.map(e => e._id);
+      const commRecords = await CommissionRecord.find({ chain_entry_id: { $in: chainIds } })
+        .populate('staff_id', 'name role')
+        .lean();
+
+      // Build maps: leadId → chain entries; chainEntryId → commission records
+      const chainMap   = {};
+      const commMap    = {};
+      for (const e of chainEntries) {
+        const key = String(e.lead_id);
+        if (!chainMap[key]) chainMap[key] = [];
+        chainMap[key].push(e);
+      }
+      for (const c of commRecords) {
+        const key = String(c.chain_entry_id);
+        if (!commMap[key]) commMap[key] = [];
+        commMap[key].push(c);
+      }
+      // Attach commissions to each chain entry
+      for (const entries of Object.values(chainMap)) {
+        for (const entry of entries) {
+          entry.commissions = commMap[String(entry._id)] || [];
+        }
+      }
+
+      // Attach order_chain to each result group by matching phone → lead IDs
+      for (const group of finalResults) {
+        // Find all lead IDs associated with this customer's phone number
+        const groupPhone = (group.phone || '').replace(/\D/g, '');
+        const groupLeadIds = matchingLeadsByPhone
+          .filter(l => (l.phone || '').replace(/\D/g, '').includes(groupPhone) || groupPhone.includes((l.phone || '').replace(/\D/g, '')))
+          .map(l => String(l._id));
+
+        // Merge all chain entries for this customer's leads, sorted by chain_seq
+        const groupChain = [];
+        for (const lId of groupLeadIds) {
+          if (chainMap[lId]) groupChain.push(...chainMap[lId]);
+        }
+        groupChain.sort((a, b) => a.chain_seq - b.chain_seq);
+
+        group.order_chain = groupChain;
+      }
+    }
+  } catch (chainErr) {
+    // Commission chain enrichment must not block search results
+    console.error('[Search] Commission chain enrichment failed:', chainErr.message);
+  }
 
   res.json(new ApiResponse(httpStatus.OK, finalResults.slice(0, 20), 'Search results'));
 }));

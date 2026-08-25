@@ -69,8 +69,31 @@ const cleanupReorderCommissions = async () => {
   }
 };
 
-// Generate commission for re-orders (orders from follow-up → verification → new delivery)
+// ─────────────────────────────────────────────────────────────────────────────
+// DEPRECATED — v1.0 Commission Logic (disabled 2026-08-24)
+// ─────────────────────────────────────────────────────────────────────────────
+// This function generated commissions AFTER delivery by scanning delivered orders.
+// Under the new immutable commission workflow (v1.0+), commissions are calculated
+// and locked at the moment a repeat order is SUBMITTED FOR VERIFICATION — not at
+// delivery. The new logic lives in:
+//   src/modules/commission/orderChain.service.js  (appendOrderChain)
+//   src/modules/commission/commissionRecord.service.js (createRepeatOrderCommissionSplit)
+//
+// This function is kept for historical reference ONLY. Do NOT re-enable it.
+// Any cron jobs that call this function will receive an empty log array and exit
+// without writing any commission records, which is the correct behaviour.
+// ─────────────────────────────────────────────────────────────────────────────
 export const generateReorderCommissions = async () => {
+  const DEPRECATION_MSG = '[Commission] generateReorderCommissions is DEPRECATED (v1.0). '
+    + 'Commission is now generated at verification submission. '
+    + 'This function is a no-op. See orderChain.service.js.';
+  console.warn(DEPRECATION_MSG);
+  return [DEPRECATION_MSG];
+
+  // ── BEGIN PRESERVED (INACTIVE) LEGACY CODE ─────────────────────────────────
+  // The code below this line will never execute due to the early return above.
+  // It is kept intact for audit/historical purposes only.
+  // eslint-disable-next-line no-unreachable
   const logs = [];
   try {
     await cleanupReorderCommissions();
@@ -2272,7 +2295,7 @@ export const sendToVerification = catchAsync(async (req, res) => {
     address: order.billing_address,
     phone: order.billing_phone,
     price: order.sub_total,
-    department: lead.department
+    department: lead.department || oldVer?.department || 'migraine'
   });
 
   // Create Verification record linked to this task
@@ -2292,7 +2315,7 @@ export const sendToVerification = catchAsync(async (req, res) => {
     height: oldVer?.height,
     otherProblems: oldVer?.otherProblems,
     problemDuration: oldVer?.problemDuration,
-    department: oldVer?.department,
+    department: lead.department || oldVer?.department || 'migraine',
     price: task.price,
     relief_percentage: lastRelief,
   });

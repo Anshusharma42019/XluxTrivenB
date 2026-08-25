@@ -15,6 +15,8 @@ import Verification from '../verification/verification.model.js';
 import { getNextOrderId } from '../shiprocket/counter/counter.model.js';
 import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
 import * as leadService from '../lead/lead.service.js';
+// ── Commission workflow: append-only chain + submitter lock ──────────────────
+import { appendOrderChain } from '../commission/orderChain.service.js';
 
 const DEFAULT_FOLLOWUP_TOTAL = 5;
 const DEFAULT_FOLLOWUP_GAP_DAYS = 6;
@@ -1994,6 +1996,7 @@ export const sendToVerification = catchAsync(async (req, res) => {
     address: order.billing_address,
     phone: order.billing_phone,
     price: order.sub_total,
+    department: lead.department || oldVer?.department || 'migraine',
   });
 
   await Verification.create({
@@ -2012,7 +2015,7 @@ export const sendToVerification = catchAsync(async (req, res) => {
     height: oldVer?.height,
     otherProblems: oldVer?.otherProblems,
     problemDuration: oldVer?.problemDuration,
-    department: oldVer?.department,
+    department: lead.department || oldVer?.department || 'migraine',
     price: task.price,
     relief_percentage: lastRelief,
   });
@@ -2023,6 +2026,25 @@ export const sendToVerification = catchAsync(async (req, res) => {
   }
   await Order.findByIdAndUpdate(id, updatePayload);
   await Lead.findByIdAndUpdate(lead._id, { $set: { pending_reorder_source: id, pending_reorder_staff: req.user._id } });
+
+  // ── Commission Chain: Lock submitter ID for this Shipmaxx repeat order ───────────
+  // This is step 4 of the commission workflow: the moment a repeat order is submitted
+  // for verification, req.user._id is frozen as the submitter for this chain entry.
+  // appendOrderChain detects the first-order chain entry and fires the 50-50 split.
+  try {
+    await appendOrderChain({
+      leadId:       lead._id,
+      orderId:      id,                   // the ShipmaxxOrder being re-verified
+      orderModel:   'ShipmaxxOrder',
+      submitterId:  req.user._id,         // LOCKED — current submitter identity
+      orderType:    'repeat',             // Shipmaxx sendToVerification is always a repeat
+      orderSubTotal: order.sub_total || 0,
+      actor:        req.user,
+    });
+  } catch (chainErr) {
+    // Commission chain errors must not block the verification submission.
+    console.error('[OrderChain] Shipmaxx sendToVerification chain entry failed:', chainErr.message);
+  }
 
   res.json(new ApiResponse(200, task, 'Order sent to verification successfully'));
 });

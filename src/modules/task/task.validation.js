@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-const statusEnum = z.enum(['pending', 'completed', 'overdue', 'cancelled', 'verification', 'cnp', 'interested', 'cancel_call', 'ready_to_shipment', 'new', 'old', 'on_hold', 'closed_lost']);
+const statusEnum = z.enum(['pending', 'completed', 'overdue', 'cancelled', 'verification', 'cnp', 'interested', 'cancel_call', 'ready_to_shipment', 'dispatch', 'dispatched', 'new', 'old', 'on_hold', 'closed_lost']);
 
 export const createTask = {
   body: z.object({

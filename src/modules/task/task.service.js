@@ -17,8 +17,35 @@ const notifyAdmins = async (data) => {
   await Promise.all(admins.map(a => createNotification({ ...data, user: a._id }).catch(() => {})));
 };
 
-const hiddenTaskStatuses = ['verification', 'cnp', 'cancel_call', 'cancelled', 'ready_to_shipment', 'interested', 'on_hold', 'closed_lost'];
+const hiddenTaskStatuses = ['verification', 'cnp', 'cancel_call', 'cancelled', 'ready_to_shipment', 'interested', 'on_hold', 'closed_lost', 'dispatch', 'dispatched'];
 const hiddenTaskLeadStatuses = ['closed_lost', 'on_hold', 'follow_up'];
+
+const syncProfileToLead = async (task) => {
+  if (task.lead) {
+    const leadId = task.lead._id || task.lead;
+    const profileFields = {
+      houseNo: task.houseNo,
+      cityVillage: task.cityVillage,
+      cityVillageType: task.cityVillageType,
+      postOffice: task.postOffice,
+      district: task.district,
+      state: task.state,
+      pincode: task.pincode,
+      landmark: task.landmark,
+      problem: task.problem,
+      age: task.age,
+      weight: task.weight,
+      height: task.height,
+      otherProblems: task.otherProblems,
+      problemDuration: task.problemDuration,
+      department: task.department
+    };
+    Object.keys(profileFields).forEach(key => profileFields[key] === undefined && delete profileFields[key]);
+    await Lead.findByIdAndUpdate(leadId, { $set: profileFields }).catch(err => {
+      console.error('[TaskService] Failed to sync profile to Lead:', err.message);
+    });
+  }
+};
 
 const handleVerificationSync = async (task, userId) => {
   const record = {
@@ -135,10 +162,10 @@ export const createTask = async (data, createdBy, creatorRole, userDepartments =
 
   let task;
   if (data.lead) {
-    const existingTask = await Task.findOne({ lead: data.lead, isDeleted: false });
+    const existingTask = (await Task.findOne({ lead: data.lead, isDeleted: false })) || (await Task.findOne({ lead: data.lead }).sort({ updatedAt: -1 }));
     if (existingTask) {
       const oldAssignedTo = existingTask.assignedTo ? String(existingTask.assignedTo._id || existingTask.assignedTo) : null;
-      Object.assign(existingTask, data, { status: data.status || 'pending', isDeleted: false });
+      Object.assign(existingTask, data, { status: data.status || 'pending', isDeleted: false, isArchived: false });
       task = await existingTask.save();
 
       const newAssignedTo = task.assignedTo ? String(task.assignedTo._id || task.assignedTo) : null;
@@ -149,18 +176,24 @@ export const createTask = async (data, createdBy, creatorRole, userDepartments =
 
       await Cnp.updateMany({ lead: data.lead }, { $set: { isArchived: true, isDeleted: true } });
     } else {
-      task = await Task.create({ ...data, createdBy });
+      task = await Task.create({ ...data, createdBy, status: data.status || 'pending', isDeleted: false, isArchived: false });
       await Cnp.updateMany({ lead: data.lead }, { $set: { isArchived: true, isDeleted: true } });
     }
     // Immediately reset lead.cnp = false so task is not filtered out in getTasks/getDailyTasks
     await Lead.findByIdAndUpdate(data.lead, { $set: { cnp: false, status: 'task' } }).catch(() => {});
   } else {
-    task = await Task.create({ ...data, createdBy });
+    task = await Task.create({ ...data, createdBy, status: data.status || 'pending', isDeleted: false, isArchived: false });
   }
 
   if (task.status === 'verification') {
     await handleVerificationSync(task, createdBy);
+    if (task.lead) {
+      const leadId = task.lead._id || task.lead;
+      await Lead.findByIdAndUpdate(leadId, { status: 'verification' }).catch(() => {});
+    }
   }
+  
+  await syncProfileToLead(task);
   
   await createNotification({
     user: task.assignedTo,
@@ -318,16 +351,25 @@ export const updateTask = async (id, data, userRole, userId, userDepartments = [
     }
   } else if (data.status === 'verification') {
     await handleVerificationSync(task, userId);
-  } else if (data.status === 'ready_to_shipment') {
+    if (task.lead) {
+      const leadId = task.lead._id || task.lead;
+      await Lead.findByIdAndUpdate(leadId, { status: 'verification' }).catch(() => {});
+    }
+  } else if (['ready_to_shipment', 'dispatch', 'dispatched'].includes(data.status)) {
     await ReadyToShipment.findOneAndUpdate({ task: task._id }, record, { upsert: true, returnDocument: 'after' });
     await Verification.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
     await Cnp.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
+    if (task.lead) {
+      const leadId = task.lead._id || task.lead;
+      await Lead.findByIdAndUpdate(leadId, { status: 'dispatch' }).catch(() => {});
+    }
   } else {
     await Cnp.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
     await Verification.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
     await ReadyToShipment.updateMany({ task: task._id }, { $set: { isArchived: true, isDeleted: true } });
   }
-
+  
+  await syncProfileToLead(task);
   return task;
 };
 

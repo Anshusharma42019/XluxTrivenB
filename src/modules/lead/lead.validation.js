@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 const statusEnum = z.enum([
   'new', 'contacted', 'interested', 'follow_up', 'closed_won', 'closed_lost',
-  'on_hold', 'old', 'cnp', 'verification', 'ready_to_shipment', 'cancel_call',
+  'on_hold', 'old', 'cnp', 'verification', 'ready_to_shipment', 'dispatch', 'dispatched', 'cancel_call',
   'cancel', 'interested_cold',
 ]);
 const sourceEnum = z.enum(['website', 'referral', 'social_media', 'cold_call', 'email', 'walk_in', 'other']);

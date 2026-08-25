@@ -5,6 +5,8 @@ import requireCheckedIn from '../../middleware/requireCheckedIn.js';
 import departmentFilter from '../../middleware/departmentFilter.js';
 import Verification from './verification.model.js';
 import { sendDispatchNotification, sendVerificationConfirmation } from '../interakt/interakt.service.js';
+// ── Commission workflow: append-only chain entry + submitter lock ─────────────
+import { appendOrderChain } from '../commission/orderChain.service.js';
 
 const router = express.Router();
 
@@ -15,7 +17,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
     const Lead = (await import('../lead/lead.model.js')).default;
     const User = (await import('../user/user.model.js')).default;
 
-    const query = { status: { $nin: ['verified', 'on_hold'] }, isDeleted: { $ne: true } };
+    const query = { status: { $nin: ['verified', 'dispatch', 'dispatched', 'on_hold'] }, isDeleted: { $ne: true } };
     if (req.query.department) {
       query.department = req.query.department;
       if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
@@ -259,6 +261,34 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'support'), departmentFil
             { ordered: false }
           );
 
+          // ── Commission Chain: Lock submitter ID for each new FIRST-ORDER task ──
+          // appendOrderChain is idempotent — safe to call even if called more than once.
+          // The submitter_id (req.user._id) is frozen at this point and never changed.
+          for (const task of newTasks) {
+            try {
+              if (task.lead) {
+                let detectedModel = 'ShiprocketOrder';
+                try {
+                  const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
+                  const smxOrder = await ShipmaxxOrder.findOne({ lead_id: task.lead }).select('_id').lean();
+                  if (smxOrder) detectedModel = 'ShipmaxxOrder';
+                } catch (_) {}
+
+                await appendOrderChain({
+                  leadId:       task.lead,
+                  orderId:      null,            // order not yet created at this stage
+                  orderModel:   detectedModel,
+                  submitterId:  task.assignedTo || req.user._id,
+                  orderType:    'first',
+                  orderSubTotal: 0,             // not yet known; updated when order placed
+                  actor:        req.user,
+                });
+              }
+            } catch (chainErr) {
+              console.error('[OrderChain] First-order chain entry failed for task', task._id, ':', chainErr.message);
+            }
+          }
+
           // Send WhatsApp confirmation to each new lead entering Verification
           const Lead = (await import('../lead/lead.model.js')).default;
           for (const task of newTasks) {
@@ -380,7 +410,7 @@ router.post('/repair', auth('admin', 'manager', 'sales', 'support'), departmentF
             lead: leadId,
             assignedTo: rtsAssignedTo,
             department: record.department,
-            status: 'ready_to_shipment',
+            status: 'dispatch',
             createdBy: rtsAssignedTo
           });
         }
@@ -389,7 +419,7 @@ router.post('/repair', auth('admin', 'manager', 'sales', 'support'), departmentF
       }
 
       if (taskId) {
-        await Task.collection.updateOne({ _id: new mongoose.Types.ObjectId(taskId) }, { $set: { status: 'ready_to_shipment', assignedTo: new mongoose.Types.ObjectId(rtsAssignedTo), isDeleted: false } });
+        await Task.collection.updateOne({ _id: new mongoose.Types.ObjectId(taskId) }, { $set: { status: 'dispatch', assignedTo: new mongoose.Types.ObjectId(rtsAssignedTo), isDeleted: false } });
         await ReadyToShipment.findOneAndUpdate(
           { $or: [{ task: taskId }, { lead: leadId }] },
           {
@@ -618,7 +648,7 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
 
     if (status) {
       update.status = status;
-      if (status === 'verified') {
+      if (status === 'verified' || status === 'dispatch' || status === 'dispatched') {
         // Jo bhi verification me laya tha (assignedTo) — usi ko 100% credit.
         // Button koi bhi dabaye, original owner ka verifiedBy set hoga.
         update.verifiedBy = recordBefore.assignedTo || req.user._id;
@@ -645,13 +675,37 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
       .populate('lead', 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem createdBy assignedTo pending_reorder_source');
     if (!record) return res.status(404).json({ message: 'Not found' });
 
+    if (record.lead) {
+      const Lead = (await import('../lead/lead.model.js')).default;
+      const leadId = record.lead._id || record.lead;
+      const profileFields = {
+        houseNo: record.houseNo,
+        cityVillage: record.cityVillage,
+        cityVillageType: record.cityVillageType,
+        postOffice: record.postOffice,
+        district: record.district,
+        state: record.state,
+        pincode: record.pincode,
+        landmark: record.landmark,
+        problem: record.problem,
+        age: record.age,
+        weight: record.weight,
+        height: record.height,
+        otherProblems: record.otherProblems,
+        problemDuration: record.problemDuration,
+        department: record.department
+      };
+      Object.keys(profileFields).forEach(key => profileFields[key] === undefined && delete profileFields[key]);
+      await Lead.findByIdAndUpdate(leadId, { $set: profileFields }).catch(() => {});
+    }
+
     const Task = (await import('../task/task.model.js')).default;
     const ReadyToShipment = (await import('../readytoshipment/readytoshipment.model.js')).default;
 
     if (status && record && record._id) {
       try {
         const { transitionRecord } = await import('../transition/transition.service.js');
-        let transTarget = status === 'rejected' ? 'closed_lost' : status;
+        let transTarget = status === 'rejected' ? 'closed_lost' : (status === 'verified' ? 'dispatch' : status);
         let originModel = Verification;
         
         if (recordBefore.status === 'on_hold') {
@@ -662,7 +716,10 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
         if (status === 'pending') {
           transTarget = 'verification'; // route to verifications collection
         }
-        await transitionRecord(originModel, record._id, transTarget, update, req.user?._id || req.user || null);
+        const transUpdate = { ...update };
+        if (transUpdate.status) transUpdate.status = transTarget;
+        const transRecordId = recordBefore.status === 'on_hold' ? (record.lead?._id || record.lead) : record._id;
+        await transitionRecord(originModel, transRecordId, transTarget, transUpdate, req.user?._id || req.user || null);
         
         // Restore correct 'pending' status after routing if we faked the target
         if (status === 'pending') {
@@ -692,15 +749,65 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
     if (status === 'pending' && record.lead) {
       const Lead = (await import('../lead/lead.model.js')).default;
       const leadId = record.lead._id || record.lead;
-      await Lead.findByIdAndUpdate(leadId, { status: 'new', cnp: false, isDeleted: false });
+      await Lead.findByIdAndUpdate(leadId, { status: 'verification', cnp: false, isDeleted: false });
       if (record.task) {
         await Task.findByIdAndUpdate(record.task, { status: 'verification', isDeleted: false });
       }
     }
 
-    if (status === 'verified') {
+    if (status === 'verified' || status === 'dispatch' || status === 'dispatched') {
       let rtsAssignedTo = record.assignedTo?._id || record.assignedTo;
       const leadId = record.lead?._id || record.lead;
+
+      // ── Commission Chain: Lock submitter ID for REPEAT ORDER at verification submit ──
+      // This is the canonical trigger point for the 50-50 split (requirement step 4-5).
+      // For repeat orders (lead.pending_reorder_source is set), the CURRENT submitter
+      // (req.user._id) is locked to this chain entry. The system then reads the first
+      // chain entry to find the original salesperson and splits commission 50-50.
+      try {
+        if (leadId) {
+          const leadDoc = record.lead;  // already populated above
+          const isRepeatOrder = !!(leadDoc?.pending_reorder_source);
+          const orderType = isRepeatOrder ? 'repeat' : 'first';
+
+          // ── Detect the correct order model (ShiprocketOrder vs ShipmaxxOrder) ──
+          // Shipmaxx repeat orders arrive here via sendToVerification in shipmaxx.controller,
+          // which already calls appendOrderChain directly with 'ShipmaxxOrder'.
+          // For the generic verification PATCH, we detect by checking the source order's platform.
+          let detectedOrderModel = 'ShiprocketOrder'; // default
+          if (leadDoc?.pending_reorder_source) {
+            try {
+              // Check if the source order exists in ShipmaxxOrder collection first
+              const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
+              const smxSource = await ShipmaxxOrder.findById(leadDoc.pending_reorder_source).select('_id platform').lean();
+              if (smxSource) detectedOrderModel = 'ShipmaxxOrder';
+            } catch (_) { /* keep default ShiprocketOrder */ }
+          } else {
+            // No source order — check if any existing chain entries are Shipmaxx
+            const OrderChain = (await import('../commission/orderChain.model.js')).default;
+            const existingEntry = await OrderChain.findOne({ lead_id: leadId }).sort({ chain_seq: -1 }).lean();
+            if (existingEntry?.order_model === 'ShipmaxxOrder') detectedOrderModel = 'ShipmaxxOrder';
+          }
+
+          // Only create a repeat entry here; first-order entry was created at /sync time.
+          // If for any reason /sync was missed, appendOrderChain is idempotent and will
+          // create the first entry too (it checks for existing entries before inserting).
+          // Note: Shipmaxx repeat orders are ALREADY handled in shipmaxx.controller.js
+          // sendToVerification — this block handles Shiprocket + any edge cases.
+          await appendOrderChain({
+            leadId,
+            orderId:      null,   // order not yet assigned at verification stage
+            orderModel:   detectedOrderModel,
+            submitterId:  req.user._id,   // LOCKED — this is the current submitter
+            orderType,
+            orderSubTotal: record.price || 0,
+            actor:        req.user,
+          });
+        }
+      } catch (chainErr) {
+        // Commission chain errors must not block the verification dispatch flow.
+        console.error('[OrderChain] Verification chain entry failed:', chainErr.message);
+      }
 
       // Ensure task exists
       let taskId = record.task;
@@ -712,7 +819,7 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
             lead: leadId,
             assignedTo: rtsAssignedTo,
             department: record.department,
-            status: 'ready_to_shipment',
+            status: 'dispatch',
             createdBy: req.user?._id || rtsAssignedTo
           });
         }
@@ -723,12 +830,12 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
       if (leadId) {
         const Lead = (await import('../lead/lead.model.js')).default;
         const currentLead = await Lead.findById(leadId).lean();
-        const newStatus = currentLead?.status === 'old' ? 'old' : 'verified_order';
+        const newStatus = currentLead?.status === 'old' ? 'old' : 'dispatch';
         await Lead.findByIdAndUpdate(leadId, { assignedTo: rtsAssignedTo, status: newStatus });
       }
 
       if (taskId) {
-        const updateDoc = { status: 'ready_to_shipment', assignedTo: new mongoose.Types.ObjectId(rtsAssignedTo), isDeleted: false };
+        const updateDoc = { status: 'dispatch', assignedTo: new mongoose.Types.ObjectId(rtsAssignedTo), isDeleted: false };
         if (taskFields) Object.assign(updateDoc, taskFields);
         await Task.collection.updateOne(
           { _id: new mongoose.Types.ObjectId(taskId) },

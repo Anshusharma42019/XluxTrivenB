@@ -10,7 +10,7 @@ const router = express.Router();
 // Supports drill-down via ?filterState=<state> or ?filterPincode=<pincode>
 router.get('/stats', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter, async (req, res) => {
   try {
-    const taskQuery = { status: 'ready_to_shipment', isDeleted: false };
+    const taskQuery = { status: { $in: ['ready_to_shipment', 'dispatch', 'dispatched'] }, isDeleted: false };
     
     if (req.query.department) {
       taskQuery.department = req.query.department;
@@ -214,7 +214,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter
   try {
     const { dayFilter, customDate, typeFilter, search } = req.query;
 
-    const taskQuery = { status: 'ready_to_shipment', isDeleted: false };
+    const taskQuery = { status: { $in: ['ready_to_shipment', 'dispatch', 'dispatched'] }, isDeleted: false };
 
     if (req.query.department) {
       taskQuery.department = req.query.department;
@@ -255,9 +255,12 @@ router.get('/', auth('admin', 'manager', 'sales', 'logistics'), departmentFilter
 
       if (start && end) {
         const Verification = (await import('../verification/verification.model.js')).default;
-        verifiedTaskIds = await Verification.distinct('task', {
-          updatedAt: { $gte: start, $lte: end }
-        });
+        const [vIds, tIds, rtsIds] = await Promise.all([
+          Verification.distinct('task', { updatedAt: { $gte: start, $lte: end } }),
+          Task.distinct('_id', { status: { $in: ['ready_to_shipment', 'dispatch', 'dispatched'] }, updatedAt: { $gte: start, $lte: end } }),
+          ReadyToShipment.distinct('task', { createdAt: { $gte: start, $lte: end } })
+        ]);
+        verifiedTaskIds = [...new Set([...vIds, ...tIds, ...rtsIds].map(id => id?.toString()).filter(Boolean))];
       }
     }
 
@@ -375,7 +378,7 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'logistics'), departmentF
   try {
     const Verification = (await import('../verification/verification.model.js')).default;
 
-    const taskQuery = { status: 'ready_to_shipment', isDeleted: false };
+     const taskQuery = { status: { $in: ['ready_to_shipment', 'dispatch', 'dispatched'] }, isDeleted: false };
     if (req.query.department) {
       taskQuery.department = req.query.department;
       if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
@@ -386,7 +389,7 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'logistics'), departmentF
     }
 
     const [verifiedStuck, tasks] = await Promise.all([
-      Verification.find({ status: 'verified' }).populate('assignedTo', 'name email').populate('lead', 'name phone status createdBy assignedTo pending_reorder_source'),
+      Verification.find({ status: { $in: ['verified', 'dispatch', 'dispatched'] } }).populate('assignedTo', 'name email').populate('lead', 'name phone status createdBy assignedTo pending_reorder_source'),
       Task.find(taskQuery).populate('assignedTo', 'name email').populate('lead', 'name phone status'),
     ]);
 
@@ -394,7 +397,7 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'logistics'), departmentF
       ...verifiedStuck.filter(v => v.task).map(v => {
         let rtsAssignedTo = v.assignedTo?._id || v.assignedTo;
         return Promise.all([
-          Task.findByIdAndUpdate(v.task, { status: 'ready_to_shipment', assignedTo: rtsAssignedTo }),
+          Task.findByIdAndUpdate(v.task, { status: 'dispatch', assignedTo: rtsAssignedTo }),
           ReadyToShipment.findOneAndUpdate(
             { task: v.task },
             { $set: { title: v.title, assignedTo: rtsAssignedTo, lead: v.lead?._id || v.lead, description: v.description, problem: v.problem, age: v.age, weight: v.weight, height: v.height, otherProblems: v.otherProblems, problemDuration: v.problemDuration, price: v.price, cityVillageType: v.cityVillageType, cityVillage: v.cityVillage, houseNo: v.houseNo, postOffice: v.postOffice, district: v.district, landmark: v.landmark, pincode: v.pincode, state: v.state, reminderAt: v.reminderAt }, $setOnInsert: { task: v.task } },
@@ -418,7 +421,7 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'logistics'), departmentF
       .sort({ createdAt: -1 })
       .lean();
 
-    const filtered = records.filter(r => r.task && r.task.status === 'ready_to_shipment' && !r.task.isDeleted);
+    const filtered = records.filter(r => r.task && ['ready_to_shipment', 'dispatch', 'dispatched'].includes(r.task.status) && !r.task.isDeleted);
     res.json({ status: 200, data: filtered });
   } catch (e) {
     res.status(500).json({ status: 500, message: e.message });
@@ -431,7 +434,7 @@ router.get('/for-shipment', auth('admin', 'manager', 'sales', 'logistics'), asyn
       .populate('lead', 'name phone email address')
       .populate('task', 'status isDeleted title')
       .sort({ createdAt: -1 });
-    const filtered = records.filter(r => r.task && r.task.status === 'ready_to_shipment' && !r.task.isDeleted);
+    const filtered = records.filter(r => r.task && ['ready_to_shipment', 'dispatch', 'dispatched'].includes(r.task.status) && !r.task.isDeleted);
     res.json({ status: 200, data: filtered });
   } catch (e) {
     res.status(500).json({ status: 500, message: e.message });
@@ -441,7 +444,7 @@ router.get('/for-shipment', auth('admin', 'manager', 'sales', 'logistics'), asyn
 router.get('/by-user/:userId', auth('admin', 'manager'), async (req, res) => {
   try {
     const records = await Task.find({
-      status: 'ready_to_shipment',
+      status: { $in: ['ready_to_shipment', 'dispatch', 'dispatched'] },
       isDeleted: false,
       assignedTo: req.params.userId,
     })

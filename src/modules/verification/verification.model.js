@@ -33,7 +33,7 @@ const verificationSchema = new mongoose.Schema(
       enum: ['migraine', 'piles'],
       default: null,
     },
-    status: { type: String, enum: ['pending', 'verified', 'rejected', 'on_hold'], default: 'pending' },
+    status: { type: String, enum: ['pending', 'verified', 'dispatch', 'dispatched', 'rejected', 'on_hold'], default: 'pending' },
     onHoldUntil: { type: Date },
     onHoldAt: { type: Date },
     onHoldReason: { type: String },

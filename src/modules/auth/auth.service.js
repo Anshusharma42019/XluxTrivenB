@@ -59,17 +59,41 @@ const register = async (userBody) => {
  * Login based on role.
  */
 const loginUser = async ({ role, email, phone, password }) => {
-  let user;
-  if (role === 'admin') {
-    if (!email) throw new ApiError(400, 'Email is required for admin login');
-    user = await User.findOne({ email, role: 'admin', isDeleted: false });
-  } else {
-    if (!phone) throw new ApiError(400, 'Phone is required');
-    user = await User.findOne({ phone, role, isDeleted: false });
+  let user = null;
+
+  if (email && String(email).trim()) {
+    const cleanEmail = String(email).trim();
+    const escaped = cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    user = await User.findOne({ 
+      $or: [
+        { email: new RegExp('^' + escaped + '$', 'i') },
+        { name: new RegExp('^' + escaped + '$', 'i') }
+      ],
+      isDeleted: false 
+    });
   }
+
+  if (!user && phone && String(phone).trim()) {
+    const rawPhone = String(phone).trim();
+    const cleanPhone = rawPhone.replace(/\D/g, '');
+    user = await User.findOne({
+      $or: [
+        { phone: rawPhone },
+        { phone: cleanPhone },
+        ...(cleanPhone.length >= 10 ? [{ phone: cleanPhone.slice(-10) }] : [])
+      ],
+      isDeleted: false
+    });
+  }
+
+  if (!user && role === 'admin') {
+    user = await User.findOne({ role: 'admin', isDeleted: false });
+  }
+
   if (!user || !(await user.isPasswordMatch(password))) {
     throw new ApiError(401, 'Incorrect credentials');
   }
+
   return user;
 };
 

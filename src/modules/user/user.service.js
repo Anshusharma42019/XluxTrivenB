@@ -60,7 +60,7 @@ const deleteUserById = async (userId) => {
 
 const getStaffShipmentCounts = async () => {
   const counts = await Task.aggregate([
-    { $match: { status: 'ready_to_shipment', isDeleted: false } },
+    { $match: { status: { $in: ['ready_to_shipment', 'dispatch', 'dispatched'] }, isDeleted: false } },
     { $group: { _id: '$assignedTo', count: { $sum: 1 } } },
   ]);
   return counts.reduce((acc, { _id, count }) => { acc[String(_id)] = count; return acc; }, {});

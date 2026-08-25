@@ -25,15 +25,6 @@ const getTask = catchAsync(async (req, res) => {
 
 const updateTask = catchAsync(async (req, res) => {
   const task = await taskService.updateTask(req.params.taskId, req.body, req.user.role, req.user._id, req.userDepartments);
-  if (req.body.status && task && task._id) {
-    try {
-      const { transitionRecord } = await import('../transition/transition.service.js');
-      const { Task } = await import('./task.model.js');
-      await transitionRecord(Task, task._id, req.body.status, req.body, req.user?._id || req.user || null);
-    } catch (err) {
-      console.error('[transitionRecord] Task status transition note:', err.message);
-    }
-  }
   res.json(new ApiResponse(httpStatus.OK, task, 'Task updated'));
 });
 
@@ -76,7 +67,7 @@ const checkTasks = catchAsync(async (req, res) => {
   const query = {
     isDeleted: false,
     dueDate: { $gte: start, $lte: end },
-    status: { $nin: ['verification', 'cnp', 'cancel_call', 'cancelled', 'ready_to_shipment', 'interested', 'on_hold', 'closed_lost'] }
+    status: { $nin: ['verification', 'cnp', 'cancel_call', 'cancelled', 'ready_to_shipment', 'interested', 'on_hold', 'closed_lost', 'dispatch', 'dispatched'] }
   };
   
   const hiddenLeadIds = await Lead.distinct('_id', { status: { $in: ['closed_lost', 'on_hold', 'follow_up'] }, isDeleted: { $ne: true } });
