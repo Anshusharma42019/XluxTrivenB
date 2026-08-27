@@ -52,10 +52,11 @@ const SMX_STATUS_MAP = {
   NEW: 'NEW',
   CANCELED: 'CANCELLED',
   CANCELLED: 'CANCELLED',
-  RTO_IN_TRANSIT: 'RTO_IN_TRANSIT',
-  RTO_INT: 'RTO_IN_TRANSIT',
-  'RTO-IT': 'RTO_IN_TRANSIT',
-  RTO_IT: 'RTO_IN_TRANSIT',
+  // All RTO in-transit variants → canonical RTO_INTRANSIT
+  RTO_IN_TRANSIT: 'RTO_INTRANSIT',
+  RTO_INT: 'RTO_INTRANSIT',
+  'RTO-IT': 'RTO_INTRANSIT',
+  RTO_IT: 'RTO_INTRANSIT',
   RTO_OFD: 'RTO_OFD',
   RAD: 'REACHED_AT_DESTINATION_HUB',
   RBS: 'REACHED_BACK_AT_SELLER_CITY',
@@ -741,9 +742,21 @@ export const debugSync = catchAsync(async (req, res) => {
 });
 
 
-// Terminal statuses that should be date-filtered; all other (active/in-progress)
-// statuses are always included because they represent the current live state.
-const TERMINAL_STATUSES_RE = /^(delivered|rto_delivered|cancelled|canceled|DEL|RTO|RTD)$/i;
+// ── Status classification for date filtering ────────────────────────────────
+// COMPLETED statuses → date-filter by delivered_at (when order finished)
+// ATTEMPT statuses   → date-filter by status_updated_at (when attempt happened)
+// PIPELINE statuses  → always show current count (no date filter — live state)
+//
+// Why this matters: OFD orders dispatched yesterday but not yet scanned again
+// should still show as OFD today. Filtering by date would hide them.
+const TERMINAL_STATUSES_RE = /^(delivered|rto_delivered|cancelled|canceled|DEL|RTD)$/i;
+
+// Statuses that represent a discrete delivery ATTEMPT/EVENT event — date-filter these
+const ATTEMPT_STATUSES_RE = /^(undelivered_1st_attempt|undelivered_2nd_attempt|undelivered_3rd_attempt|undelivered|undelivered_attempt_failure|undelivered_failure|pickup_failed|pickup_cancelled|delivery_exception|out_for_delivery|ofd)$/i;
+
+// Pipeline/live statuses — always show current count regardless of date
+// These represent WHERE orders ARE now, not WHAT happened on a specific day
+const PIPELINE_STATUSES_RE = /^(new|pickup_scheduled|shipped|in_transit|rto_initiated|rto_in_transit|rto_intransit|rto_ofd|rto_undelivered|out_for_pickup|pickup_done|reached_at_destination_hub|reached_back_at_seller_city|misrouted|damaged|lost|shipment_booked|invoiced|spb|spd|int|ofp|pkd|rto|rra|run)$/i;
 
 export const getDeliveredStats = catchAsync(async (req, res) => {
   const { from, to } = req.query;
@@ -754,28 +767,31 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
       $gte: new Date(from + 'T00:00:00.000+05:30'),
       $lte: new Date(to + 'T23:59:59.999+05:30'),
     };
-    // Terminal statuses (DELIVERED, RTO_DELIVERED, CANCELLED) are date-filtered.
-    // Active/in-progress statuses (OUT_FOR_DELIVERY, IN_TRANSIT, UNDELIVERED_*, etc.)
-    // always show because they represent the current live state of the order.
     match.$or = [
-      // DELIVERED orders: prefer delivered_at, fallback to status_updated_at, then createdAt
+      // ── DELIVERED: filter by delivered_at (actual delivery date) ──────────
       { status: /^delivered$/i, delivered_at: dateFilter },
       { status: /^delivered$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], status_updated_at: dateFilter },
       { status: /^delivered$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], $and: [{ $or: [{ status_updated_at: { $exists: false } }, { status_updated_at: null }] }], createdAt: dateFilter },
-      // RTO_DELIVERED orders: same fallback logic
+      // RTO_DELIVERED: same fallback logic
       { status: /^rto_delivered$/i, delivered_at: dateFilter },
       { status: /^rto_delivered$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], status_updated_at: dateFilter },
-      // Short codes
+      // Short codes (DEL, RTD)
       { status: /^DEL$/i, delivered_at: dateFilter },
       { status: /^DEL$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], status_updated_at: dateFilter },
       { status: /^RTD$/i, delivered_at: dateFilter },
       { status: /^RTD$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], status_updated_at: dateFilter },
-      // CANCELLED orders: date-filter by status_updated_at or createdAt
+      // ── CANCELLED: filter by status_updated_at or createdAt ───────────────
       { status: /^cancell?ed$/i, status_updated_at: dateFilter },
       { status: /^cancell?ed$/i, status_updated_at: { $exists: false }, createdAt: dateFilter },
       { status: /^cancell?ed$/i, status_updated_at: null, createdAt: dateFilter },
-      // ALL active/in-progress statuses: always include (no date restriction)
-      { status: { $not: TERMINAL_STATUSES_RE } },
+      // ── ATTEMPT statuses: filter by when the attempt happened ─────────────
+      // Shows only today's failed delivery attempts / pickup failures
+      { status: ATTEMPT_STATUSES_RE, status_updated_at: dateFilter },
+      { status: ATTEMPT_STATUSES_RE, $or: [{ status_updated_at: { $exists: false } }, { status_updated_at: null }], createdAt: dateFilter },
+      // ── PIPELINE statuses: always include regardless of date ───────────────
+      // OFD, IN_TRANSIT, NEW, etc. show the live current count.
+      // e.g. 18 OFD orders dispatched should ALL show even if some went OFD yesterday.
+      { status: PIPELINE_STATUSES_RE },
     ];
   }
 
@@ -834,6 +850,39 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
   res.json(new ApiResponse(200, { count: deliveredCountResult, revenue: totalRevenue, statusBreakdown: breakdown }, 'Delivered stats'));
 });
 
+// Known DB spelling aliases: some statuses were stored with alternate spellings
+// This ensures clicking a card queries ALL variants stored in the DB.
+const STATUS_ALIASES = {
+  RTO_INTRANSIT:   ['RTO_INTRANSIT', 'RTO_IN_TRANSIT', 'RTO_INT', 'RTO-IT', 'RTO_IT', 'RRA'],
+  RTO_IN_TRANSIT:  ['RTO_INTRANSIT', 'RTO_IN_TRANSIT', 'RTO_INT', 'RTO-IT', 'RTO_IT', 'RRA'],
+  NEW:             ['NEW', 'NFI', 'SPB'],
+  UNDELIVERED:     ['UNDELIVERED', 'UND', 'UNDELIVERED_ATTEMPT_FAILURE', 'UNDELIVERED_FAILURE'],
+  CANCELLED:       ['CANCELLED', 'CANCELED', 'SC'],
+  DELIVERED:       ['DELIVERED', 'DEL'],
+  RTO_DELIVERED:   ['RTO_DELIVERED', 'RTD'],
+  IN_TRANSIT:      ['IN_TRANSIT', 'INT'],
+  OUT_FOR_DELIVERY:['OUT_FOR_DELIVERY', 'OFD'],
+  OUT_FOR_PICKUP:  ['OUT_FOR_PICKUP', 'OFP'],
+  PICKUP_DONE:     ['PICKUP_DONE', 'PKD'],
+  PICKUP_FAILED:   ['PICKUP_FAILED', 'PKF'],
+  PICKUP_CANCELLED:['PICKUP_CANCELLED', 'PCN'],
+  PICKUP_SCHEDULED:['PICKUP_SCHEDULED', 'SPD'],
+  DELIVERY_EXCEPTION: ['DELIVERY_EXCEPTION', 'DEX'],
+  DAMAGED:         ['DAMAGED', 'DMG'],
+  LOST:            ['LOST', 'LOS'],
+  RTO_INITIATED:   ['RTO_INITIATED', 'RTO'],
+  RTO_UNDELIVERED: ['RTO_UNDELIVERED', 'RUN'],
+  SHIPMENT_BOOKED: ['SHIPMENT_BOOKED', 'SPB'],
+  DISPOSED_OFF:    ['DISPOSED_OFF', 'CUN'],
+  REVERSE_PICKUP_FAILED:     ['REVERSE_PICKUP_FAILED', 'ADI'],
+  REVERSE_PICKUP_SCHEDULED:  ['REVERSE_PICKUP_SCHEDULED', 'CTR'],
+  REVERSE_PICKED_UP:         ['REVERSE_PICKED_UP', 'DAC'],
+  REVERSE_PICKUP_CANCELLED:  ['REVERSE_PICKUP_CANCELLED', 'ONH'],
+  REACHED_AT_DESTINATION_HUB:['REACHED_AT_DESTINATION_HUB', 'RAD'],
+  REACHED_BACK_AT_SELLER_CITY:['REACHED_BACK_AT_SELLER_CITY', 'RBS'],
+  MISROUTED:       ['MISROUTED', 'MIS'],
+};
+
 export const getStatusOrders = catchAsync(async (req, res) => {
   const { status, shipment_status, from, to, limit = 50 } = req.query;
   
@@ -845,12 +894,17 @@ export const getStatusOrders = catchAsync(async (req, res) => {
 
   const match = { platform: 'shipmaxx' };
 
-  const reverseShortCodes = Object.entries(SMX_STATUS_MAP)
-    .filter(([, fullName]) => fullName === queryStatus)
-    .map(([shortCode]) => shortCode);
-  const allVariants = [queryStatus, ...reverseShortCodes];
+  // Build status variants: use alias map if available, otherwise fall back to short-code reverse lookup
+  const aliasVariants = STATUS_ALIASES[queryStatus];
+  const allVariants = aliasVariants || (() => {
+    const reverseShortCodes = Object.entries(SMX_STATUS_MAP)
+      .filter(([, fullName]) => fullName === queryStatus)
+      .map(([shortCode]) => shortCode);
+    return [queryStatus, ...reverseShortCodes];
+  })();
 
-  match.status = { $in: allVariants.map(s => new RegExp(`^${s.replace(/[-_]/g, '[-_ ]')}$`, 'i')) };
+  // Exact case-insensitive match for each variant (escape special chars, no char-class expansion)
+  match.status = { $in: allVariants.map(s => new RegExp(`^${s.replace(/[-]/g, '\\-')}$`, 'i')) };
 
   if (from && to) {
     const dateFilter = {
@@ -872,9 +926,17 @@ export const getStatusOrders = catchAsync(async (req, res) => {
         { status_updated_at: { $exists: false }, createdAt: dateFilter },
         { status_updated_at: null, createdAt: dateFilter },
       ];
+    } else if (ATTEMPT_STATUSES_RE.test(queryStatus)) {
+      // ATTEMPT statuses (UNDELIVERED_*, PICKUP_FAILED, etc.): filter by status_updated_at
+      // Shows only orders whose delivery attempt happened within the date range
+      match.$or = [
+        { status_updated_at: dateFilter },
+        { $or: [{ status_updated_at: { $exists: false } }, { status_updated_at: null }], createdAt: dateFilter },
+      ];
     }
-    // Active/in-progress statuses: NO date filter — show all current orders in that status
+    // PIPELINE statuses (OFD, IN_TRANSIT, NEW, etc.): no date filter — show live current count
   }
+
 
   // For staff roles (non-admin), filter DELIVERED/RTO_DELIVERED by verified_by = current user
   const isDeliveredStatus = /^(delivered|rto_delivered|DEL|RTO|RTD)$/i.test(queryStatus);
@@ -1189,15 +1251,41 @@ export const runSyncInBackground = async (mode = 'quick') => {
           const query = { platform: 'shipmaxx' };
           if (s.order_id) query.order_id = String(s.order_id); else query.awb_code = String(s.awb);
           const newStatus = normalizeShipmaxxStatus(s.status);
-          const existing = await Order.findOne(query).select('status status_updated_at').lean();
+          const existing = await Order.findOne(query).select('status status_updated_at payment_method courier_name order_items createdAt').lean();
           let statusUpdatedAt = s.date_added ? new Date(s.date_added) : new Date();
           let finalStatus = newStatus;
           if (existing) { statusUpdatedAt = existing.status_updated_at || statusUpdatedAt; if (newStatus === 'UNKNOWN') finalStatus = existing.status; }
-          const updateData = { order_id: String(s.order_id || s.awb), awb_code: String(s.awb || ''), status: finalStatus, platform: 'shipmaxx', payment_method: s.payment_method || '', status_updated_at: statusUpdatedAt };
+          
+          const updateData = { order_id: String(s.order_id || s.awb), awb_code: String(s.awb || ''), platform: 'shipmaxx', status_updated_at: statusUpdatedAt };
+          
+          const isGenericUndelivered = (st) => /^(undelivered|undelivered_attempt_failure|undelivered_failure)$/i.test(st);
+          const isSpecificUndelivered = (st) => /^undelivered_\d(st|nd|rd)_attempt$/i.test(st);
+          let shouldUpdateStatus = true;
+          const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED', 'OUT_FOR_DELIVERY'];
+          if (existing) {
+            if (protectedStatuses.includes(existing.status)) {
+              shouldUpdateStatus = false;
+            } else if (isSpecificUndelivered(existing.status) && isGenericUndelivered(finalStatus)) {
+              shouldUpdateStatus = false;
+            }
+          }
+          if (shouldUpdateStatus) {
+            updateData.status = finalStatus;
+          }
+
+          if (s.payment_method && (!existing || !existing.payment_method)) {
+            updateData.payment_method = s.payment_method;
+          }
           const courier = s.carrier_name || s.courier_name || s.carrier;
-          if (courier) updateData.courier_name = courier;
-          if (s.created_at) updateData.createdAt = new Date(s.created_at); else if (s.date_added) updateData.createdAt = new Date(s.date_added);
-          if (s.products && Array.isArray(s.products)) updateData.order_items = s.products.map(p => ({ name: p.name, sku: p.sku, units: p.quantity }));
+          if (courier && (!existing || !existing.courier_name)) {
+            updateData.courier_name = courier;
+          }
+          if (!existing) {
+            if (s.created_at) updateData.createdAt = new Date(s.created_at); else if (s.date_added) updateData.createdAt = new Date(s.date_added);
+          }
+          if (s.products && Array.isArray(s.products) && (!existing || !existing.order_items || existing.order_items.length === 0)) {
+            updateData.order_items = s.products.map(p => ({ name: p.name, sku: p.sku, units: p.quantity }));
+          }
           await Order.updateWithTransaction(query, { $set: updateData }, { upsert: true }).catch(() => {});
           updatedCount++;
         }
@@ -1214,14 +1302,42 @@ export const runSyncInBackground = async (mode = 'quick') => {
         if (orders.length === 0) break;
         for (const o of orders) {
           if (!o.order_id) continue;
+          const query = { platform: 'shipmaxx', order_id: String(o.order_id) };
+          const existing = await Order.findOne(query).select('status lead_id billing_customer_name billing_phone billing_address billing_pincode sub_total courier_name awb_code order_items createdAt').lean();
+          
           const cCust = o.customer || o.billing_address || {};
-          const ud = { platform: 'shipmaxx', billing_customer_name: o.customer_name || cCust.name || cCust.first_name || '', billing_phone: o.phone || cCust.phone || '', billing_address: o.address || cCust.address || '', billing_pincode: o.billing_zip || o.shipping_zip || cCust.zip || cCust.pincode || '', sub_total: Number(o.total_price || (o.totals?.find?.(t => t.code === 'total')?.value)) || 0 };
-          const c = o.carrier_name || o.courier_name || o.carrier; if (c) ud.courier_name = c;
-          if (o.created_at) ud.createdAt = new Date(o.created_at); if (o.awb) ud.awb_code = String(o.awb);
+          const ud = { platform: 'shipmaxx', order_id: String(o.order_id) };
+          if (o.customer_name && (!existing || !existing.billing_customer_name)) ud.billing_customer_name = o.customer_name || cCust.name || cCust.first_name || '';
+          if (o.phone && (!existing || !existing.billing_phone)) ud.billing_phone = o.phone || cCust.phone || '';
+          if (o.address && (!existing || !existing.billing_address)) ud.billing_address = o.address || cCust.address || '';
+          const zip = o.billing_zip || o.shipping_zip || cCust.zip || cCust.pincode;
+          if (zip && (!existing || !existing.billing_pincode)) ud.billing_pincode = zip || '';
+          if (o.total_price && (!existing || !existing.sub_total)) ud.sub_total = Number(o.total_price || (o.totals?.find?.(t => t.code === 'total')?.value)) || 0;
+
+          const c = o.carrier_name || o.courier_name || o.carrier;
+          if (c && (!existing || !existing.courier_name)) ud.courier_name = c;
+          if (!existing && o.created_at) ud.createdAt = new Date(o.created_at);
+          if (o.awb && (!existing || !existing.awb_code)) ud.awb_code = String(o.awb);
+          
           if (o.status) {
-            ud.status = normalizeShipmaxxStatus(o.status);
+            const newStatus = normalizeShipmaxxStatus(o.status);
+            const isGenericUndelivered = (st) => /^(undelivered|undelivered_attempt_failure|undelivered_failure)$/i.test(st);
+            const isSpecificUndelivered = (st) => /^undelivered_\d(st|nd|rd)_attempt$/i.test(st);
+            let shouldUpdateStatus = true;
+            const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED', 'OUT_FOR_DELIVERY'];
+            if (existing) {
+              if (protectedStatuses.includes(existing.status)) {
+                shouldUpdateStatus = false;
+              } else if (isSpecificUndelivered(existing.status) && isGenericUndelivered(newStatus)) {
+                shouldUpdateStatus = false;
+              }
+            }
+            if (shouldUpdateStatus) {
+              ud.status = newStatus;
+            }
           }
-          if (o.order_products && Array.isArray(o.order_products)) {
+          
+          if (o.order_products && Array.isArray(o.order_products) && (!existing || !existing.order_items || existing.order_items.length === 0)) {
             ud.order_items = o.order_products.map(p => ({
               name: p.title || p.name || '',
               sku: p.sku || '',
@@ -1229,7 +1345,7 @@ export const runSyncInBackground = async (mode = 'quick') => {
               selling_price: Number(p.price) || 0
             }));
           }
-          await Order.updateWithTransaction({ platform: 'shipmaxx', order_id: String(o.order_id) }, { $set: ud }, { upsert: true }).catch(() => {});
+          await Order.updateWithTransaction(query, { $set: ud }, { upsert: true }).catch(() => {});
         }
         console.log(`[Sync ${isFullSync ? 'Full' : 'Quick'}] orders page ${op}`);
         await new Promise(r => setTimeout(r, 200)); op++;
@@ -1316,9 +1432,18 @@ export const runSyncInBackground = async (mode = 'quick') => {
           if (status === 'UNDELIVERED' || status === 'UNDELIVERED_ATTEMPT_FAILURE' || status === 'UNDELIVERED_FAILURE' || (ndrKw.some(k => status.includes(k)) && !status.includes('DELIVERED'))) {
             const a = o.delivery_attempt || 1; status = a === 1 ? 'UNDELIVERED_1ST_ATTEMPT' : a === 2 ? 'UNDELIVERED_2ND_ATTEMPT' : a === 3 ? 'UNDELIVERED_3RD_ATTEMPT' : 'UNDELIVERED';
           }
-          const update = { status, status_updated_at: new Date() };
+          const statusChanged = status !== o.status;
+          const update = { status };
           if (!o.courier_name && o.awb_code) { const g = guessCourierByAwb(o.awb_code); if (g) update.courier_name = g; }
-          if (tracking.history?.length > 0) update.status_updated_at = extractStatusUpdatedAt(tracking, status);
+          if (statusChanged) {
+            // Status changed — derive real timestamp from history, fall back to now
+            update.status_updated_at = tracking.history?.length > 0
+              ? extractStatusUpdatedAt(tracking, status)
+              : new Date();
+          } else {
+            // Status unchanged — preserve existing timestamp, do NOT re-stamp with today
+            update.status_updated_at = o.status_updated_at || new Date();
+          }
           if (status === 'DELIVERED') {
             let delAt = null;
             if (tracking.history) { const de = tracking.history.find(h => h.system_status_code === 'DEL' || (h.system_status_name || '').toLowerCase() === 'delivered' || (h.status || '').toLowerCase() === 'delivered'); if (de?.date || de?.timestamp) delAt = parseShipMaxxDate(de.date || de.timestamp); }
@@ -1348,7 +1473,7 @@ export const runSyncInBackground = async (mode = 'quick') => {
 };
 
 export const syncShipmaxx = catchAsync(async (req, res) => {
-  const mode = (req.query?.mode || req.body?.mode || 'quick').toLowerCase();
+  const mode = (req.query?.mode || req.body?.mode || 'full').toLowerCase();
   
   // Return immediately so Hostinger doesn't timeout the HTTP request
   res.json(new ApiResponse(200, { mode }, `Sync started in background. This might take a few minutes.`));
@@ -2185,13 +2310,16 @@ export const shipmaxxWebhook = catchAsync(async (req, res) => {
   const payload = req.body;
   console.log('[ShipMaxx Webhook] Received:', JSON.stringify(payload).substring(0, 300));
 
+  // Support nested payloads (e.g. payload.data, payload.shipment, payload.order)
+  const p = payload.data || payload.shipment || payload.order || payload;
+
   // Extract fields — ShipMaxx uses various field names
-  const rawStatus = payload.status || payload.current_status || payload.shipment_status || payload.delivery_status || '';
-  const awb       = payload.awb || payload.awb_code || payload.tracking_number || '';
-  const orderId   = payload.order_id ? String(payload.order_id) : '';
-  const phone     = payload.phone || payload.customer_phone || payload.billing_phone || '';
-  const name      = payload.customer_name || payload.name || '';
-  const eventDate = payload.timestamp || payload.updated_at || payload.date ? new Date(payload.timestamp || payload.updated_at || payload.date) : new Date();
+  const rawStatus = p.status || p.current_status || p.shipment_status || p.delivery_status || '';
+  const awb       = p.awb || p.awb_code || p.tracking_number || '';
+  const orderId   = p.order_id ? String(p.order_id) : '';
+  const phone     = p.phone || p.customer_phone || p.billing_phone || '';
+  const name      = p.customer_name || p.name || '';
+  const eventDate = p.timestamp || p.updated_at || p.date ? new Date(p.timestamp || p.updated_at || p.date) : new Date();
 
   if (!rawStatus || (!awb && !orderId)) {
     console.log('[ShipMaxx Webhook] Missing status/awb/orderId — ignoring');
@@ -2208,20 +2336,34 @@ export const shipmaxxWebhook = catchAsync(async (req, res) => {
 
   const existing = await Order.findOne({ $or: query }).lean();
 
-  const update = { status, status_updated_at: eventDate };
+  const update = { status_updated_at: eventDate };
   if (awb) update.awb_code = awb;
   if (phone && !existing?.billing_phone) update.billing_phone = phone;
   if (name && !existing?.billing_customer_name) update.billing_customer_name = name;
 
-  if (status === 'DELIVERED') {
+  // Attempt & NDR mapping matching logic
+  let finalStatus = status;
+  const ndrKw = ['EXCEPTION', 'REFUSED', 'NOT AVAILABLE', 'INCOMPLETE', 'ACTION TAKEN', 'ATTEMPT FAILURE', 'ADDRESS'];
+  if (status === 'UNDELIVERED' || status === 'UNDELIVERED_ATTEMPT_FAILURE' || status === 'UNDELIVERED_FAILURE' || (ndrKw.some(k => status.includes(k)) && !status.includes('DELIVERED'))) {
+    const attempt = Number(p.attempt_number || p.attemptNumber || p.attempt_count || p.attemptCount || (existing ? existing.delivery_attempt : 1)) || 1;
+    finalStatus = attempt === 1 ? 'UNDELIVERED_1ST_ATTEMPT' : attempt === 2 ? 'UNDELIVERED_2ND_ATTEMPT' : attempt === 3 ? 'UNDELIVERED_3RD_ATTEMPT' : 'UNDELIVERED';
+    update.delivery_attempt = attempt;
+  }
+
+  const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED', 'OUT_FOR_DELIVERY'];
+  if (!existing || !protectedStatuses.includes(existing.status)) {
+    update.status = finalStatus;
+  }
+
+  if (finalStatus === 'DELIVERED' || status === 'DELIVERED') {
     update.delivered_at = eventDate;
   }
 
-  // Upsert the order
-  const updated = await Order.findOneAndUpdate(
+  // Update order using transaction helper to keep sub-collections synced
+  const updated = await Order.updateWithTransaction(
     query.length === 1 ? query[0] : { $or: query },
     { $set: update },
-    { returnDocument: 'after', upsert: false }
+    { upsert: false }
   );
 
   if (!updated) {

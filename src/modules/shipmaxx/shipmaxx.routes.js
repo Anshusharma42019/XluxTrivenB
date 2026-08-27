@@ -36,9 +36,58 @@ router.get('/debug/due-followups', async (req, res) => {
   res.json({ total_due_1st_call: due.length, due });
 });
 
+// ── One-time DB migration: unify RTO_IN_TRANSIT → RTO_INTRANSIT ──────────────
+router.get('/debug/fix-rto-status', async (req, res) => {
+  try {
+    const result = await Order.updateMany(
+      { platform: 'shipmaxx', status: { $in: ['RTO_IN_TRANSIT', 'RTO_INT', 'RTO-IT', 'RTO_IT'] } },
+      { $set: { status: 'RTO_INTRANSIT' } }
+    );
+    res.json({ migrated: result.modifiedCount });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+
+// Run once after deploying the cron status_updated_at fix to correct any timestamps
+// that were erroneously stamped with today's date by previous cron runs.
+router.get('/debug/backfill-status-timestamps', async (req, res) => {
+  try {
+    const smx = (await import('./shipmaxx.service.js')).default;
+    const { normalizeShipmaxxStatus, extractStatusUpdatedAt } = await import('./shipmaxx.controller.js');
+    const trackingLimit = new Date();
+    trackingLimit.setMonth(trackingLimit.getMonth() - 1);
+    trackingLimit.setDate(1);
+    trackingLimit.setHours(0, 0, 0, 0);
+
+    const activeOrders = await Order.find({
+      platform: 'shipmaxx',
+      awb_code: { $exists: true, $ne: '' },
+      createdAt: { $gte: trackingLimit },
+      status: { $not: /^(delivered|rto_delivered|cancelled)/i },
+    }).select('_id awb_code status status_updated_at createdAt').lean();
+
+    let fixed = 0, failed = 0;
+    const results = [];
+    for (const o of activeOrders) {
+      try {
+        const trackRes = await smx.trackShipment(o.awb_code);
+        const tracking = trackRes?.data?.data || trackRes?.data || trackRes || {};
+        if (tracking.history?.length > 0) {
+          const corrected = extractStatusUpdatedAt(tracking, o.status);
+          await Order.updateOne({ _id: o._id }, { $set: { status_updated_at: corrected } });
+          results.push({ awb: o.awb_code, status: o.status, was: o.status_updated_at, now: corrected });
+          fixed++;
+        }
+      } catch (e) { failed++; }
+    }
+    res.json({ checked: activeOrders.length, fixed, failed, results: results.slice(0, 20) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get('/debug/run-cron', async (req, res) => {
   const smx = (await import('./shipmaxx.service.js')).default;
   const { normalizeShipmaxxStatus, parseShipMaxxDate, extractStatusUpdatedAt } = await import('./shipmaxx.controller.js');
+
   
   const trackingLimit = new Date();
   trackingLimit.setMonth(trackingLimit.getMonth() - 1);

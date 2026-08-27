@@ -75,7 +75,7 @@ export const runCronSync = async () => {
           else query.awb_code = String(s.awb);
 
           const newStatus = normalizeShipmaxxStatus(s.status);
-          const existing = await Order.findOne(query).select('status status_updated_at lead_id').lean();
+          const existing = await Order.findOne(query).select('status status_updated_at lead_id payment_method courier_name order_items createdAt').lean();
           
           if (existing) {
             existingCountInPage++;
@@ -94,18 +94,40 @@ export const runCronSync = async () => {
           const updateData = {
             order_id: String(s.order_id || s.awb),
             awb_code: String(s.awb || ''),
-            status: finalStatus,
             platform: 'shipmaxx',
-            payment_method: s.payment_method || '',
             status_updated_at: statusUpdatedAt,
           };
-          const courier = s.carrier_name || s.courier_name || s.carrier;
-          if (courier) updateData.courier_name = courier;
 
-          if (s.created_at) updateData.createdAt = new Date(s.created_at);
-          else if (s.date_added) updateData.createdAt = new Date(s.date_added);
+          const isGenericUndelivered = (st) => /^(undelivered|undelivered_attempt_failure|undelivered_failure)$/i.test(st);
+          const isSpecificUndelivered = (st) => /^undelivered_\d(st|nd|rd)_attempt$/i.test(st);
+          let shouldUpdateStatus = true;
+          const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED', 'OUT_FOR_DELIVERY'];
+          if (existing) {
+            if (protectedStatuses.includes(existing.status)) {
+              shouldUpdateStatus = false;
+            } else if (isSpecificUndelivered(existing.status) && isGenericUndelivered(finalStatus)) {
+              shouldUpdateStatus = false;
+            }
+          }
+          if (shouldUpdateStatus) {
+            updateData.status = finalStatus;
+          }
+
+          if (s.payment_method && (!existing || !existing.payment_method)) {
+            updateData.payment_method = s.payment_method;
+          }
+
+          const courier = s.carrier_name || s.courier_name || s.carrier;
+          if (courier && (!existing || !existing.courier_name)) {
+            updateData.courier_name = courier;
+          }
+
+          if (!existing) {
+            if (s.created_at) updateData.createdAt = new Date(s.created_at);
+            else if (s.date_added) updateData.createdAt = new Date(s.date_added);
+          }
           
-          if (s.products && Array.isArray(s.products)) {
+          if (s.products && Array.isArray(s.products) && (!existing || !existing.order_items || existing.order_items.length === 0)) {
             updateData.order_items = s.products.map(p => ({
               name: p.name, sku: p.sku, units: p.quantity
             }));
@@ -145,7 +167,7 @@ export const runCronSync = async () => {
         for (const o of orders) {
           if (!o.order_id) continue;
           const query = { platform: 'shipmaxx', order_id: String(o.order_id) };
-          const existing = await Order.findOne(query).select('status lead_id').lean();
+          const existing = await Order.findOne(query).select('status lead_id billing_customer_name billing_phone billing_address billing_pincode sub_total courier_name awb_code order_items createdAt').lean();
           
           if (existing) {
             existingCountInPage++;
@@ -153,22 +175,39 @@ export const runCronSync = async () => {
           
           const ud = {
             platform: 'shipmaxx',
-            billing_customer_name: o.customer_name || '',
-            billing_phone: o.phone || '',
-            billing_address: o.address || '',
-            billing_pincode: o.billing_zip || o.shipping_zip || '',
-            sub_total: Number(o.total_price) || 0
+            order_id: String(o.order_id)
           };
+          if (o.customer_name && (!existing || !existing.billing_customer_name)) ud.billing_customer_name = o.customer_name;
+          if (o.phone && (!existing || !existing.billing_phone)) ud.billing_phone = o.phone;
+          if (o.address && (!existing || !existing.billing_address)) ud.billing_address = o.address;
+          const zip = o.billing_zip || o.shipping_zip;
+          if (zip && (!existing || !existing.billing_pincode)) ud.billing_pincode = zip;
+          if (o.total_price && (!existing || !existing.sub_total)) ud.sub_total = Number(o.total_price) || 0;
+
           const c = o.carrier_name || o.courier_name || o.carrier;
-          if (c) ud.courier_name = c;
-          if (o.created_at) ud.createdAt = new Date(o.created_at);
-          if (o.awb) ud.awb_code = String(o.awb);
+          if (c && (!existing || !existing.courier_name)) ud.courier_name = c;
+          if (!existing && o.created_at) ud.createdAt = new Date(o.created_at);
+          if (o.awb && (!existing || !existing.awb_code)) ud.awb_code = String(o.awb);
           
           if (o.status) {
-            ud.status = normalizeShipmaxxStatus(o.status);
+            const newStatus = normalizeShipmaxxStatus(o.status);
+            const isGenericUndelivered = (st) => /^(undelivered|undelivered_attempt_failure|undelivered_failure)$/i.test(st);
+            const isSpecificUndelivered = (st) => /^undelivered_\d(st|nd|rd)_attempt$/i.test(st);
+            let shouldUpdateStatus = true;
+            const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED', 'OUT_FOR_DELIVERY'];
+            if (existing) {
+              if (protectedStatuses.includes(existing.status)) {
+                shouldUpdateStatus = false;
+              } else if (isSpecificUndelivered(existing.status) && isGenericUndelivered(newStatus)) {
+                shouldUpdateStatus = false;
+              }
+            }
+            if (shouldUpdateStatus) {
+              ud.status = newStatus;
+            }
           }
           
-          if (o.order_products && Array.isArray(o.order_products)) {
+          if (o.order_products && Array.isArray(o.order_products) && (!existing || !existing.order_items || existing.order_items.length === 0)) {
             ud.order_items = o.order_products.map(p => ({
               name: p.title || p.name || '',
               sku: p.sku || '',
@@ -206,7 +245,7 @@ export const runCronSync = async () => {
         { status: /^(delivered|rto_delivered)/i, delivered_at: { $exists: false } },
         { status: /^(delivered|rto_delivered)/i, delivered_at: null }
       ]
-    }).sort({ status_updated_at: 1, createdAt: 1 }).limit(50).lean(); // limit to 50 to avoid timeout
+    }).sort({ status_updated_at: 1, createdAt: 1 }).limit(200).lean(); // limit to 200 to keep it highly responsive
 
     let updatedCount = 0;
     for (const o of activeOrders) {
@@ -222,10 +261,26 @@ export const runCronSync = async () => {
           if (status === 'UNDELIVERED' || status === 'UNDELIVERED_ATTEMPT_FAILURE' || status === 'UNDELIVERED_FAILURE' || (ndrKw.some(k => status.includes(k)) && !status.includes('DELIVERED'))) {
             const a = o.delivery_attempt || 1; status = a === 1 ? 'UNDELIVERED_1ST_ATTEMPT' : a === 2 ? 'UNDELIVERED_2ND_ATTEMPT' : a === 3 ? 'UNDELIVERED_3RD_ATTEMPT' : 'UNDELIVERED';
           }
-          let actualUpdatedAt = new Date();
-          if (tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
-            actualUpdatedAt = extractStatusUpdatedAt(tracking, status);
+
+          // Only compute a new status_updated_at when the status has actually changed.
+          // If status is unchanged, preserve the existing DB timestamp so that the order
+          // does NOT get stamped with today's date on every cron run (which was causing
+          // all active orders to appear in the "TODAY" date filter even if created days ago).
+          const statusChanged = status !== o.status;
+          let actualUpdatedAt;
+          if (statusChanged) {
+            // Status changed — derive the real timestamp from tracking history
+            if (tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
+              actualUpdatedAt = extractStatusUpdatedAt(tracking, status);
+            } else {
+              // No history available — use now as best approximation
+              actualUpdatedAt = new Date();
+            }
+          } else {
+            // Status unchanged — keep existing timestamp, do NOT re-stamp with today
+            actualUpdatedAt = o.status_updated_at || new Date();
           }
+
           const update = { status, status_updated_at: actualUpdatedAt };
           
           if (status === 'DELIVERED') {
@@ -308,10 +363,10 @@ export const runCronSync = async () => {
             ud.delivered_at = sua;
         }
         if (ndr.customer) { 
-            if (ndr.customer.name) ud.billing_customer_name = ndr.customer.name; 
-            if (ndr.customer.phone) ud.billing_phone = ndr.customer.phone; 
-            if (ndr.customer.city) ud.billing_city = ndr.customer.city; 
-            if (ndr.customer.state) ud.billing_state = ndr.customer.state; 
+            if (ndr.customer.name && (!existing || !existing.billing_customer_name)) ud.billing_customer_name = ndr.customer.name; 
+            if (ndr.customer.phone && (!existing || !existing.billing_phone)) ud.billing_phone = ndr.customer.phone; 
+            if (ndr.customer.city && (!existing || !existing.billing_city)) ud.billing_city = ndr.customer.city; 
+            if (ndr.customer.state && (!existing || !existing.billing_state)) ud.billing_state = ndr.customer.state; 
         }
         await Order.updateWithTransaction(query, { $set: ud }, { upsert: true }).catch(() => {});
       }
@@ -355,11 +410,11 @@ export const runCronSync = async () => {
 };
 
 const initShipmaxxCron = () => {
-  // Sync pending orders every 5 minutes
-  cron.schedule('*/5 * * * *', async () => {
+  // Sync pending orders every 2 minutes
+  cron.schedule('*/2 * * * *', async () => {
     await runCronSync();
   });
-  console.log('[Cron] ShipMaxx auto-sync scheduled (every 5m)');
+  console.log('[Cron] ShipMaxx auto-sync scheduled (every 2m)');
 };
 
 export default initShipmaxxCron;
