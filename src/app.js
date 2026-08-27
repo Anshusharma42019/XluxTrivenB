@@ -73,11 +73,13 @@ app.get("/", (req, res) => res.json({
 // Shiprocket webhook (no auth — Shiprocket calls this directly)
 app.post("/webhook/shiprocket", webhook);
 app.post("/api/v1/webhook/shiprocket", webhook);
+app.get(["/webhook/shiprocket", "/api/v1/webhook/shiprocket"], (req, res) => res.send("Shiprocket webhook is active. Send POST request with payload."));
 
 // ShipMaxx webhook (no auth — ShipMaxx calls this directly)
 // Set this URL in ShipMaxx panel: https://xluxtriven.de/webhook/shipmaxx
 app.post("/webhook/shipmaxx", shipmaxxWebhook);
 app.post("/api/v1/webhook/shipmaxx", shipmaxxWebhook);
+app.get(["/webhook/shipmaxx", "/api/v1/webhook/shipmaxx"], (req, res) => res.send("ShipMaxx webhook is active. Send POST request with payload."));
 
 // v1 api routes
 app.use(cacheInvalidatorMiddleware);
