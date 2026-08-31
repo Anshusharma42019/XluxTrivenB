@@ -107,7 +107,7 @@ router.get('/debug/run-cron', async (req, res) => {
     try {
       const trackRes = await smx.trackShipment(o.awb_code);
       const tracking = trackRes?.data?.data || trackRes?.data || trackRes || {};
-      const rawStatus = tracking.current_status || tracking.status || tracking.shipment_status || tracking.delivery_status;
+      const rawStatus = tracking.current_status || tracking.status || tracking.shipment_status || tracking.delivery_status || tracking.history?.[0]?.system_status_name || tracking.history?.[0]?.system_status_code || tracking.history?.[0]?.status;
       
       if (rawStatus) {
         let status = normalizeShipmaxxStatus(rawStatus);
@@ -231,6 +231,7 @@ router.get('/debug/sync', c.debugSync);
 router.post('/debug-sync-force', c.syncShipmaxx);
 router.get('/debug/run-cron', c.debugSync); // legacy
 router.get('/cron/shipmaxx-sync', c.runCronSyncWebhook);
+router.post('/webhook/shipmaxx', c.shipmaxxWebhook);
 router.get('/debug-backfill-delivered', c.debugBackfillDelivered);
 router.get('/debug-stats', async (req, res) => {
   try {
@@ -403,17 +404,15 @@ router.post('/warehouses/create', auth(), c.createWarehouse);
 // ── Invoice ───────────────────────────────────────────────────────────────────
 router.get('/invoice/:order_id', auth(), c.getInvoice);
 
-// ── NDR (specific static routes BEFORE parameterized :ndr_id) ────────────────
-router.get('/ndr',                auth(), c.getNdrList);
-router.post('/ndr/bulk-action',   auth(), c.ndrBulkAction);
-
-// ── NDR Notes (must be before /:ndr_id to avoid collision) ───────────────────
-router.get('/ndr/notes',          auth(), c.getNdrNotes);
-router.post('/ndr/notes',         auth(), c.createNdrNote);
-router.put('/ndr/notes/:id',      auth(), c.updateNdrNote);
-router.delete('/ndr/notes/:id',   auth(), c.deleteNdrNote);
-
-// ── NDR parameterized action (comes last) ─────────────────────────────────────
+// ── NDR & NDR Notes ───────────────────────────────────────────────────────────
+router.get('/ndr', auth(), c.getNdrList);
+router.post('/ndr/action', auth(), c.ndrAction);
 router.post('/ndr/:ndr_id/action', auth(), c.ndrAction);
+router.post('/ndr/bulk-action', auth(), c.ndrBulkAction);
+
+router.get('/ndr/notes', auth(), c.getNdrNotes);
+router.post('/ndr/notes', auth(), c.createNdrNote);
+router.put('/ndr/notes/:id', auth(), c.updateNdrNote);
+router.delete('/ndr/notes/:id', auth(), c.deleteNdrNote);
 
 export default router;

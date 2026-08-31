@@ -101,7 +101,7 @@ export const runCronSync = async () => {
           const isGenericUndelivered = (st) => /^(undelivered|undelivered_attempt_failure|undelivered_failure)$/i.test(st);
           const isSpecificUndelivered = (st) => /^undelivered_\d(st|nd|rd)_attempt$/i.test(st);
           let shouldUpdateStatus = true;
-          const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED', 'OUT_FOR_DELIVERY'];
+          const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED'];
           if (existing) {
             if (protectedStatuses.includes(existing.status)) {
               shouldUpdateStatus = false;
@@ -194,7 +194,7 @@ export const runCronSync = async () => {
             const isGenericUndelivered = (st) => /^(undelivered|undelivered_attempt_failure|undelivered_failure)$/i.test(st);
             const isSpecificUndelivered = (st) => /^undelivered_\d(st|nd|rd)_attempt$/i.test(st);
             let shouldUpdateStatus = true;
-            const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED', 'OUT_FOR_DELIVERY'];
+            const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED'];
             if (existing) {
               if (protectedStatuses.includes(existing.status)) {
                 shouldUpdateStatus = false;
@@ -236,7 +236,6 @@ export const runCronSync = async () => {
       console.error('[Cron] Error fetching new ShipMaxx orders:', err.message);
     }
 
-    // 2. Track existing active orders
     const activeOrders = await Order.find({
       platform: 'shipmaxx',
       createdAt: { $gte: trackingLimit },
@@ -245,15 +244,19 @@ export const runCronSync = async () => {
         { status: /^(delivered|rto_delivered)/i, delivered_at: { $exists: false } },
         { status: /^(delivered|rto_delivered)/i, delivered_at: null }
       ]
-    }).sort({ status_updated_at: 1, createdAt: 1 }).limit(200).lean(); // limit to 200 to keep it highly responsive
+    }).sort({ status_updated_at: 1, createdAt: 1 }).limit(50).lean(); // limit to 50 to avoid rate limit!
 
     let updatedCount = 0;
     for (const o of activeOrders) {
       if (!o.awb_code) continue;
       try {
         const trackRes = await smx.trackShipment(o.awb_code);
+        
+        // Wait 1 second before the next tracking request to respect API rate limits
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
         const tracking = trackRes?.data?.data || trackRes?.data || trackRes || {};
-        const rawStatus = tracking.current_status || tracking.status || tracking.shipment_status || tracking.delivery_status;
+        const rawStatus = tracking.current_status || tracking.status || tracking.shipment_status || tracking.delivery_status || tracking.history?.[0]?.system_status_name || tracking.history?.[0]?.system_status_code || tracking.history?.[0]?.status;
         
         if (rawStatus) {
           let status = normalizeShipmaxxStatus(rawStatus);
@@ -326,53 +329,6 @@ export const runCronSync = async () => {
     }
     if (updatedCount > 0) {
       await generateReorderCommissions();
-    }
-
-    // 3. Sync NDR list
-    try {
-      const ndrRes = await smx.getNdrList({ limit: 1000, per_page: 1000, page: 1 });
-      const ndrs = ndrRes?.data?.shipments || ndrRes?.shipments || [];
-      for (const ndr of ndrs) {
-        if (!ndr.orderId && !ndr.awb) continue;
-        const attemptNumber = Number(ndr.attemptNumber) || 1;
-        let mappedStatus = attemptNumber === 1 ? 'UNDELIVERED_1ST_ATTEMPT' : attemptNumber === 2 ? 'UNDELIVERED_2ND_ATTEMPT' : attemptNumber === 3 ? 'UNDELIVERED_3RD_ATTEMPT' : 'UNDELIVERED';
-        if (ndr.status?.toLowerCase() === 'delivered') mappedStatus = 'DELIVERED';
-        else if (ndr.status?.toLowerCase().includes('rto delivered')) mappedStatus = 'RTO_DELIVERED';
-        
-        const query = { platform: 'shipmaxx' }; 
-        if (ndr.orderId) query.order_id = String(ndr.orderId); 
-        else query.awb_code = String(ndr.awb);
-        
-        const existing = await Order.findOne(query);
-        let sua = ndr.attemptDate ? parseShipMaxxDate(`${ndr.attemptDate} ${ndr.attemptTime || '00:00:00'}`) : null;
-        if (!sua && existing?.status_updated_at) sua = existing.status_updated_at; 
-        else if (!sua) sua = new Date();
-        
-        const ud = { 
-            order_id: String(ndr.orderId || ndr.awb), 
-            awb_code: String(ndr.awb || ''), 
-            delivery_attempt: attemptNumber, 
-            status_updated_at: sua, 
-            platform: 'shipmaxx' 
-        };
-        const protectedStatuses = ['DELIVERED', 'RTO_DELIVERED', 'OUT_FOR_DELIVERY'];
-        if (!existing || !protectedStatuses.includes(existing.status)) {
-            ud.status = mappedStatus;
-        }
-        if (mappedStatus === 'DELIVERED' || mappedStatus === 'RTO_DELIVERED') {
-            ud.delivered_at = sua;
-        }
-        if (ndr.customer) { 
-            if (ndr.customer.name && (!existing || !existing.billing_customer_name)) ud.billing_customer_name = ndr.customer.name; 
-            if (ndr.customer.phone && (!existing || !existing.billing_phone)) ud.billing_phone = ndr.customer.phone; 
-            if (ndr.customer.city && (!existing || !existing.billing_city)) ud.billing_city = ndr.customer.city; 
-            if (ndr.customer.state && (!existing || !existing.billing_state)) ud.billing_state = ndr.customer.state; 
-        }
-        await Order.updateWithTransaction(query, { $set: ud }, { upsert: true }).catch(() => {});
-      }
-      console.log(`[Cron] NDR done (${ndrs.length} records)`);
-    } catch (err) { 
-      console.error('[Cron] NDR error:', err.message); 
     }
 
     // 4. Set auto followups

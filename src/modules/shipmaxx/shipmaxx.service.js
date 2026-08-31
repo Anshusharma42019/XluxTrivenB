@@ -165,13 +165,13 @@ export const downloadManifestHtml = (awb) => call('GET', `/shipping/manifest/${a
 export const getWarehouses = (params) => get('/warehouses', params);
 export const createWarehouse = (body) => post('/warehouses/create', body);
 
-// ── NDR ───────────────────────────────────────────────────────────────────────
-export const getNdrList = (params) => get('/ndr', params);
-export const ndrAction = (ndr_id, body) => post(`/ndr/${ndr_id}/action`, body);
-export const ndrBulkAction = (body) => post('/ndr/bulk-action', body);
-
 // ── Invoice ───────────────────────────────────────────────────────────────────
 export const getInvoice = (order_id) => call('GET', `/invoice/order/${order_id}`, { responseType: 'arraybuffer' });
+
+// ── NDR ───────────────────────────────────────────────────────────────────────
+export const getNdrList    = (params)         => get('/ndr', params);
+export const ndrAction     = (ndr_id, body)   => post(`/ndr/${ndr_id}/action`, body);
+export const ndrBulkAction = (body)           => post('/ndr/bulk-action', body);
 
 export default {
   login, setCredentials, setApiKey, setAuthUrl,
@@ -179,6 +179,6 @@ export default {
   createShipment, trackShipment, generateLabel, getManifest,
   cancelShipment, checkServiceability, getShipments, getShipmentById,
   getWarehouses, createWarehouse,
-  getNdrList, ndrAction, ndrBulkAction,
-  getInvoice, downloadLabelPdf, downloadManifestHtml
+  getInvoice, downloadLabelPdf, downloadManifestHtml,
+  getNdrList, ndrAction, ndrBulkAction
 };
