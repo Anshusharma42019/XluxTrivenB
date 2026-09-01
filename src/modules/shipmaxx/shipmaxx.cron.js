@@ -244,7 +244,7 @@ export const runCronSync = async () => {
         { status: /^(delivered|rto_delivered)/i, delivered_at: { $exists: false } },
         { status: /^(delivered|rto_delivered)/i, delivered_at: null }
       ]
-    }).sort({ status_updated_at: 1, createdAt: 1 }).limit(50).lean(); // limit to 50 to avoid rate limit!
+    }).sort({ status_updated_at: 1, createdAt: 1 }).limit(20).lean(); // limit to 20 for fast response (<15s)
 
     let updatedCount = 0;
     for (const o of activeOrders) {
@@ -252,8 +252,8 @@ export const runCronSync = async () => {
       try {
         const trackRes = await smx.trackShipment(o.awb_code);
         
-        // Wait 1 second before the next tracking request to respect API rate limits
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Wait 500ms before the next tracking request to respect API rate limits
+        await new Promise(resolve => setTimeout(resolve, 500));
         
         const tracking = trackRes?.data?.data || trackRes?.data || trackRes || {};
         const rawStatus = tracking.current_status || tracking.status || tracking.shipment_status || tracking.delivery_status || tracking.history?.[0]?.system_status_name || tracking.history?.[0]?.system_status_code || tracking.history?.[0]?.status;
