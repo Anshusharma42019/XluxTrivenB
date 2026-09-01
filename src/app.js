@@ -6,7 +6,7 @@ import { errorConverter, errorHandler } from "./middleware/error.js";
 import ApiError from "./utils/ApiError.js";
 import routes from "./routes/index.js";
 import { webhook } from "./modules/shiprocket/shiprocket.controller.js";
-import { shipmaxxWebhook } from "./modules/shipmaxx/shipmaxx.controller.js";
+import { shipmaxxWebhook, runCronSyncWebhook } from "./modules/shipmaxx/shipmaxx.controller.js";
 import { cacheInvalidatorMiddleware } from "./middleware/cache.js";
 
 const app = express();
@@ -74,10 +74,12 @@ app.get("/", (req, res) => res.json({
 app.post("/webhook/shiprocket", webhook);
 app.post("/api/v1/webhook/shiprocket", webhook);
 
-// ShipMaxx webhook (no auth — ShipMaxx calls this directly)
-// Set this URL in ShipMaxx panel: https://xluxtriven.de/webhook/shipmaxx
+// ShipMaxx webhook & Cron triggers (no auth — external callers)
 app.post("/webhook/shipmaxx", shipmaxxWebhook);
 app.post("/api/v1/webhook/shipmaxx", shipmaxxWebhook);
+app.get("/cron/shipmaxx-sync", runCronSyncWebhook);
+app.get("/api/shipmaxx/cron/shipmaxx-sync", runCronSyncWebhook);
+app.get("/api/v1/shipmaxx/cron/shipmaxx-sync", runCronSyncWebhook);
 
 // v1 api routes
 app.use(cacheInvalidatorMiddleware);

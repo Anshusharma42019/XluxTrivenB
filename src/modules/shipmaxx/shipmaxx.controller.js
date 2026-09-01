@@ -1435,13 +1435,11 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
 });
 
 export const runCronSyncWebhook = catchAsync(async (req, res) => {
-  res.json(new ApiResponse(200, null, 'ShipMaxx cron sync triggered successfully'));
-
-  import('./shipmaxx.cron.js').then(cronModule => {
-    if (cronModule.runCronSync) {
-      cronModule.runCronSync().catch(err => console.error('[Cron Webhook Error]', err.message));
-    }
-  }).catch(err => console.error('[Cron Module Error]', err.message));
+  const cronModule = await import('./shipmaxx.cron.js');
+  if (cronModule && cronModule.runCronSync) {
+    await cronModule.runCronSync();
+  }
+  res.json(new ApiResponse(200, null, 'ShipMaxx cron sync completed successfully'));
 });
 
 
@@ -2365,8 +2363,53 @@ export const shipmaxxWebhook = catchAsync(async (req, res) => {
 
 // ── NDR ───────────────────────────────────────────────────────────────────────
 export const getNdrList = catchAsync(async (req, res) => {
-  const response = await smx.getNdrList(req.query);
-  res.json(new ApiResponse(200, response, 'NDR list fetched'));
+  try {
+    const response = await smx.getNdrList(req.query);
+    const list = response?.data?.data || response?.data || response || [];
+    if (Array.isArray(list) && list.length > 0) {
+      return res.json(new ApiResponse(200, response, 'NDR list fetched from Shipmaxx API'));
+    }
+  } catch (err) {
+    console.warn('[ShipMaxx API NDR Fetch Failed, falling back to local DB]:', err.message);
+  }
+
+  // Fallback to local MongoDB NDR records
+  const { from, to, page = 1, limit = 100 } = req.query;
+  const match = { platform: 'shipmaxx', status: /UNDELIVERED|NDR|EXCEPTION/i };
+  if (from || to) {
+    match.status_updated_at = {};
+    if (from) match.status_updated_at.$gte = new Date(from);
+    if (to) {
+      const toDate = new Date(to);
+      toDate.setHours(23, 59, 59, 999);
+      match.status_updated_at.$lte = toDate;
+    }
+  }
+
+  const orders = await Order.find(match)
+    .sort({ status_updated_at: -1, createdAt: -1 })
+    .skip((Number(page) - 1) * Number(limit))
+    .limit(Number(limit))
+    .lean();
+
+  const formatted = orders.map(o => ({
+    awb_code: o.awb_code,
+    channel_order_id: o.order_id,
+    order_id: o.order_id,
+    shipment_id: o._id,
+    customer_name: o.billing_customer_name,
+    customer_phone: o.billing_phone,
+    courier_name: o.courier_name,
+    status: o.status,
+    reason: o.comments?.[0]?.text || 'Undelivered Attempt Failure',
+    attempts: o.status?.includes('1ST') ? 1 : o.status?.includes('2ND') ? 2 : o.status?.includes('3RD') ? 3 : 1,
+    ndr_raised_at: o.status_updated_at || o.createdAt,
+    payment_method: o.payment_method,
+    address: o.billing_address,
+    pincode: o.billing_pincode
+  }));
+
+  res.json(new ApiResponse(200, { data: { data: formatted, total: formatted.length } }, 'NDR list fetched from database'));
 });
 
 export const ndrAction = catchAsync(async (req, res) => {
