@@ -1396,7 +1396,7 @@ export const runSyncInBackground = async (mode = 'quick') => {
               let delAt = null;
               if (tracking.history) { const de = tracking.history.find(h => h.system_status_code === 'DEL' || (h.system_status_name || '').toLowerCase() === 'delivered' || (h.status || '').toLowerCase() === 'delivered'); if (de?.date || de?.timestamp) delAt = parseShipMaxxDate(de.date || de.timestamp); }
               if (delAt) { update.delivered_at = delAt; update.status_updated_at = delAt; }
-              else { const dd = await Order.findOne({ _id: o._id }).select('delivered_at status_updated_at').lean(); if (!dd?.delivered_at) { update.delivered_at = dd?.status_updated_at || update.status_updated_at || o.status_updated_at || null; } }
+              else { const dd = await Order.findOne({ _id: o._id }).select('delivered_at status_updated_at').lean(); update.delivered_at = dd?.delivered_at || dd?.status_updated_at || update.status_updated_at || o.status_updated_at || new Date(); }
               if (o.lead_id) await Lead.findByIdAndUpdate(o.lead_id, { status: 'follow_up' }).catch(() => { });
             }
             await Order.updateWithTransaction({ _id: o._id }, { $set: update });
@@ -1689,21 +1689,35 @@ async function getKitNumbersMap(ordersArray, OrderModel) {
 export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
   const query = {
     platform: 'shipmaxx',
-    status: /^delivered$/i,
+    status: /^(delivered|del)$/i,
     followup_done: { $ne: true },
     sent_to_verification: { $ne: true },
   };
 
-  const delivered = await Order.find(query)
+  let delivered = await Order.find(query)
     .select('-raw_response')
     .populate({ path: 'lead_id', select: 'assignedTo createdBy status problem note', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'createdBy', select: 'name role' }] })
     .populate('created_by', 'name role')
-    .sort({ delivered_at: -1, createdAt: -1 }).lean();
+    .lean();
+
+  // Ensure effective delivery date is set on each object
+  for (const o of delivered) {
+    if (!o.delivered_at) {
+      o.delivered_at = o.status_updated_at || o.createdAt;
+    }
+  }
+
+  // Sort by effective delivery date (or status_updated_at / createdAt) descending
+  delivered.sort((a, b) => {
+    const da = new Date(a.delivered_at || a.status_updated_at || a.createdAt || 0).getTime();
+    const db = new Date(b.delivered_at || b.status_updated_at || b.createdAt || 0).getTime();
+    return db - da;
+  });
 
   // Auto-set followups for orders that don't have them yet
   const needsSetting = delivered.filter(o => !o.auto_followups_set);
   if (needsSetting.length) {
-    await Promise.all(needsSetting.map(o => setAutoFollowUps(o._id, o.delivered_at || o.createdAt || new Date())));
+    await Promise.all(needsSetting.map(o => setAutoFollowUps(o._id, o.delivered_at || o.status_updated_at || o.createdAt || new Date())));
   }
 
   const allFollowups = await Followup.find({ order_id: { $in: delivered.map(o => o._id) } })
