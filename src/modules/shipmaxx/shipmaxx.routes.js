@@ -367,7 +367,7 @@ router.post('/orders/sync', auth(), c.syncShipmaxx);
 router.post('/orders/import', auth(), c.importOrders);
 router.post('/orders/import-by-ids', auth(), c.importByIds);
 router.post('/orders/manual-followup', auth(), c.createManualFollowup);
-router.patch('/orders/:id/read-reply', auth(), c.readReply);
+
 
 router.get('/orders/:order_id', auth(), c.getOrder);
 router.put('/orders/:order_id', auth(), c.updateOrder);

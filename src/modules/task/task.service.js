@@ -24,6 +24,8 @@ const syncProfileToLead = async (task) => {
   if (task.lead) {
     const leadId = task.lead._id || task.lead;
     const profileFields = {
+      name: task.title,
+      phone: task.phone,
       houseNo: task.houseNo,
       cityVillage: task.cityVillage,
       cityVillageType: task.cityVillageType,
@@ -370,7 +372,7 @@ export const updateTask = async (id, data, userRole, userId, userDepartments = [
   }
   
   await syncProfileToLead(task);
-  return task;
+  return getTaskById(id, userRole, userId, userDepartments);
 };
 
 export const deleteTask = async (id) => {

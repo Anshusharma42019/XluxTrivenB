@@ -2251,7 +2251,7 @@ export const webhook = catchAsync(async (req, res) => {
 
 export const sendToVerification = catchAsync(async (req, res) => {
   const { id } = req.params;
-  const { source } = req.body || {};
+  const { source, notes, problem, medicine, price } = req.body || {};
   const order = await Order.findById(id).populate('lead_id');
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
 
@@ -2279,10 +2279,14 @@ export const sendToVerification = catchAsync(async (req, res) => {
   const followups = await Followup.find({ order_id: id }).sort({ followup_number: 1 }).lean();
   const lastRelief = [...followups].reverse().find(f => f.relief_percentage != null)?.relief_percentage ?? null;
 
+  const isAddon = source === 'add_on';
+  const titlePrefix = source === 'rto' ? '[RTO] Re-Verification for ' : (isAddon ? '[Add-on] Re-Verification for ' : 'Re-Verification for ');
+  const fallbackProblem = problem || (medicine ? `Add-on Medicine: ${medicine}` : '') || lead.problem || oldVer?.problem || order.problem || (order.order_items && order.order_items[0]?.name) || (order.products && order.products[0]?.name) || '';
+  const finalPrice = (price !== undefined && price !== null && price !== '') ? Number(price) : (order.sub_total || 0);
+
   // Create a new task with status 'verification'
-  const fallbackProblem = lead.problem || oldVer?.problem || order.problem || (order.order_items && order.order_items[0]?.name) || (order.products && order.products[0]?.name) || '';
   const task = await Task.create({
-    title: `Re-Verification for ${lead.name || order.billing_customer_name}`,
+    title: `${titlePrefix}${lead.name || order.billing_customer_name}`,
     lead: lead._id,
     assignedTo: req.user._id,
     createdBy: req.user._id,
@@ -2294,9 +2298,13 @@ export const sendToVerification = catchAsync(async (req, res) => {
     pincode: order.billing_pincode,
     address: order.billing_address,
     phone: order.billing_phone,
-    price: order.sub_total,
+    price: finalPrice,
     department: lead.department || oldVer?.department || 'migraine'
   });
+
+  const verificationNotes = [];
+  if (oldVer?.notes) verificationNotes.push(...oldVer.notes);
+  if (notes) verificationNotes.push({ text: notes, createdBy: req.user._id, createdAt: new Date() });
 
   // Create Verification record linked to this task
   await Verification.create({
@@ -2309,15 +2317,16 @@ export const sendToVerification = catchAsync(async (req, res) => {
     state: task.state,
     pincode: task.pincode,
     address: task.address,
-    problem: oldVer?.problem || task.problem,
+    problem: fallbackProblem,
     age: oldVer?.age,
     weight: oldVer?.weight,
     height: oldVer?.height,
     otherProblems: oldVer?.otherProblems,
     problemDuration: oldVer?.problemDuration,
     department: lead.department || oldVer?.department || 'migraine',
-    price: task.price,
+    price: finalPrice,
     relief_percentage: lastRelief,
+    notes: verificationNotes,
   });
   // Mark follow-up as done and flag as sent to verification, store this order's id on the lead for linking future re-orders
   const updatePayload = { followup_done: true, sent_to_verification: true, verified_by: req.user._id };

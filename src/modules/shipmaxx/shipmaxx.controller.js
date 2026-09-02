@@ -2024,7 +2024,7 @@ export const searchOrderByPhone = catchAsync(async (req, res) => {
 // ── Send to Verification ──────────────────────────────────────────────────────
 export const sendToVerification = catchAsync(async (req, res) => {
   const { id } = req.params;
-  const { source } = req.body || {};
+  const { source, notes, problem, medicine, price } = req.body || {};
   const order = await Order.findOne({ _id: id, platform: 'shipmaxx' }).populate('lead_id');
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
 
@@ -2054,8 +2054,11 @@ export const sendToVerification = catchAsync(async (req, res) => {
     oldVer = await Verification.findById(order.verification_id);
   }
 
-  const titlePrefix = source === 'rto' ? '[RTO] Re-Verification for ' : 'Re-Verification for ';
-  const fallbackProblem = lead.problem || oldVer?.problem || order.problem || (order.order_items && order.order_items[0]?.name) || (order.products && order.products[0]?.name) || '';
+  const isAddon = source === 'add_on';
+  const titlePrefix = source === 'rto' ? '[RTO] Re-Verification for ' : (isAddon ? '[Add-on] Re-Verification for ' : 'Re-Verification for ');
+  const fallbackProblem = problem || lead.problem || oldVer?.problem || order.problem || '';
+  const finalPrice = (price !== undefined && price !== null && price !== '') ? Number(price) : (order.sub_total || 0);
+
   const task = await Task.create({
     title: `${titlePrefix}${lead.name || order.billing_customer_name}`,
     lead: lead._id,
@@ -2068,9 +2071,19 @@ export const sendToVerification = catchAsync(async (req, res) => {
     pincode: order.billing_pincode,
     address: order.billing_address,
     phone: order.billing_phone,
-    price: order.sub_total,
+    price: finalPrice,
+    problem: fallbackProblem,
     department: lead.department || oldVer?.department || 'migraine',
   });
+
+  const addonText = [
+    medicine ? `Add-on Product: ${medicine}` : null,
+    notes ? `Notes: ${notes}` : null
+  ].filter(Boolean).join(' | ');
+
+  const verificationNotes = [];
+  if (oldVer?.notes) verificationNotes.push(...oldVer.notes);
+  if (addonText) verificationNotes.push({ text: `[Add-on Order] ${addonText}`, createdBy: req.user._id, createdAt: new Date() });
 
   await Verification.create({
     task: task._id,
@@ -2082,20 +2095,24 @@ export const sendToVerification = catchAsync(async (req, res) => {
     state: task.state,
     pincode: task.pincode,
     address: task.address,
-    problem: oldVer?.problem || task.problem,
+    problem: fallbackProblem,
     age: oldVer?.age,
     weight: oldVer?.weight,
     height: oldVer?.height,
     otherProblems: oldVer?.otherProblems,
     problemDuration: oldVer?.problemDuration,
     department: lead.department || oldVer?.department || 'migraine',
-    price: task.price,
+    price: finalPrice,
     relief_percentage: lastRelief,
+    notes: verificationNotes,
   });
 
   const updatePayload = { followup_done: true, sent_to_verification: true, verified_by: req.user._id };
   if (source === 'rto') {
     updatePayload.rto_verification_action = 'send_to_verification';
+  }
+  if (notes) {
+    await Order.findByIdAndUpdate(id, { $push: { comments: { text: `[Verification ${isAddon ? 'Add-on' : 'Re-order'}] ${notes}`, type: 'general', createdBy: req.user._id } } });
   }
   await Order.findByIdAndUpdate(id, updatePayload);
   await Lead.findByIdAndUpdate(lead._id, { $set: { pending_reorder_source: id, pending_reorder_staff: req.user._id } });
