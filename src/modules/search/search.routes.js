@@ -27,6 +27,7 @@ const getModel = (name) => {
   try { return mongoose.model(name); } catch(e) { return null; }
 };
 
+const router = express.Router();
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catchAsync(async (req, res) => {
