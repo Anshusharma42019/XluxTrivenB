@@ -2440,7 +2440,7 @@ export const getNdrList = catchAsync(async (req, res) => {
     pincode: o.billing_pincode
   }));
 
-  res.json(new ApiResponse(200, { data: { data: formatted, total: formatted.length } }, 'NDR list fetched from database'));
+  res.json(new ApiResponse(200, { data: formatted, total: formatted.length }, 'NDR list fetched from database'));
 });
 
 export const ndrAction = catchAsync(async (req, res) => {
