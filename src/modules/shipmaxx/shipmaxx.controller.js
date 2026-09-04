@@ -741,13 +741,14 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
 
   // Build a clean DELIVERED-only date query (independent of the main match $or)
   // Fallback: if delivered_at is null/missing, use status_updated_at, then createdAt
+  const statusFilter = { $in: [/^delivered$/i, /^DEL$/i] };
   let deliveredOnlyMatch;
   if (from && to) {
     const dateFilter = { $gte: new Date(from + 'T00:00:00.000+05:30'), $lte: new Date(to + 'T23:59:59.999+05:30') };
     deliveredOnlyMatch = {
       platform: 'shipmaxx',
       $and: [
-        { status: /^delivered$/i },
+        { status: statusFilter },
         {
           $or: [
             { delivered_at: dateFilter },
@@ -760,11 +761,11 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
   } else {
     deliveredOnlyMatch = {
       platform: 'shipmaxx',
-      status: /^delivered$/i
+      status: statusFilter
     };
   }
 
-  const [deliveredCountResult, statusBreakdown, revenueAggregation] = await Promise.all([
+  const [deliveredCountResult, statusBreakdown, revenueAggregation, paymentBreakdownResult] = await Promise.all([
     Order.countDocuments(deliveredOnlyMatch),
     Order.aggregate([
       { $match: match },
@@ -772,10 +773,40 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
       { $sort: { count: -1 } }
     ]),
     Order.aggregate([
-      { $match: match },
+      { $match: deliveredOnlyMatch },
       { $group: { _id: null, totalRevenue: { $sum: '$sub_total' } } }
+    ]),
+    Order.aggregate([
+      { $match: deliveredOnlyMatch },
+      {
+        $group: {
+          _id: {
+            $cond: [
+              { $regexMatch: { input: { $ifNull: ['$payment_method', 'COD'] }, regex: /cod/i } },
+              'COD',
+              'Prepaid'
+            ]
+          },
+          count: { $sum: 1 },
+          revenue: { $sum: '$sub_total' }
+        }
+      }
     ])
   ]);
+
+  let codCount = 0;
+  let codRevenue = 0;
+  let prepaidCount = 0;
+  let prepaidRevenue = 0;
+  for (const item of (paymentBreakdownResult || [])) {
+    if (item._id === 'COD') {
+      codCount = item.count;
+      codRevenue = item.revenue || 0;
+    } else {
+      prepaidCount = item.count;
+      prepaidRevenue = item.revenue || 0;
+    }
+  }
 
   // Post-process: merge any remaining short-code groups into their full-name equivalents
   const mergedMap = {};
@@ -805,7 +836,15 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
 
   const totalRevenue = revenueAggregation?.[0]?.totalRevenue || 0;
 
-  res.json(new ApiResponse(200, { count: deliveredCountResult, revenue: totalRevenue, statusBreakdown: breakdown }, 'Delivered stats'));
+  res.json(new ApiResponse(200, {
+    count: deliveredCountResult,
+    revenue: totalRevenue,
+    codCount,
+    codRevenue,
+    prepaidCount,
+    prepaidRevenue,
+    statusBreakdown: breakdown
+  }, 'Delivered stats'));
 });
 
 // Known DB spelling aliases: some statuses were stored with alternate spellings
@@ -1515,31 +1554,96 @@ export const getOrders = catchAsync(async (req, res) => {
 
 // ── Delivered Orders ──────────────────────────────────────────────────────────
 export const getDeliveredOrders = catchAsync(async (req, res) => {
-  const { search, page = 1, per_page = 50, from, to } = req.query;
-  const match = { platform: 'shipmaxx', status: /^delivered$/i };
+  const { search, page = 1, per_page = 50, from, to, payment_method } = req.query;
+  const statusFilter = { $in: [/^delivered$/i, /^DEL$/i] };
+  const baseConditions = [
+    { platform: 'shipmaxx', status: statusFilter }
+  ];
+
   if (from || to) {
-    match.delivered_at = {};
-    if (from) match.delivered_at.$gte = new Date(from + 'T00:00:00.000+05:30');
-    if (to) match.delivered_at.$lte = new Date(to + 'T23:59:59.999+05:30');
+    const dateFilter = {};
+    if (from) dateFilter.$gte = new Date(from + 'T00:00:00.000+05:30');
+    if (to) dateFilter.$lte = new Date(to + 'T23:59:59.999+05:30');
+
+    baseConditions.push({
+      $or: [
+        { delivered_at: dateFilter },
+        { $and: [{ $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }] }, { status_updated_at: dateFilter }] },
+        { $and: [{ $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }] }, { $or: [{ status_updated_at: { $exists: false } }, { status_updated_at: null }] }, { createdAt: dateFilter }] }
+      ]
+    });
   }
+
+  if (payment_method && payment_method !== 'all') {
+    if (payment_method === 'cod') {
+      baseConditions.push({ payment_method: { $regex: 'cod', $options: 'i' } });
+    } else if (payment_method === 'prepaid') {
+      baseConditions.push({ payment_method: { $not: /cod/i } });
+    }
+  }
+
   if (search) {
     const q = String(search).trim();
-    match.$or = [
-      { billing_customer_name: { $regex: q, $options: 'i' } },
-      { billing_phone: { $regex: q, $options: 'i' } },
-      { order_id: { $regex: q, $options: 'i' } },
-      { awb_code: { $regex: q, $options: 'i' } },
-    ];
+    baseConditions.push({
+      $or: [
+        { billing_customer_name: { $regex: q, $options: 'i' } },
+        { billing_phone: { $regex: q, $options: 'i' } },
+        { order_id: { $regex: q, $options: 'i' } },
+        { awb_code: { $regex: q, $options: 'i' } },
+      ]
+    });
   }
-  const skip = (Number(page) - 1) * Number(per_page);
-  const [orders, total] = await Promise.all([
+
+  const match = baseConditions.length === 1 ? baseConditions[0] : { $and: baseConditions };
+  const isGetAll = per_page === 'all' || Number(per_page) <= 0 || Number(per_page) >= 10000;
+  const limitNum = isGetAll ? 10000 : Math.max(1, Number(per_page) || 50);
+  const pageNum = isGetAll ? 1 : Math.max(1, Number(page) || 1);
+  const skipNum = isGetAll ? 0 : (pageNum - 1) * limitNum;
+
+  const [orders, total, totalRevenueAgg] = await Promise.all([
     Order.find(match)
       .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
       .populate('verified_by', 'name role')
       .sort({ delivered_at: -1, createdAt: -1, _id: -1 })
-      .skip(skip).limit(Number(per_page)).lean(),
+      .skip(skipNum).limit(limitNum).lean(),
     Order.countDocuments(match),
+    Order.aggregate([
+      { $match: match },
+      { $group: { _id: null, totalRevenue: { $sum: '$sub_total' } } }
+    ])
   ]);
+
+  const totalRevenue = totalRevenueAgg?.[0]?.totalRevenue || 0;
+
+  // Ensure delivered orders have sequential bill numbers (TW-0001, TW-0002, TW-0003...)
+  const allDelivered = await Order.find({ platform: 'shipmaxx', status: statusFilter })
+    .sort({ delivered_at: 1, status_updated_at: 1, createdAt: 1, _id: 1 })
+    .select('_id bill_seq bill_number')
+    .lean();
+
+  const seqMap = new Map();
+  if (allDelivered.length > 0) {
+    let seq = 1;
+    const bulkOps = [];
+    for (const ord of allDelivered) {
+      const seqStr = String(seq).padStart(4, '0');
+      const generatedNum = `TW-${seqStr}`;
+      seqMap.set(String(ord._id), { seq, billNumber: generatedNum });
+      if (ord.bill_seq !== seq || ord.bill_number !== generatedNum) {
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: ord._id },
+            update: { $set: { bill_seq: seq, bill_number: generatedNum } }
+          }
+        });
+      }
+      seq++;
+    }
+    if (bulkOps.length > 0) {
+      await Order.bulkWrite(bulkOps).catch(() => {});
+    }
+  }
+
   orders.forEach(o => {
     let staffName = undefined;
     let staffId = undefined;
@@ -1557,8 +1661,24 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
     }
     o.verification_staff_id = staffId;
     o.verification_staff_name = staffName;
+
+    // Set sequence-wise bill_number (e.g. TW-0001, TW-0002...)
+    const seqData = seqMap.get(String(o._id));
+    if (seqData) {
+      o.bill_seq = seqData.seq;
+      o.bill_number = seqData.billNumber;
+      o.billNumber = seqData.billNumber;
+    } else if (o.bill_seq) {
+      const seqBillNum = `TW-${String(o.bill_seq).padStart(4, '0')}`;
+      o.bill_number = seqBillNum;
+      o.billNumber = seqBillNum;
+    } else {
+      const idPart = (o.order_id || o._id || '000').toString().replace(/\D/g, '').slice(-4) || '0001';
+      o.bill_number = `TW-${idPart.padStart(4, '0')}`;
+      o.billNumber = o.bill_number;
+    }
   });
-  res.json(new ApiResponse(200, { data: orders, total }, 'Delivered orders fetched'));
+  res.json(new ApiResponse(200, { data: orders, total, totalRevenue, page: pageNum, per_page: isGetAll ? total : limitNum }, 'Delivered orders fetched'));
 });
 
 export const getDeliveredOrdersFromSchema = catchAsync(async (req, res) => {

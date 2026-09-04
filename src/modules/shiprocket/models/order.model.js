@@ -80,6 +80,8 @@ const orderSchema = new mongoose.Schema({
   interakt_reply_text: { type: String, default: null, index: true },
   interakt_reply_at: { type: Date, default: null },
   interakt_reply_read: { type: Boolean, default: false },
+  bill_number: { type: String, index: true },
+  bill_seq: { type: Number, index: true },
   raw_response: mongoose.Schema.Types.Mixed,
 }, { timestamps: true });
 
