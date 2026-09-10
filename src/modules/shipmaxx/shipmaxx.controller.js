@@ -858,7 +858,7 @@ const STATUS_ALIASES = {
   DELIVERED: ['DELIVERED', 'DEL'],
   RTO_DELIVERED: ['RTO_DELIVERED', 'RTD'],
   IN_TRANSIT: ['IN_TRANSIT', 'INT'],
-  OUT_FOR_DELIVERY: ['OUT_FOR_DELIVERY', 'OFD'],
+  OUT_FOR_DELIVERY: ['OUT_FOR_DELIVERY', 'OFD', 'OUT FOR DELIVERY', 'OUT-FOR-DELIVERY', 'RTO_OFD'],
   OUT_FOR_PICKUP: ['OUT_FOR_PICKUP', 'OFP'],
   PICKUP_DONE: ['PICKUP_DONE', 'PKD'],
   PICKUP_FAILED: ['PICKUP_FAILED', 'PKF'],
@@ -902,8 +902,8 @@ export const getStatusOrders = catchAsync(async (req, res) => {
     return [queryStatus, ...reverseShortCodes];
   })();
 
-  // Exact case-insensitive match for each variant (escape special chars, no char-class expansion)
-  baseConditions.push({ status: { $in: allVariants.map(s => new RegExp(`^${s.replace(/[-]/g, '\\-')}$`, 'i')) } });
+  // Flexible case-insensitive match for each variant (allowing space, hyphen, or underscore)
+  baseConditions.push({ status: { $in: allVariants.map(s => new RegExp(`^${s.replace(/[-_]/g, '[-_ ]')}$`, 'i')) } });
 
   if (from && to) {
     const dateFilter = {
@@ -1269,7 +1269,14 @@ export const runSyncInBackground = async (mode = 'quick') => {
             const existing = await Order.findOne(query).select('status status_updated_at payment_method courier_name order_items createdAt').lean();
             let statusUpdatedAt = s.date_added ? new Date(s.date_added) : new Date();
             let finalStatus = newStatus;
-            if (existing) { statusUpdatedAt = existing.status_updated_at || statusUpdatedAt; if (newStatus === 'UNKNOWN') finalStatus = existing.status; }
+            if (existing) {
+              if (newStatus !== existing.status && newStatus !== 'UNKNOWN') {
+                statusUpdatedAt = new Date();
+              } else {
+                statusUpdatedAt = existing.status_updated_at || statusUpdatedAt;
+              }
+              if (newStatus === 'UNKNOWN') finalStatus = existing.status;
+            }
 
             const updateData = { order_id: String(s.order_id || s.awb), awb_code: String(s.awb || ''), platform: 'shipmaxx', status_updated_at: statusUpdatedAt };
 

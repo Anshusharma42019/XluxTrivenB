@@ -85,7 +85,11 @@ export const runCronSync = async () => {
           let finalStatus = newStatus;
           
           if (existing) {
-            statusUpdatedAt = existing.status_updated_at || statusUpdatedAt;
+            if (newStatus !== existing.status && newStatus !== 'UNKNOWN') {
+              statusUpdatedAt = new Date();
+            } else {
+              statusUpdatedAt = existing.status_updated_at || statusUpdatedAt;
+            }
             if (newStatus === 'UNKNOWN') {
               continue;
             }
@@ -141,11 +145,6 @@ export const runCronSync = async () => {
           }
 
           await Order.updateWithTransaction(query, { $set: updateData }, { upsert: true }).catch(() => {});
-        }
-        
-        // If we found that almost all orders in this page already exist, we can stop fetching older pages.
-        if (existingCountInPage >= 40) {
-           keepFetching = false;
         }
         page++;
       }
@@ -244,88 +243,81 @@ export const runCronSync = async () => {
         { status: /^(delivered|rto_delivered)/i, delivered_at: { $exists: false } },
         { status: /^(delivered|rto_delivered)/i, delivered_at: null }
       ]
-    }).sort({ status_updated_at: 1, createdAt: 1 }).limit(20).lean(); // limit to 20 for fast response (<15s)
+    }).sort({ status_updated_at: 1, createdAt: 1 }).limit(200).lean();
 
     let updatedCount = 0;
-    for (const o of activeOrders) {
-      if (!o.awb_code) continue;
-      try {
-        const trackRes = await smx.trackShipment(o.awb_code);
-        
-        // Wait 500ms before the next tracking request to respect API rate limits
-        await new Promise(resolve => setTimeout(resolve, 500));
-        
-        const tracking = trackRes?.data?.data || trackRes?.data || trackRes || {};
-        const rawStatus = tracking.current_status || tracking.status || tracking.shipment_status || tracking.delivery_status || tracking.history?.[0]?.system_status_name || tracking.history?.[0]?.system_status_code || tracking.history?.[0]?.status;
-        
-        if (rawStatus) {
-          let status = normalizeShipmaxxStatus(rawStatus);
-          const ndrKw = ['EXCEPTION', 'REFUSED', 'NOT AVAILABLE', 'INCOMPLETE', 'ACTION TAKEN', 'ATTEMPT FAILURE', 'ADDRESS'];
-          if (status === 'UNDELIVERED' || status === 'UNDELIVERED_ATTEMPT_FAILURE' || status === 'UNDELIVERED_FAILURE' || (ndrKw.some(k => status.includes(k)) && !status.includes('DELIVERED'))) {
-            const a = o.delivery_attempt || 1; status = a === 1 ? 'UNDELIVERED_1ST_ATTEMPT' : a === 2 ? 'UNDELIVERED_2ND_ATTEMPT' : a === 3 ? 'UNDELIVERED_3RD_ATTEMPT' : 'UNDELIVERED';
-          }
-
-          // Only compute a new status_updated_at when the status has actually changed.
-          // If status is unchanged, preserve the existing DB timestamp so that the order
-          // does NOT get stamped with today's date on every cron run (which was causing
-          // all active orders to appear in the "TODAY" date filter even if created days ago).
-          const statusChanged = status !== o.status;
-          let actualUpdatedAt;
-          if (statusChanged) {
-            // Status changed — derive the real timestamp from tracking history
-            if (tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
-              actualUpdatedAt = extractStatusUpdatedAt(tracking, status);
-            } else {
-              // No history available — use now as best approximation
-              actualUpdatedAt = new Date();
-            }
-          } else {
-            // Status unchanged — keep existing timestamp, do NOT re-stamp with today
-            actualUpdatedAt = o.status_updated_at || new Date();
-          }
-
-          const update = { status, status_updated_at: actualUpdatedAt };
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < activeOrders.length; i += BATCH_SIZE) {
+      const batch = activeOrders.slice(i, i + BATCH_SIZE);
+      await Promise.allSettled(batch.map(async (o) => {
+        if (!o.awb_code) return;
+        try {
+          const trackRes = await smx.trackShipment(o.awb_code);
+          const tracking = trackRes?.data?.data || trackRes?.data || trackRes || {};
+          const rawStatus = tracking.current_status || tracking.status || tracking.shipment_status || tracking.delivery_status || tracking.history?.[0]?.system_status_name || tracking.history?.[0]?.system_status_code || tracking.history?.[0]?.status;
           
-          if (status === 'DELIVERED') {
-            let actualDeliveredAt = null;
-            if (tracking.history && Array.isArray(tracking.history)) {
-              const delEvent = tracking.history.find(h =>
-                h.system_status_code === 'DEL' ||
-                (h.system_status_name || '').toLowerCase() === 'delivered' ||
-                (h.status || '').toLowerCase() === 'delivered'
-              );
-              if (delEvent && delEvent.timestamp) {
-                actualDeliveredAt = parseShipMaxxDate(delEvent.timestamp);
+          if (rawStatus) {
+            let status = normalizeShipmaxxStatus(rawStatus);
+            const ndrKw = ['EXCEPTION', 'REFUSED', 'NOT AVAILABLE', 'INCOMPLETE', 'ACTION TAKEN', 'ATTEMPT FAILURE', 'ADDRESS'];
+            if (status === 'UNDELIVERED' || status === 'UNDELIVERED_ATTEMPT_FAILURE' || status === 'UNDELIVERED_FAILURE' || (ndrKw.some(k => status.includes(k)) && !status.includes('DELIVERED'))) {
+              const a = o.delivery_attempt || 1; status = a === 1 ? 'UNDELIVERED_1ST_ATTEMPT' : a === 2 ? 'UNDELIVERED_2ND_ATTEMPT' : a === 3 ? 'UNDELIVERED_3RD_ATTEMPT' : 'UNDELIVERED';
+            }
+
+            const statusChanged = status !== o.status;
+            let actualUpdatedAt;
+            if (statusChanged) {
+              if (tracking.history && Array.isArray(tracking.history) && tracking.history.length > 0) {
+                actualUpdatedAt = extractStatusUpdatedAt(tracking, status);
+              } else {
+                actualUpdatedAt = new Date();
+              }
+            } else {
+              actualUpdatedAt = o.status_updated_at || new Date();
+            }
+
+            const update = { status, status_updated_at: actualUpdatedAt };
+            
+            if (status === 'DELIVERED') {
+              let actualDeliveredAt = null;
+              if (tracking.history && Array.isArray(tracking.history)) {
+                const delEvent = tracking.history.find(h =>
+                  h.system_status_code === 'DEL' ||
+                  (h.system_status_name || '').toLowerCase() === 'delivered' ||
+                  (h.status || '').toLowerCase() === 'delivered'
+                );
+                if (delEvent && delEvent.timestamp) {
+                  actualDeliveredAt = parseShipMaxxDate(delEvent.timestamp);
+                }
+              }
+              if (actualDeliveredAt) {
+                update.delivered_at = actualDeliveredAt;
+                update.status_updated_at = actualDeliveredAt;
+              } else {
+                update.delivered_at = new Date();
+              }
+              if (o.lead_id) {
+                import('../lead/lead.model.js').then(({ Lead }) => {
+                  Lead.findByIdAndUpdate(o.lead_id, { status: 'follow_up' }).catch(() => {});
+                }).catch(() => {});
               }
             }
-            if (actualDeliveredAt) {
-              update.delivered_at = actualDeliveredAt;
-              update.status_updated_at = actualDeliveredAt;
-            } else {
-              update.delivered_at = new Date();
-            }
-            if (o.lead_id) {
-              import('../lead/lead.model.js').then(({ Lead }) => {
-                Lead.findByIdAndUpdate(o.lead_id, { status: 'follow_up' }).catch(() => {});
-              }).catch(() => {});
-            }
-          }
-          await Order.updateWithTransaction({ _id: o._id }, { $set: update }).catch(() => {});
+            await Order.updateWithTransaction({ _id: o._id }, { $set: update }).catch(() => {});
 
-          // ── Real-time WhatsApp + Followups on first DELIVERED detection ──────
-          if (status === 'DELIVERED' && o.status !== 'DELIVERED') {
-            if (!o.auto_followups_set) {
-              await setAutoFollowUps(o._id, update.delivered_at || new Date()).catch(err => {
-                console.error('[ShipMaxx Cron] Failed to set auto followups:', err.message);
-              });
+            if (status === 'DELIVERED' && o.status !== 'DELIVERED') {
+              if (!o.auto_followups_set) {
+                await setAutoFollowUps(o._id, update.delivered_at || new Date()).catch(err => {
+                  console.error('[ShipMaxx Cron] Failed to set auto followups:', err.message);
+                });
+              }
             }
-          }
 
-          if (status !== o.status) updatedCount++;
+            if (status !== o.status) updatedCount++;
+          }
+        } catch (e) {
+          console.error('[Cron] ShipMaxx tracking failed for AWB:', o.awb_code, e.message);
         }
-      } catch (e) {
-        console.error('[Cron] ShipMaxx tracking failed for AWB:', o.awb_code, e.message);
-      }
+      }));
+      await new Promise(resolve => setTimeout(resolve, 300));
     }
     if (updatedCount > 0) {
       await generateReorderCommissions();
