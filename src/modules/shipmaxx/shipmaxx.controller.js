@@ -1481,11 +1481,19 @@ export const syncShipmaxx = catchAsync(async (req, res) => {
 });
 
 export const runCronSyncWebhook = catchAsync(async (req, res) => {
-  const cronModule = await import('./shipmaxx.cron.js');
-  if (cronModule && cronModule.runCronSync) {
-    await cronModule.runCronSync();
-  }
-  res.json(new ApiResponse(200, null, 'ShipMaxx cron sync completed successfully'));
+  // Return immediately so external cron (Hostinger/cron-job.org) doesn't hit 30s HTTP timeout
+  res.json(new ApiResponse(200, null, 'ShipMaxx cron sync triggered in background'));
+
+  // Run sync in background
+  import('./shipmaxx.cron.js').then(cronModule => {
+    if (cronModule && cronModule.runCronSync) {
+      cronModule.runCronSync().catch(err => {
+        console.error('[Cron Webhook Sync Error]', err.message);
+      });
+    }
+  }).catch(err => {
+    console.error('[Cron Webhook Import Error]', err.message);
+  });
 });
 
 
