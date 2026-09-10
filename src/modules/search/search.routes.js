@@ -5,6 +5,7 @@ import catchAsync from '../../utils/catchAsync.js';
 import ApiResponse from '../../utils/ApiResponse.js';
 import httpStatus from 'http-status';
 
+import User from '../user/user.model.js';
 import Lead from '../lead/lead.model.js';
 import { Task } from '../task/task.model.js';
 import Verification from '../verification/verification.model.js';
@@ -66,14 +67,16 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
   }
 
   try {
-    const [leadPhones, orderPhones, maxxPhones, srDelivered, smDelivered, interested, notInterested] = await Promise.all([
+    const [leadPhones, orderPhones, maxxPhones, srDelivered, smDelivered, interested, notInterested, callAgainPhones, cnpPhones] = await Promise.all([
       Lead.find(baseMatch).select('phone').limit(50).lean(),
       ShiprocketOrder.find(orderMatch).select('billing_phone').limit(50).lean(),
       ShipmaxxOrder.find(orderMatch).select('billing_phone').limit(50).lean(),
       (getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch).select('billing_phone').limit(50).lean(),
       (getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch).select('billing_phone').limit(50).lean(),
       InterestedLead.find(baseMatch).select('phone').limit(50).lean(),
-      NotInterestedLead.find(baseMatch).select('phone').limit(50).lean()
+      NotInterestedLead.find(baseMatch).select('phone').limit(50).lean(),
+      CallAgain.find({ isDeleted: false, ...baseMatch }).select('phone').limit(50).lean(),
+      Cnp.find({ isDeleted: false, ...baseMatch }).select('phone').limit(50).lean(),
     ]);
     const phoneSet = new Set();
     const addPhone = (p) => { 
@@ -89,6 +92,8 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     smDelivered.forEach(o => addPhone(o.billing_phone));
     interested.forEach(l => addPhone(l.phone));
     notInterested.forEach(l => addPhone(l.phone));
+    callAgainPhones.forEach(c => addPhone(c.phone));
+    cnpPhones.forEach(c => addPhone(c.phone));
     
     const expandedPhones = Array.from(phoneSet).filter(Boolean);
     if (expandedPhones.length > 0) {
@@ -100,8 +105,8 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     }
   } catch (err) {}
 
-  // Get matching lead IDs using the expanded leadMatch for linked collection lookups
-  const matchedLeadsForSubqueries = await Lead.find(leadMatch).select('_id').lean();
+  // Get matching lead IDs (including transitioned/archived leads) using baseMatch for linked collection lookups
+  const matchedLeadsForSubqueries = await Lead.find(baseMatch).select('_id').lean();
   const matchedLeadIds = matchedLeadsForSubqueries.map(l => l._id);
   
   const [
@@ -127,11 +132,11 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     verifiedOrders
   ] = await Promise.all([
     Lead.find(leadMatch).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    Task.find({ isDeleted: false, $or: [{ title: safeRegex }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('assignedTo', 'name').populate('lead', 'name phone problem department address cityVillage state pincode').sort({ updatedAt: -1 }).limit(limit).lean(),
-    Verification.find({ isDeleted: false, $or: [{ title: safeRegex }, { lead: { $in: matchedLeadIds } }] }).populate('assignedTo', 'name').populate('lead', 'name phone problem department address cityVillage state pincode').sort({ updatedAt: -1 }).limit(limit).lean(),
-    ReadyToShipment.find({ $or: [{ title: safeRegex }, { lead: { $in: matchedLeadIds } }] }).populate('lead', 'name phone problem department address cityVillage state pincode').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    CallAgain.find({ lead: { $in: matchedLeadIds }, isDeleted: false }).populate('lead', 'name phone problem department address cityVillage state pincode').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    Cnp.find({ lead: { $in: matchedLeadIds }, isDeleted: false }).populate('lead', 'name phone problem department address cityVillage state pincode').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
+    Task.find({ isDeleted: false, $or: [{ title: safeRegex }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('assignedTo', 'name').populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    Verification.find({ isDeleted: false, $or: [{ title: safeRegex }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('assignedTo', 'name').populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    ReadyToShipment.find({ isDeleted: false, $or: [{ title: safeRegex }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
+    CallAgain.find({ isDeleted: false, $or: [{ lead: { $in: matchedLeadIds } }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
+    Cnp.find({ isDeleted: false, $or: [{ lead: { $in: matchedLeadIds } }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
     Appointment.find({ isDeleted: false, $or: [{ patientName: safeRegex }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('createdBy', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
     
     ShiprocketOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).populate({ path: 'verification_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
