@@ -293,7 +293,7 @@ export const runCronSync = async () => {
                 update.delivered_at = actualDeliveredAt;
                 update.status_updated_at = actualDeliveredAt;
               } else {
-                update.delivered_at = new Date();
+                update.delivered_at = o.delivered_at || o.status_updated_at || (statusChanged ? new Date() : o.createdAt);
               }
               if (o.lead_id) {
                 import('../lead/lead.model.js').then(({ Lead }) => {

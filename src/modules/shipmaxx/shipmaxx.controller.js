@@ -697,11 +697,43 @@ const ATTEMPT_STATUSES_RE = /^(undelivered_1st_attempt|undelivered_2nd_attempt|u
 const PIPELINE_STATUSES_RE = /^(new|pickup_scheduled|shipped|in_transit|rto_initiated|rto_in_transit|rto_intransit|rto_ofd|rto_undelivered|received_at_rts_hub|recd_at_dc_rts|rto_int|rto_it|rto-it|out_for_pickup|pickup_done|reached_at_destination_hub|reached_back_at_seller_city|misrouted|damaged|lost|shipment_booked|invoiced|spb|spd|int|ofp|pkd|rto|rra|run|out_for_delivery|ofd)$/i;
 
 export const getDeliveredStats = catchAsync(async (req, res) => {
-  const { from, to } = req.query;
+  const { from, to, department } = req.query;
 
   const baseConditions = [
     { platform: 'shipmaxx' }
   ];
+
+  const PILES_REGEX = /piles|gastro|bawasir|bavasir|hemorrhoid|fissure|fistula|bhagander/i;
+
+  if (department && department !== 'all') {
+    if (department === 'piles') {
+      baseConditions.push({
+        $or: [
+          { department: 'piles' },
+          { 'order_items.name': PILES_REGEX },
+          { 'order_items.sku': PILES_REGEX },
+          { 'products.name': PILES_REGEX },
+          { 'products.sku': PILES_REGEX },
+          { product_name: PILES_REGEX },
+          { problem: PILES_REGEX },
+          { remarks: PILES_REGEX },
+        ]
+      });
+    } else if (department === 'migraine') {
+      baseConditions.push({
+        $and: [
+          { department: { $ne: 'piles' } },
+          { 'order_items.name': { $not: PILES_REGEX } },
+          { 'order_items.sku': { $not: PILES_REGEX } },
+          { 'products.name': { $not: PILES_REGEX } },
+          { 'products.sku': { $not: PILES_REGEX } },
+          { product_name: { $not: PILES_REGEX } },
+          { problem: { $not: PILES_REGEX } },
+          { remarks: { $not: PILES_REGEX } },
+        ]
+      });
+    }
+  }
 
   if (from && to) {
     const dateFilter = {
@@ -710,11 +742,11 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
     };
     baseConditions.push({
       $or: [
-        // ── DELIVERED: filter by delivered_at (actual delivery date) ──────────
+        // ── DELIVERED: filter by delivered_at, fallback to status_updated_at, then createdAt ──
         { status: /^delivered$/i, delivered_at: dateFilter },
         { status: /^delivered$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], status_updated_at: dateFilter },
         { status: /^delivered$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], $and: [{ $or: [{ status_updated_at: { $exists: false } }, { status_updated_at: null }] }], createdAt: dateFilter },
-        // RTO_DELIVERED: same fallback logic
+        // RTO_DELIVERED: same logic
         { status: /^rto_delivered$/i, delivered_at: dateFilter },
         { status: /^rto_delivered$/i, $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }], status_updated_at: dateFilter },
         // Short codes (DEL, RTD)
@@ -858,7 +890,7 @@ const STATUS_ALIASES = {
   DELIVERED: ['DELIVERED', 'DEL'],
   RTO_DELIVERED: ['RTO_DELIVERED', 'RTD'],
   IN_TRANSIT: ['IN_TRANSIT', 'INT'],
-  OUT_FOR_DELIVERY: ['OUT_FOR_DELIVERY', 'OFD', 'OUT FOR DELIVERY', 'OUT-FOR-DELIVERY', 'RTO_OFD'],
+  OUT_FOR_DELIVERY: ['OUT_FOR_DELIVERY', 'OFD', 'OUT FOR DELIVERY', 'OUT-FOR-DELIVERY'],
   OUT_FOR_PICKUP: ['OUT_FOR_PICKUP', 'OFP'],
   PICKUP_DONE: ['PICKUP_DONE', 'PKD'],
   PICKUP_FAILED: ['PICKUP_FAILED', 'PKF'],
@@ -881,7 +913,7 @@ const STATUS_ALIASES = {
 };
 
 export const getStatusOrders = catchAsync(async (req, res) => {
-  const { status, shipment_status, from, to, limit = 50 } = req.query;
+  const { status, shipment_status, from, to, department, limit = 50 } = req.query;
 
   const queryStatus = shipment_status ?
     (SMX_STATUS_MAP[String(shipment_status).trim().toUpperCase()] || String(shipment_status).trim().toUpperCase())
@@ -892,6 +924,38 @@ export const getStatusOrders = catchAsync(async (req, res) => {
   const baseConditions = [
     { platform: 'shipmaxx' }
   ];
+
+  const PILES_REGEX = /piles|gastro|bawasir|bavasir|hemorrhoid|fissure|fistula|bhagander/i;
+
+  if (department && department !== 'all') {
+    if (department === 'piles') {
+      baseConditions.push({
+        $or: [
+          { department: 'piles' },
+          { 'order_items.name': PILES_REGEX },
+          { 'order_items.sku': PILES_REGEX },
+          { 'products.name': PILES_REGEX },
+          { 'products.sku': PILES_REGEX },
+          { product_name: PILES_REGEX },
+          { problem: PILES_REGEX },
+          { remarks: PILES_REGEX },
+        ]
+      });
+    } else if (department === 'migraine') {
+      baseConditions.push({
+        $and: [
+          { department: { $ne: 'piles' } },
+          { 'order_items.name': { $not: PILES_REGEX } },
+          { 'order_items.sku': { $not: PILES_REGEX } },
+          { 'products.name': { $not: PILES_REGEX } },
+          { 'products.sku': { $not: PILES_REGEX } },
+          { product_name: { $not: PILES_REGEX } },
+          { problem: { $not: PILES_REGEX } },
+          { remarks: { $not: PILES_REGEX } },
+        ]
+      });
+    }
+  }
 
   // Build status variants: use alias map if available, otherwise fall back to short-code reverse lookup
   const aliasVariants = STATUS_ALIASES[queryStatus];

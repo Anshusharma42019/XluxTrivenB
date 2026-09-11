@@ -1547,15 +1547,35 @@ const buildDeliveredDateMatch = ({ filterType, year, month, from, to }) => {
 };
 
 export const getDeliveredStats = catchAsync(async (req, res) => {
-  const { filterType, year, month, from, to } = req.query;
+  const { filterType, year, month, from, to, department } = req.query;
   const deliveredDateMatch = buildDeliveredDateMatch({ filterType, year, month, from, to });
   const statusDateMatch = buildStatusDateMatch({ filterType, year, month, from, to });
+
+  const deptMatch = {};
+  if (department && department !== 'all') {
+    if (department === 'piles') {
+      deptMatch.$or = [
+        { department: 'piles' },
+        { 'order_items.name': { $regex: /piles|gastro/i } },
+        { 'products.name': { $regex: /piles|gastro/i } },
+      ];
+    } else if (department === 'migraine') {
+      deptMatch.$or = [
+        { department: 'migraine' },
+        { department: { $exists: false } },
+        { department: null },
+        { 'order_items.name': { $regex: /migraine/i } },
+        { 'products.name': { $regex: /migraine/i } },
+      ];
+    }
+  }
+
   const [result, statusBreakdown] = await Promise.all([
     Order.aggregate([
-      { $match: { status: /^delivered$/i, ...deliveredDateMatch } },
+      { $match: { status: /^delivered$/i, ...deliveredDateMatch, ...deptMatch } },
       { $group: { _id: null, count: { $sum: 1 }, revenue: { $sum: { $convert: { input: '$sub_total', to: 'double', onError: 0, onNull: 0 } } } } },
     ]),
-    Order.aggregate([{ $match: { status: { $not: /^delivered$/i }, ...statusDateMatch } }, { $group: { _id: '$status', count: { $sum: 1 } } }, { $sort: { count: -1 } }]),
+    Order.aggregate([{ $match: { status: { $not: /^delivered$/i }, ...statusDateMatch, ...deptMatch } }, { $group: { _id: '$status', count: { $sum: 1 } } }, { $sort: { count: -1 } }]),
   ]);
   const { count = 0, revenue = 0 } = result[0] || {};
   // Merge IN_TRANSIT variants
@@ -1571,7 +1591,7 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
 });
 
 export const getStatusOrders = catchAsync(async (req, res) => {
-  const { status, filterType, year, month, from, to, limit = 50 } = req.query;
+  const { status, filterType, year, month, from, to, department, limit = 50 } = req.query;
   if (!status) return res.status(400).json(new ApiResponse(400, null, 'Status is required'));
   
   const isDelivered = /^delivered$/i.test(status);
@@ -1584,12 +1604,31 @@ export const getStatusOrders = catchAsync(async (req, res) => {
   const statusVariant = status.replace(/[-_]/g, '[-_ ]');
   const statusQuery = { status: new RegExp(`^${statusVariant}$`, 'i') };
 
+  const deptMatch = {};
+  if (department && department !== 'all') {
+    if (department === 'piles') {
+      deptMatch.$or = [
+        { department: 'piles' },
+        { 'order_items.name': { $regex: /piles|gastro/i } },
+        { 'products.name': { $regex: /piles|gastro/i } },
+      ];
+    } else if (department === 'migraine') {
+      deptMatch.$or = [
+        { department: 'migraine' },
+        { department: { $exists: false } },
+        { department: null },
+        { 'order_items.name': { $regex: /migraine/i } },
+        { 'products.name': { $regex: /migraine/i } },
+      ];
+    }
+  }
+
   // For staff roles (non-admin), filter DELIVERED by verified_by = current user
   const userRole = req.user?.role;
   const isStaff = userRole && !['admin', 'superadmin', 'super_admin', 'manager', 'logistic', 'logistics', 'ndr'].includes(userRole.toLowerCase());
   const staffFilter = (isDelivered && isStaff && req.user?._id) ? { verified_by: req.user._id } : {};
 
-  const orders = await Order.find({ ...statusQuery, ...dateMatch, ...staffFilter })
+  const orders = await Order.find({ ...statusQuery, ...dateMatch, ...deptMatch, ...staffFilter })
 
     .populate({ path: 'lead_id', select: 'name phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
     .populate('verified_by', 'name role')
