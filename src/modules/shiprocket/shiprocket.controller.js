@@ -2295,48 +2295,62 @@ export const sendToVerification = catchAsync(async (req, res) => {
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
 
   let lead = order.lead_id;
+  const orderPhone = order.billing_phone ? String(order.billing_phone).replace(/\D/g, '') : '';
+  const leadPhone = lead?.phone ? String(lead.phone).replace(/\D/g, '') : '';
 
-  // If no lead is linked, try to find one by phone or create a minimal lead
-  if (!lead) {
-    const phone = order.billing_phone;
-    if (phone && !/^x+$/i.test(phone) && String(phone).replace(/\D/g, '').length >= 10) {
-      lead = await leadService.findLeadByPhone(phone);
+  // If lead is missing or phone numbers don't match, find/create the correct lead by order phone
+  if (!lead || (orderPhone && leadPhone && orderPhone.slice(-10) !== leadPhone.slice(-10))) {
+    if (orderPhone && orderPhone.length >= 10 && !/^x+$/i.test(order.billing_phone)) {
+      lead = await leadService.findLeadByPhone(orderPhone.slice(-10));
     }
     if (!lead) {
       lead = await Lead.create({
         name: order.billing_customer_name || 'Unknown Customer',
-        phone: phone || 'N/A',
+        phone: order.billing_phone || 'N/A',
         address: order.billing_address || '',
         status: 'follow_up',
         createdBy: req.user._id,
       });
-      await Order.findByIdAndUpdate(id, { lead_id: lead._id });
     }
+    await Order.findByIdAndUpdate(id, { lead_id: lead._id });
+  }
+
+  // Ensure Lead name matches order customer name if lead name is generic/missing
+  if (order.billing_customer_name && (!lead.name || lead.name === 'Unknown Customer' || lead.name === 'N/A')) {
+    await Lead.findByIdAndUpdate(lead._id, { name: order.billing_customer_name });
+    lead.name = order.billing_customer_name;
   }
 
   // Get last saved relief percentage from followups
   const followups = await Followup.find({ order_id: id }).sort({ followup_number: 1 }).lean();
   const lastRelief = [...followups].reverse().find(f => f.relief_percentage != null)?.relief_percentage ?? null;
 
+  let oldVer = null;
+  if (order.verification_id) {
+    oldVer = await Verification.findById(order.verification_id);
+  }
+
   const isAddon = source === 'add_on';
+  const customerName = order.billing_customer_name || lead.name || 'Unknown Customer';
   const titlePrefix = source === 'rto' ? '[RTO] Re-Verification for ' : (isAddon ? '[Add-on] Re-Verification for ' : 'Re-Verification for ');
-  const fallbackProblem = problem || (medicine ? `Add-on Medicine: ${medicine}` : '') || lead.problem || oldVer?.problem || order.problem || (order.order_items && order.order_items[0]?.name) || (order.products && order.products[0]?.name) || '';
+  const itemMedicineName = (order.order_items && order.order_items[0]?.name) || (order.products && order.products[0]?.name) || '';
+  const fallbackProblem = problem || (isAddon && medicine ? `Add-on Medicine: ${medicine}` : '') || order.verification_problem || order.problem || lead.problem || oldVer?.problem || itemMedicineName || '';
   const finalPrice = (price !== undefined && price !== null && price !== '') ? Number(price) : (order.sub_total || 0);
 
   // Create a new task with status 'verification'
   const task = await Task.create({
-    title: `${titlePrefix}${lead.name || order.billing_customer_name}`,
+    title: `${titlePrefix}${customerName}`,
     lead: lead._id,
     assignedTo: req.user._id,
     createdBy: req.user._id,
     status: 'verification',
     dueDate: new Date(),
     problem: fallbackProblem,
-    cityVillage: order.billing_city,
-    state: order.billing_state,
-    pincode: order.billing_pincode,
-    address: order.billing_address,
-    phone: order.billing_phone,
+    cityVillage: order.billing_city || lead.cityVillage || '',
+    state: order.billing_state || lead.state || '',
+    pincode: order.billing_pincode || lead.pincode || '',
+    address: order.billing_address || lead.address || '',
+    phone: order.billing_phone || lead.phone || '',
     price: finalPrice,
     department: lead.department || oldVer?.department || 'migraine'
   });

@@ -2242,10 +2242,13 @@ export const sendToVerification = catchAsync(async (req, res) => {
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
 
   let lead = order.lead_id;
-  if (!lead) {
-    const phone = order.billing_phone;
-    if (phone && String(phone).replace(/\D/g, '').length >= 10) {
-      lead = await leadService.findLeadByPhone(phone);
+  const orderPhone = order.billing_phone ? String(order.billing_phone).replace(/\D/g, '') : '';
+  const leadPhone = lead?.phone ? String(lead.phone).replace(/\D/g, '') : '';
+
+  // If lead is missing or phone numbers don't match, find/create the correct lead by order phone
+  if (!lead || (orderPhone && leadPhone && orderPhone.slice(-10) !== leadPhone.slice(-10))) {
+    if (orderPhone && orderPhone.length >= 10) {
+      lead = await leadService.findLeadByPhone(orderPhone.slice(-10));
     }
     if (!lead) {
       lead = await Lead.create({
@@ -2255,8 +2258,14 @@ export const sendToVerification = catchAsync(async (req, res) => {
         status: 'follow_up',
         createdBy: req.user._id,
       });
-      await Order.findByIdAndUpdate(id, { lead_id: lead._id });
     }
+    await Order.findByIdAndUpdate(id, { lead_id: lead._id });
+  }
+
+  // Ensure Lead name matches order customer name if lead name is generic/missing
+  if (order.billing_customer_name && (!lead.name || lead.name === 'Unknown Customer' || lead.name === 'N/A')) {
+    await Lead.findByIdAndUpdate(lead._id, { name: order.billing_customer_name });
+    lead.name = order.billing_customer_name;
   }
 
   const followups = await Followup.find({ order_id: id }).sort({ followup_number: 1 }).lean();
@@ -2268,22 +2277,24 @@ export const sendToVerification = catchAsync(async (req, res) => {
   }
 
   const isAddon = source === 'add_on';
+  const customerName = order.billing_customer_name || lead.name || 'Unknown Customer';
   const titlePrefix = source === 'rto' ? '[RTO] Re-Verification for ' : (isAddon ? '[Add-on] Re-Verification for ' : 'Re-Verification for ');
-  const fallbackProblem = problem || lead.problem || oldVer?.problem || order.problem || '';
+  const itemMedicineName = order.order_items?.[0]?.name || '';
+  const fallbackProblem = problem || (isAddon && medicine ? `Add-on Medicine: ${medicine}` : '') || order.verification_problem || order.problem || lead.problem || oldVer?.problem || itemMedicineName || '';
   const finalPrice = (price !== undefined && price !== null && price !== '') ? Number(price) : (order.sub_total || 0);
 
   const task = await Task.create({
-    title: `${titlePrefix}${lead.name || order.billing_customer_name}`,
+    title: `${titlePrefix}${customerName}`,
     lead: lead._id,
     assignedTo: req.user._id,
     createdBy: req.user._id,
     status: 'verification',
     dueDate: new Date(),
-    cityVillage: order.billing_city,
-    state: order.billing_state,
-    pincode: order.billing_pincode,
-    address: order.billing_address,
-    phone: order.billing_phone,
+    cityVillage: order.billing_city || lead.cityVillage || '',
+    state: order.billing_state || lead.state || '',
+    pincode: order.billing_pincode || lead.pincode || '',
+    address: order.billing_address || lead.address || '',
+    phone: order.billing_phone || lead.phone || '',
     price: finalPrice,
     problem: fallbackProblem,
     department: lead.department || oldVer?.department || 'migraine',
