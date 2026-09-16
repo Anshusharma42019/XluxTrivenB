@@ -1601,8 +1601,13 @@ export const getStatusOrders = catchAsync(async (req, res) => {
     : buildStatusDateMatch({ filterType, year, month, from, to });
 
   // Match underscore, space, and hyphen variants (e.g. UNDELIVERED-2ND_ATTEMPT, UNDELIVERED-2ND ATTEMPT)
-  const statusVariant = status.replace(/[-_]/g, '[-_ ]');
-  const statusQuery = { status: new RegExp(`^${statusVariant}$`, 'i') };
+  let statusQuery;
+  if (isUndelivered) {
+    statusQuery = { status: /undelivered|delivery_exception|und/i };
+  } else {
+    const statusVariant = status.replace(/[-_]/g, '[-_ ]');
+    statusQuery = { status: new RegExp(`^${statusVariant}$`, 'i') };
+  }
 
   const deptMatch = {};
   if (department && department !== 'all') {
@@ -1633,7 +1638,7 @@ export const getStatusOrders = catchAsync(async (req, res) => {
     .populate({ path: 'lead_id', select: 'name phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
     .populate('verified_by', 'name role')
     .populate('comments.createdBy', 'name role')
-    .sort(/^delivered$/i.test(status) ? { delivered_at: -1, createdAt: -1 } : { createdAt: -1 })
+    .sort(/^delivered$/i.test(status) ? { delivered_at: -1, createdAt: -1, _id: -1 } : { createdAt: -1, status_updated_at: -1, _id: -1 })
     .limit(Math.min(Number(limit) || 50, 200)).lean();
 
   // Optimized enrichment: instead of fetching all leads, only fetch what's needed for these specific orders

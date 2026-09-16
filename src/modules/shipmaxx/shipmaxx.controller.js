@@ -885,7 +885,7 @@ const STATUS_ALIASES = {
   RTO_INTRANSIT: ['RTO_INTRANSIT', 'RTO_IN_TRANSIT', 'RTO_INT', 'RTO-IT', 'RTO_IT', 'RRA'],
   RTO_IN_TRANSIT: ['RTO_INTRANSIT', 'RTO_IN_TRANSIT', 'RTO_INT', 'RTO-IT', 'RTO_IT', 'RRA'],
   NEW: ['NEW', 'NFI', 'SPB'],
-  UNDELIVERED: ['UNDELIVERED', 'UND', 'UNDELIVERED_ATTEMPT_FAILURE', 'UNDELIVERED_FAILURE'],
+  UNDELIVERED: ['UNDELIVERED', 'UND', 'UNDELIVERED_ATTEMPT_FAILURE', 'UNDELIVERED_FAILURE', 'UNDELIVERED_1ST_ATTEMPT', 'UNDELIVERED_2ND_ATTEMPT', 'UNDELIVERED_3RD_ATTEMPT', 'UNDELIVERED-1ST_ATTEMPT', 'UNDELIVERED-2ND_ATTEMPT', 'UNDELIVERED-3RD_ATTEMPT', 'DELIVERY_EXCEPTION', 'DEX'],
   CANCELLED: ['CANCELLED', 'CANCELED', 'SC'],
   DELIVERED: ['DELIVERED', 'DEL'],
   RTO_DELIVERED: ['RTO_DELIVERED', 'RTD'],
@@ -1025,12 +1025,16 @@ export const getStatusOrders = catchAsync(async (req, res) => {
     match.verified_by = req.user._id;
   }
 
+  const sortCriteria = isDeliveredStatus
+    ? { delivered_at: -1, status_updated_at: -1, createdAt: -1, _id: -1 }
+    : { createdAt: -1, status_updated_at: -1, _id: -1 };
+
   const orders = await Order.find(match)
     .populate({ path: 'lead_id', select: 'name phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
     .populate('verified_by', 'name role')
     .populate('created_by', 'name role')
     .populate('comments.createdBy', 'name role')
-    .sort({ status_updated_at: -1, delivered_at: -1, createdAt: -1, _id: -1 })
+    .sort(sortCriteria)
     .limit(Math.min(Number(limit) || 50, 500)).lean();
 
   // Backfill missing customer data from raw_response or lead_id
@@ -2628,7 +2632,7 @@ export const getNdrList = catchAsync(async (req, res) => {
   }
 
   const orders = await Order.find(match)
-    .sort({ status_updated_at: -1, createdAt: -1 })
+    .sort({ createdAt: -1, status_updated_at: -1, _id: -1 })
     .skip((Number(page) - 1) * Number(limit))
     .limit(Number(limit))
     .lean();

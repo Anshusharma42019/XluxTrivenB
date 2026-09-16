@@ -197,10 +197,14 @@ function calcKPIs(orders, startPeriod) {
 
   for (const o of orders) {
     if (o.interakt_reply_text && String(o.interakt_reply_text).trim()) {
-      interaktReplies++;
       const replyStr = String(o.interakt_reply_text).toLowerCase();
-      if (replyStr.includes('reattempt')) replyReattempt++;
-      if (replyStr.includes('dawa') || replyStr.includes('medicine')) replyDawa++;
+      const isReattempt = replyStr.includes('reattempt');
+      const isDawa = replyStr.includes('dawa') || replyStr.includes('medicine');
+      if (isReattempt || isDawa) {
+        interaktReplies++;
+        if (isReattempt) replyReattempt++;
+        if (isDawa) replyDawa++;
+      }
     }
 
     let staffRole = '';
@@ -704,7 +708,8 @@ export async function getAging(params) {
   };
 
   const populates = [
-    { path: 'verification_id', select: 'problem department age weight height otherProblems problemDuration' }
+    { path: 'verification_id', select: 'problem department age weight height otherProblems problemDuration' },
+    { path: 'comments.createdBy', select: 'name role' }
   ];
 
   const ofdFilter = { ...base, status: { $regex: 'out.?for.?delivery|^ofd', $options: 'i' }, status_updated_at: { $lte: new Date(now.getTime() - 2 * 86400000) } };
@@ -827,7 +832,7 @@ export async function getShipments(params) {
     } else if (status === 'reply_dawa') {
       baseFilter.interakt_reply_text = { $regex: 'dawa|medicine', $options: 'i' };
     } else {
-      baseFilter.interakt_reply_text = { $ne: null, $exists: true, $regex: /\S/ };
+      baseFilter.interakt_reply_text = { $regex: 'reattempt|dawa|medicine', $options: 'i' };
     }
   } else if (status && status !== 'totalShipments') {
     if (['totalSales', 'totalSupport', 'salesDelivered', 'supportDelivered'].includes(status)) {
@@ -940,7 +945,8 @@ export async function getShipments(params) {
   };
 
   const populates = [
-    { path: 'verification_id', select: 'problem department age weight height otherProblems problemDuration' }
+    { path: 'verification_id', select: 'problem department age weight height otherProblems problemDuration' },
+    { path: 'comments.createdBy', select: 'name role' }
   ];
 
   let srOrders = [], smOrders = [], verOrders = [], srTotal = 0, smTotal = 0, verTotal = 0;
@@ -1065,30 +1071,53 @@ export async function getAlerts(params) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
-   9. RTO Verification
+   9. RTO Verification & Order Comments
 ══════════════════════════════════════════════════════════════════════════════ */
-export async function submitRtoVerification({ order_id, platform, action }) {
-  if (!order_id || !action) {
-    throw new Error('Order ID and action are required');
+export async function submitRtoVerification({ order_id, platform, action, comment, userId }) {
+  if (!order_id) {
+    throw new Error('Order ID is required');
   }
   
-  if (platform === 'shipmaxx') {
-    const order = await ShipmaxxOrder.findOneAndUpdate(
-      { order_id },
-      { $set: { rto_verification_action: action } },
-      { new: true }
-    );
-    if (!order) throw new Error('Shipmaxx order not found');
-    return order;
-  } else {
-    const order = await Order.findOneAndUpdate(
-      { order_id },
-      { $set: { rto_verification_action: action } },
-      { new: true }
-    );
-    if (!order) throw new Error('Shiprocket order not found');
-    return order;
+  const update = {};
+  if (action) {
+    update.$set = { rto_verification_action: action };
   }
+  if (comment && String(comment).trim()) {
+    update.$push = {
+      comments: {
+        text: String(comment).trim(),
+        type: 'general',
+        section: 'rto_verification',
+        createdBy: userId || null,
+        createdAt: new Date(),
+      }
+    };
+  }
+
+  if (!update.$set && !update.$push) {
+    throw new Error('Action or comment is required');
+  }
+
+  const queryOr = [{ order_id }, { awb_code: order_id }];
+  if (mongoose.Types.ObjectId.isValid(order_id)) {
+    queryOr.push({ _id: order_id });
+  }
+
+  const PrimaryModel = platform === 'shipmaxx' ? ShipmaxxOrder : Order;
+  const SecondaryModel = platform === 'shipmaxx' ? Order : ShipmaxxOrder;
+
+  let order = await PrimaryModel.findOneAndUpdate({ $or: queryOr }, update, { new: true })
+    .populate('comments.createdBy', 'name role')
+    .lean();
+
+  if (!order) {
+    order = await SecondaryModel.findOneAndUpdate({ $or: queryOr }, update, { new: true })
+      .populate('comments.createdBy', 'name role')
+      .lean();
+  }
+
+  if (!order) throw new Error('Shipment order not found');
+  return order;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════

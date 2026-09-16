@@ -42,7 +42,11 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
   
   // Clean phone digits for phone search (e.g. "+91 89995 37057" -> "8999537057")
   const digitsOnly = queryStr.replace(/\D/g, '');
-  const cleanPhone = digitsOnly.length >= 7 ? digitsOnly.slice(-10) : (digitsOnly.length >= 4 ? digitsOnly : null);
+  const nonDigitChars = queryStr.replace(/[\d\s\+\-\(\)]/g, '');
+  
+  // Query is a phone search if it has >= 4 digits and no letter/symbol text
+  const isPhoneQuery = digitsOnly.length >= 4 && nonDigitChars.length === 0;
+  const cleanPhone = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : (digitsOnly.length >= 4 ? digitsOnly : null);
 
   let isValidObjectId = false;
   try {
@@ -51,62 +55,83 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
 
   const limit = 25; 
 
-  const baseMatch = { $or: [{ name: safeRegex }, { phone: safeRegex }, { email: safeRegex }, { problem: safeRegex }] };
-  if (cleanPhone) {
-    const phoneReg = new RegExp(cleanPhone);
-    baseMatch.$or.push({ phone: phoneReg });
-  }
-  if (isValidObjectId) baseMatch.$or.push({ _id: queryStr });
+  let leadMatch;
+  let orderMatch;
+  let phoneReg = null;
 
-  const leadMatch = { isDeleted: false, ...baseMatch };
-  
-  const orderMatch = { $or: [{ billing_customer_name: safeRegex }, { billing_phone: safeRegex }, { order_id: safeRegex }, { awb_code: safeRegex }] };
   if (cleanPhone) {
-    const phoneReg = new RegExp(cleanPhone);
-    orderMatch.$or.push({ billing_phone: phoneReg });
+    const phonePattern = cleanPhone.split('').join('[\\s\\-]*');
+    phoneReg = new RegExp(phonePattern, 'i');
   }
 
-  try {
-    const [leadPhones, orderPhones, maxxPhones, srDelivered, smDelivered, interested, notInterested, callAgainPhones, cnpPhones] = await Promise.all([
-      Lead.find(baseMatch).select('phone').limit(50).lean(),
-      ShiprocketOrder.find(orderMatch).select('billing_phone').limit(50).lean(),
-      ShipmaxxOrder.find(orderMatch).select('billing_phone').limit(50).lean(),
-      (getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch).select('billing_phone').limit(50).lean(),
-      (getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch).select('billing_phone').limit(50).lean(),
-      InterestedLead.find(baseMatch).select('phone').limit(50).lean(),
-      NotInterestedLead.find(baseMatch).select('phone').limit(50).lean(),
-      CallAgain.find({ isDeleted: false, ...baseMatch }).select('phone').limit(50).lean(),
-      Cnp.find({ isDeleted: false, ...baseMatch }).select('phone').limit(50).lean(),
-    ]);
-    const phoneSet = new Set();
-    const addPhone = (p) => { 
-      if (p) {
-        const d = p.replace(/\D/g, '');
-        if (d) phoneSet.add(d.length >= 10 ? d.slice(-10) : d);
-      }
+  if (isPhoneQuery && cleanPhone) {
+    // STRICT PHONE SEARCH: Search ONLY phone fields (or order_id/awb if digits match an order ID/AWB)
+    leadMatch = { 
+      isDeleted: false, 
+      $or: [
+        { phone: phoneReg },
+        ...(isValidObjectId ? [{ _id: queryStr }] : [])
+      ]
     };
-    leadPhones.forEach(l => addPhone(l.phone));
-    orderPhones.forEach(o => addPhone(o.billing_phone));
-    maxxPhones.forEach(o => addPhone(o.billing_phone));
-    srDelivered.forEach(o => addPhone(o.billing_phone));
-    smDelivered.forEach(o => addPhone(o.billing_phone));
-    interested.forEach(l => addPhone(l.phone));
-    notInterested.forEach(l => addPhone(l.phone));
-    callAgainPhones.forEach(c => addPhone(c.phone));
-    cnpPhones.forEach(c => addPhone(c.phone));
-    
-    const expandedPhones = Array.from(phoneSet).filter(Boolean);
-    if (expandedPhones.length > 0) {
-      expandedPhones.forEach(p => {
-        const reg = new RegExp(p, 'i');
-        leadMatch.$or.push({ phone: reg });
-        orderMatch.$or.push({ billing_phone: reg });
-      });
-    }
-  } catch (err) {}
 
-  // Get matching lead IDs (including transitioned/archived leads) using baseMatch for linked collection lookups
-  const matchedLeadsForSubqueries = await Lead.find(baseMatch).select('_id').lean();
+    orderMatch = {
+      $or: [
+        { billing_phone: phoneReg },
+        { order_id: safeRegex },
+        { awb_code: safeRegex }
+      ]
+    };
+  } else {
+    // GENERAL SEARCH (Name, Email, Problem, Order ID, AWB Code, etc.)
+    const baseMatch = { 
+      $or: [
+        { name: safeRegex }, 
+        { email: safeRegex }, 
+        { problem: safeRegex }
+      ] 
+    };
+
+    if (phoneReg && digitsOnly.length >= 7) {
+      baseMatch.$or.push({ phone: phoneReg });
+    }
+    if (isValidObjectId) baseMatch.$or.push({ _id: queryStr });
+
+    leadMatch = { isDeleted: false, ...baseMatch };
+    
+    orderMatch = { 
+      $or: [
+        { billing_customer_name: safeRegex }, 
+        { order_id: safeRegex }, 
+        { awb_code: safeRegex }
+      ] 
+    };
+    if (phoneReg && digitsOnly.length >= 7) {
+      orderMatch.$or.push({ billing_phone: phoneReg });
+    }
+
+    if (digitsOnly.length >= 7) {
+      try {
+        const [leadPhones, orderPhones] = await Promise.all([
+          Lead.find({ isDeleted: false, phone: phoneReg }).select('phone').limit(10).lean(),
+          ShiprocketOrder.find({ billing_phone: phoneReg }).select('billing_phone').limit(10).lean()
+        ]);
+        const phoneSet = new Set();
+        leadPhones.forEach(l => { if (l.phone) phoneSet.add(l.phone.replace(/\D/g, '').slice(-10)); });
+        orderPhones.forEach(o => { if (o.billing_phone) phoneSet.add(o.billing_phone.replace(/\D/g, '').slice(-10)); });
+        
+        phoneSet.forEach(p => {
+          if (p) {
+            const reg = new RegExp(p.split('').join('[\\s\\-]*'), 'i');
+            leadMatch.$or.push({ phone: reg });
+            orderMatch.$or.push({ billing_phone: reg });
+          }
+        });
+      } catch (err) {}
+    }
+  }
+
+  // Get matching lead IDs (including transitioned/archived leads) for linked collection lookups
+  const matchedLeadsForSubqueries = await Lead.find(leadMatch).select('_id').lean();
   const matchedLeadIds = matchedLeadsForSubqueries.map(l => l._id);
   
   const [
@@ -333,7 +358,8 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
 
   const grouped = {};
   allResults.forEach(r => {
-    const key = r.phone ? r.phone.replace(/\D/g, '') : r._id;
+    const rawPhone = r.phone ? r.phone.replace(/\D/g, '') : '';
+    const key = rawPhone.length >= 7 ? rawPhone.slice(-10) : (r._id ? r._id.toString() : 'unknown');
     if (!key) return;
     if (!grouped[key]) {
       grouped[key] = { 
@@ -416,11 +442,27 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     };
   });
 
-  const cleanQ = queryStr.replace(/\D/g, '');
-  finalResults.sort((a, b) => {
-    const aExactPhone = a.phone && cleanQ && a.phone.includes(cleanQ) ? 1 : 0;
-    const bExactPhone = b.phone && cleanQ && b.phone.includes(cleanQ) ? 1 : 0;
-    if (aExactPhone !== bExactPhone) return bExactPhone - aExactPhone;
+  let outputResults = finalResults;
+  if (isPhoneQuery && cleanPhone) {
+    const targetDigits = cleanPhone;
+    const strictFiltered = finalResults.filter(group => {
+      const gDigits = (group.phone || '').replace(/\D/g, '');
+      return gDigits.includes(targetDigits) || targetDigits.includes(gDigits.slice(-10));
+    });
+    if (strictFiltered.length > 0) {
+      outputResults = strictFiltered;
+    }
+  }
+
+  const cleanQ = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : digitsOnly;
+  outputResults.sort((a, b) => {
+    const aPhoneDigits = (a.phone || '').replace(/\D/g, '');
+    const bPhoneDigits = (b.phone || '').replace(/\D/g, '');
+    
+    const aExact = (aPhoneDigits.endsWith(cleanQ) || aPhoneDigits === cleanQ) ? 2 : (aPhoneDigits.includes(cleanQ) ? 1 : 0);
+    const bExact = (bPhoneDigits.endsWith(cleanQ) || bPhoneDigits === cleanQ) ? 2 : (bPhoneDigits.includes(cleanQ) ? 1 : 0);
+    
+    if (aExact !== bExact) return bExact - aExact;
     
     return new Date(b.latestStatus.updatedAt) - new Date(a.latestStatus.updatedAt);
   });
@@ -434,7 +476,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
 
     // Collect all lead IDs from the search result set
     const leadIdSet = new Set();
-    for (const group of finalResults) {
+    for (const group of outputResults) {
       for (const rec of group.history || []) {
         // Extract lead _id from history records where available
         const r = rec;
@@ -496,7 +538,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
       }
 
       // Attach order_chain to each result group by matching phone → lead IDs
-      for (const group of finalResults) {
+      for (const group of outputResults) {
         // Find all lead IDs associated with this customer's phone number
         const groupPhone = (group.phone || '').replace(/\D/g, '');
         const groupLeadIds = matchingLeadsByPhone
@@ -518,7 +560,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     console.error('[Search] Commission chain enrichment failed:', chainErr.message);
   }
 
-  res.json(new ApiResponse(httpStatus.OK, finalResults.slice(0, 20), 'Search results'));
+  res.json(new ApiResponse(httpStatus.OK, outputResults.slice(0, 20), 'Search results'));
 }));
 
 export default router;

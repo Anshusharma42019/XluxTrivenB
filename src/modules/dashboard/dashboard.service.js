@@ -424,6 +424,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
       newDeliveredCount: 0, salesOldDeliveredCount: 0, supportOldDeliveredCount: 0,
       uniqueDeliveredCount: 0, // Counts each physical order exactly once (no dual-attribution inflation)
       commentsCount: 0, cnpComments: 0, callAgainComments: 0, interestedComments: 0,
+      ofdCommentsCount: 0, rtoCommentsCount: 0,
       commission: 0,
       _noteSet: new Set(), _intSet: new Set(), _cnpSet: new Set(), _caSet: new Set()
     };
@@ -448,25 +449,25 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
         $or: [
           { status: 'pending' }, 
           { createdAt: { $gte: startOfDay, $lte: endOfDay } },
-          { updatedAt: { $gte: startOfDay, $lte: endOfDay } },
-          { 'notes.createdAt': { $gte: startOfDay, $lte: endOfDay } }
+          { updatedAt: { $gte: startOfDay, $lte: endOfDay } }
         ]
       })
     }).select('lead assignedTo status notes updatedAt createdAt').lean(),
-    Cnp.find({ ...(isAllTime ? {} : { $or: [{ updatedAt: { $gte: startOfDay, $lte: endOfDay } }, { 'notes.createdAt': { $gte: startOfDay, $lte: endOfDay } }] }) }).select('assignedTo notes updatedAt').lean(),
-    CallAgain.find({ ...(isAllTime ? {} : { $or: [{ updatedAt: { $gte: startOfDay, $lte: endOfDay } }, { 'notes.createdAt': { $gte: startOfDay, $lte: endOfDay } }] }) }).select('lead assignedTo status notes updatedAt').lean(),
-    Lead.find({ ...(isAllTime ? {} : { $or: [{ createdAt: { $gte: startOfDay, $lte: endOfDay } }, { updatedAt: { $gte: startOfDay, $lte: endOfDay } }, { 'notes.createdAt': { $gte: startOfDay, $lte: endOfDay } }, { 'follow_ups.date': { $gte: startOfDay, $lte: endOfDay } }] }) }).select('assignedTo status cnp notes follow_ups createdAt updatedAt').lean(),
+    Cnp.find({ ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }).select('assignedTo notes updatedAt').lean(),
+    CallAgain.find({ ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }).select('lead assignedTo status notes updatedAt').lean(),
+    Lead.find({ 
+      isDeleted: false, 
+      ...(isAllTime ? {} : { createdAt: { $gte: startOfDay, $lte: endOfDay } }) 
+    }).select('assignedTo status cnp notes follow_ups createdAt updatedAt').lean(),
     Order.find({ 
       status: { $not: /^(new|pending|cancelled)$/i },
       ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
-    }).select('lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
-      .populate('lead_id', 'assignedTo status')
+    }).select('comments lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
       .lean(),
     ShipmaxxOrder.find({ 
       status: { $not: /^(new|pending|cancelled)$/i },
       ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
-    }).select('lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
-      .populate('lead_id', 'assignedTo status')
+    }).select('comments lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
       .lean(),
     ReorderCommission.aggregate([
       { $match: { 
@@ -651,6 +652,34 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   for (const o of allOrdersSR) processOrder(o);
   for (const o of allOrdersSM) processOrder(o);
 
+  const ofdRegex = /^(out_for_delivery|ofd|undelivered|undelivered_attempt_failure|ndr)$/i;
+  const rtoRegex = /^(rto|rto_verification|rto_delivered|rto_in_transit|rra)$/i;
+
+  const processOrderComments = (orders) => {
+    for (const o of orders) {
+      if (o.comments && o.comments.length) {
+        for (const c of o.comments) {
+          const uid = c.createdBy ? String(c.createdBy._id || c.createdBy) : null;
+          if (uid && statsMap[uid] && isToday(c.createdAt)) {
+            const sec = (c.section || '').trim();
+            const st = (o.status || '').trim();
+
+            if (rtoRegex.test(sec) || rtoRegex.test(st) || sec.toUpperCase().includes('RTO')) {
+              statsMap[uid].rtoCommentsCount++;
+            } else if (ofdRegex.test(sec) || ofdRegex.test(st) || sec.toUpperCase().includes('DELIVERY') || sec.toUpperCase().includes('UNDELIVERED')) {
+              statsMap[uid].ofdCommentsCount++;
+            } else {
+              statsMap[uid].ofdCommentsCount++;
+            }
+          }
+        }
+      }
+    }
+  };
+
+  processOrderComments(allOrdersSR);
+  processOrderComments(allOrdersSM);
+
   const synchronizedDeliveries = await getSynchronizedDeliveredOrders(isAllTime ? null : startOfDay, isAllTime ? null : endOfDay, Order, ShipmaxxOrder, true);
   
   // RTO lookback: 45 days (1 month 15 days) from the end of the period
@@ -708,12 +737,12 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     let uniqueCountedForStaff = null;
 
     if (!isOld) {
-      // New order (first kit) — attribute to lead owner
+      // New order (first kit) — attribute to lead owner (Sales) or Support
       const candidates = [tId, lId, vId, cId].filter(Boolean);
       for (const cand of candidates) {
         if (statsMap[cand]) {
-          if (statsMap[cand].user.role === 'support' || statsMap[cand].user.role === 'logistics') {
-            // Support/Logistics handled a new order — counts as Support's re-verification delivery
+          if (statsMap[cand].user.role === 'support') {
+            // Support handled a new order — counts as Support's re-verification delivery
             statsMap[cand].supportOldDeliveredCount++;
             statsMap[cand].deliveredCount++;
             if (!uniqueCountedForStaff) {
@@ -725,7 +754,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
               statsMap[phoneToSales[phone]].newDeliveredCount++;
               statsMap[phoneToSales[phone]].deliveredCount++;
             }
-          } else {
+          } else if (statsMap[cand].user.role === 'sales') {
             // Sales staff owns this lead — 1st kit delivery
             statsMap[cand].newDeliveredCount++;
             statsMap[cand].deliveredCount++;
@@ -738,10 +767,10 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
         }
       }
     } else {
-      // Reorder (2nd+ kit) — credit Support/Logistics who re-verified it
+      // Reorder (2nd+ kit) — credit Support who re-verified it
       const supportCand = [vId, cId, lId].filter(Boolean);
       for (const cand of supportCand) {
-        if (statsMap[cand] && (statsMap[cand].user.role === 'support' || statsMap[cand].user.role === 'logistics')) {
+        if (statsMap[cand] && statsMap[cand].user.role === 'support') {
           statsMap[cand].supportOldDeliveredCount++;
           statsMap[cand].deliveredCount++;
           if (!uniqueCountedForStaff) {
@@ -1339,7 +1368,7 @@ export async function getSynchronizedDeliveredOrders(monthStart, monthEnd, Order
 
 export async function getPhoneToSalesAgentMap(OrderModel, ShipmaxxOrderModel, LeadModel, userOrStatsMap, targetOrders = null) {
   let allHistory;
-  if (targetOrders && Array.isArray(targetOrders) && targetOrders.length <= 500) {
+  if (targetOrders && Array.isArray(targetOrders) && targetOrders.length <= 5000) {
     if (targetOrders.length === 0) return { phoneToSales: {}, leadMap: {} };
     const phones = targetOrders.map(o => (o.billing_phone || '').replace(/\D/g, '').slice(-10)).filter(p => p.length >= 10);
     const uniquePhones = [...new Set(phones)];

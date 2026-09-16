@@ -39,7 +39,7 @@ export const getShipments   = catchAsync(async (req, res) => res.json(new ApiRes
 export const getAlerts      = catchAsync(async (req, res) => res.json(new ApiResponse(200, await svc.getAlerts(extractParams(req)),      'Alerts fetched')));
 
 export const submitRtoVerification = catchAsync(async (req, res) => {
-  const result = await svc.submitRtoVerification(req.body);
+  const result = await svc.submitRtoVerification({ ...req.body, userId: req.user?._id });
   res.json(new ApiResponse(200, result, 'RTO verification saved successfully'));
 });
 
