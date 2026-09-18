@@ -2406,7 +2406,7 @@ export const sendToVerification = catchAsync(async (req, res) => {
   res.json(new ApiResponse(200, task, 'Order sent to verification successfully'));
 });
 export const createManualFollowup = catchAsync(async (req, res) => {
-  const { name, phone, city, state, medicine, delivered_date, amount, department, order_id, courier_name, payment_method, pincode, address, problem } = req.body;
+  const { name, phone, city, state, medicine, delivered_date, amount, department, order_id, courier_name, payment_method, pincode, address, problem, kit_number } = req.body;
   if (!name || !phone || !medicine || !delivered_date) {
     return res.status(400).json({ status: 400, message: 'Missing required fields' });
   }
@@ -2430,6 +2430,8 @@ export const createManualFollowup = catchAsync(async (req, res) => {
     billing_pincode: pincode || '',
     billing_address: address || '',
     problem: problem || '',
+    kit_number: Number(kit_number) || 1,
+    department: department || undefined,
     created_by: req.user._id,
     auto_followups_set: true,
   });

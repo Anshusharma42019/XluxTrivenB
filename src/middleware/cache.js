@@ -60,6 +60,7 @@ export const cacheInvalidatorMiddleware = (req, res, next) => {
       if (!invalidated && res.statusCode >= 200 && res.statusCode < 300) {
         cache.delPattern('route:/api/v1/dashboard');
         cache.delPattern('route:/api/v1/ops-dashboard');
+        cache.delPattern('route:/api/v1/shipmaxx');
         invalidated = true;
       }
     };

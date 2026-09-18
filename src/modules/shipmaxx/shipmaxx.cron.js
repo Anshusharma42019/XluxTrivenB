@@ -323,33 +323,22 @@ export const runCronSync = async () => {
       await generateReorderCommissions();
     }
 
-    // 4. Set auto followups
+    // 4. Set auto followups with equal support staff assignment
     try {
       const nfu = await Order.find({ platform: 'shipmaxx', status: /^delivered$/i, auto_followups_set: { $ne: true } }).select('_id delivered_at createdAt').lean();
       if (nfu.length > 0) {
-        const { Followup } = await import('./models/shipmaxxFollowup.model.js');
+        const { setAutoFollowUps } = await import('./shipmaxx.controller.js');
         for (const o of nfu) {
-          const total = 5;
-          const gap = 6;
-          const base = new Date(o.delivered_at || o.createdAt || new Date());
-          const ops = Array.from({ length: total }, (_, i) => {
-            const scheduled_date = new Date(base);
-            scheduled_date.setDate(scheduled_date.getDate() + (i * gap));
-            return {
-              updateOne: {
-                filter: { order_id: o._id, followup_number: i + 1 },
-                update: { $setOnInsert: { order_id: o._id, followup_number: i + 1, scheduled_date, status: 'scheduled', completed: false } },
-                upsert: true,
-              },
-            };
-          });
-          await Followup.bulkWrite(ops);
-          await Order.findByIdAndUpdate(o._id, { auto_followups_set: true });
+          await setAutoFollowUps(o._id, o.delivered_at || o.createdAt || new Date());
         }
-        console.log(`[Cron] Auto-followups set for ${nfu.length} orders`);
+        console.log(`[Cron] Auto-followups & support assignment set for ${nfu.length} orders`);
       }
+
+      // 5. Automatically advance missed/past-cycle followups to next stage (2nd, 3rd, 4th, 5th)
+      const { autoAdvanceMissedFollowups } = await import('./shipmaxx.controller.js');
+      await autoAdvanceMissedFollowups();
     } catch (err) {
-      console.error('[Cron] Auto-followups error:', err.message);
+      console.error('[Cron] Auto-followups / auto-advance error:', err.message);
     }
 
   } catch (error) {

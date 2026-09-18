@@ -47,6 +47,7 @@ const shipmaxxOrderSchema = new mongoose.Schema({
   platform: { type: String, default: 'shipmaxx', index: true },
   
   verified_by: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
+  support_staff: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true },
   verification_id: { type: mongoose.Schema.Types.ObjectId, ref: 'Verification', default: null },
   commission_generated: { type: Boolean, default: false, index: true },
   commission_generated_at: Date,
@@ -83,6 +84,10 @@ shipmaxxOrderSchema.index({ status: 1, createdAt: -1 });
 shipmaxxOrderSchema.index({ status: 1, delivered_at: -1 });
 shipmaxxOrderSchema.index({ lead_id: 1, createdAt: -1 });
 shipmaxxOrderSchema.index({ status: 1, status_updated_at: -1 });
+shipmaxxOrderSchema.index({ billing_phone: 1 });
+shipmaxxOrderSchema.index({ platform: 1, status: 1, followup_done: 1, sent_to_verification: 1 });
+shipmaxxOrderSchema.index({ platform: 1, status: 1, followup_done: 1 });
+shipmaxxOrderSchema.index({ platform: 1, billing_phone: 1 });
 shipmaxxOrderSchema.statics.updateWithTransaction = async function (query, update, options = {}) {
   const session = await mongoose.startSession();
   session.startTransaction();

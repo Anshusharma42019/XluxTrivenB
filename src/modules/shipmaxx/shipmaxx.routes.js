@@ -6,6 +6,7 @@ import Verification from '../verification/verification.model.js';
 import { Lead } from '../lead/lead.model.js';
 import catchAsync from '../../utils/catchAsync.js';
 import * as leadService from '../lead/lead.service.js';
+import { cacheMiddleware } from '../../middleware/cache.js';
 
 const router = express.Router();
 
@@ -358,8 +359,8 @@ router.get('/orders/status', auth(), c.getStatusOrders);
 router.get('/orders/delivered', c.getDeliveredOrders);
 router.get('/orders/delivered-schema', auth(), c.getDeliveredOrdersFromSchema);
 router.get('/orders/in-transit-schema', auth(), c.getInTransitOrdersFromSchema);
-router.get('/orders/with-followups', auth(), c.getOrdersWithFollowUps);
-router.get('/orders/completed-followups', auth(), c.getCompletedFollowUps);
+router.get('/orders/with-followups', auth(), cacheMiddleware(30), c.getOrdersWithFollowUps);
+router.get('/orders/completed-followups', auth(), cacheMiddleware(30), c.getCompletedFollowUps);
 router.get('/orders/search-by-phone', auth(), c.searchOrderByPhone);
 router.post('/orders/create', auth(), c.createOrder);
 router.post('/orders/create-full', auth(), c.createOrderAndShipment);
@@ -368,6 +369,11 @@ router.post('/orders/import', auth(), c.importOrders);
 router.post('/orders/import-by-ids', auth(), c.importByIds);
 router.post('/orders/manual-followup', auth(), c.createManualFollowup);
 
+// Support Assignment Routes
+router.post('/followups/auto-assign', auth(), c.autoAssignFollowups);
+router.post('/followups/auto-advance', auth(), c.autoAdvanceFollowupsEndpoint);
+router.patch('/orders/:id/assign-support', auth(), c.assignSupportToOrder);
+router.get('/support-staff', auth(), c.getSupportStaffList);
 
 router.get('/orders/:order_id', auth(), c.getOrder);
 router.put('/orders/:order_id', auth(), c.updateOrder);

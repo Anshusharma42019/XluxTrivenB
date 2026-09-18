@@ -11,6 +11,9 @@ const createUser = async (userBody) => {
     throw new ApiError(400, 'Phone number already taken');
   }
   if (!userBody.email) delete userBody.email;
+  if (userBody.departments && userBody.departments.length > 0 && !userBody.departmentAccessGrantedAt) {
+    userBody.departmentAccessGrantedAt = new Date();
+  }
   return User.create(userBody);
 };
 
@@ -41,6 +44,15 @@ const updateUserById = async (userId, updateBody) => {
     throw new ApiError(400, 'Phone number already taken');
   }
   if (!updateBody.email) delete updateBody.email;
+  if (updateBody.departments !== undefined) {
+    const prevDepts = (user.departments || []).slice().sort().join(',');
+    const newDepts = (updateBody.departments || []).slice().sort().join(',');
+    if (newDepts && newDepts !== prevDepts) {
+      updateBody.departmentAccessGrantedAt = new Date();
+    } else if (!newDepts) {
+      updateBody.departmentAccessGrantedAt = null;
+    }
+  }
   Object.assign(user, updateBody);
   await user.save();
   return user;
@@ -55,6 +67,16 @@ const deleteUserById = async (userId) => {
     throw new ApiError(404, 'User not found');
   }
   await user.softDelete();
+
+  // If deleted user had assigned follow-ups, immediately reassign them to available active support staff
+  try {
+    const { distributeUnassignedFollowupsEqually, invalidateFollowupCache } = await import('../shipmaxx/shipmaxx.controller.js');
+    await distributeUnassignedFollowupsEqually();
+    invalidateFollowupCache();
+  } catch (err) {
+    console.error('[deleteUserById] Error auto-redistributing followups:', err.message);
+  }
+
   return user;
 };
 

@@ -27,7 +27,18 @@ const auth = (...requiredRoles) => catchAsync(async (req, res, next) => {
     throw new ApiError(403, 'Forbidden');
   }
 
-  req.user = { _id: decoded.sub, role: decoded.role, departments: decoded.departments || [] };
+  let liveDepts = decoded.departments || [];
+  let userRole = decoded.role;
+  try {
+    const { User } = await import('../modules/user/user.model.js');
+    const dbUser = await User.findById(decoded.sub).select('role departments').lean();
+    if (dbUser) {
+      liveDepts = dbUser.departments || [];
+      userRole = dbUser.role || userRole;
+    }
+  } catch (e) {}
+
+  req.user = { _id: decoded.sub, id: decoded.sub, role: userRole, departments: liveDepts };
   next();
 });
 

@@ -9,6 +9,7 @@ import { ShipmaxxReadyToShipment as ReadyToShipment } from './models/shipmaxxRea
 import { ShipmaxxRtoOrder as RTOOrder } from './models/shipmaxxRtoOrder.model.js';
 import { ShipmaxxReturn as ShiprocketReturn } from './models/shipmaxxReturn.model.js';
 import { Lead } from '../lead/lead.model.js';
+import { User } from '../user/user.model.js';
 import { NdrNote } from '../shiprocket/models/ndrNote.model.js';
 import Task from '../task/task.model.js';
 import Verification from '../verification/verification.model.js';
@@ -86,29 +87,319 @@ const guessCourierByAwb = (awb) => {
   return '';
 };
 
-export const setAutoFollowUps = async (orderId, deliveredAt) => {
+// ── Order Department Detection ─────────────────────────────────────────────
+const PILES_REGEX = /piles|gastro|bawasir|bavasir|hemorrhoid|fissure|fistula|bhagander/i;
+
+export const detectOrderDepartment = (order) => {
+  if (order?.department) return String(order.department).toLowerCase();
+  const itemNames = (order?.order_items || []).map(i => i.name || '').join(' ');
+  const itemSkus = (order?.order_items || []).map(i => i.sku || '').join(' ');
+  const prob = order?.problem || '';
+  const verifProb = order?.verification_problem || '';
+  const notes = order?.notes || '';
+  const text = `${itemNames} ${itemSkus} ${prob} ${verifProb} ${notes}`;
+  if (PILES_REGEX.test(text)) return 'piles';
+  return 'migraine';
+};
+
+// ── Round Robin Support Staff Assignment for Follow-ups ─────────────────────
+export const getTodayActiveSupportUserIds = async (supportUserIds = []) => {
+  try {
+    const { default: Attendance } = await import('../attendance/attendance.model.js');
+    const now = new Date();
+    const IST_OFFSET = 5.5 * 60 * 60 * 1000;
+    const istNow = new Date(now.getTime() + IST_OFFSET);
+    const todayUTC = new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate()));
+
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date();
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const query = {
+      checkIn: { $ne: null },
+      checkOut: null,
+      isDeleted: false,
+      $or: [
+        { date: todayUTC },
+        { date: { $gte: startOfDay, $lte: endOfDay } },
+        { checkIn: { $gte: startOfDay } },
+      ],
+    };
+    if (supportUserIds && supportUserIds.length > 0) {
+      query.user = { $in: supportUserIds };
+    }
+
+    const activeAttendances = await Attendance.find(query).select('user').lean();
+    return new Set(activeAttendances.map(a => String(a.user)));
+  } catch (err) {
+    return new Set();
+  }
+};
+
+export const isDeptMatch = (userDepts, targetDept) => {
+  if (!userDepts || !Array.isArray(userDepts) || userDepts.length === 0) return false;
+  const normTarget = String(targetDept || 'migraine').toLowerCase().trim();
+  const targetKey = normTarget.startsWith('migrain') ? 'migraine' : (normTarget.includes('pile') || normTarget.includes('gastro') || normTarget.includes('bawasir') ? 'piles' : normTarget);
+  return userDepts.some(d => {
+    const normD = String(d).toLowerCase().trim();
+    const key = normD.startsWith('migrain') ? 'migraine' : (normD.includes('pile') || normD.includes('gastro') || normD.includes('bawasir') ? 'piles' : normD);
+    return key === targetKey;
+  });
+};
+
+export const isStaffEligibleForOrderDate = (user, orderDate) => {
+  if (!user) return false;
+  const accessDt = user.departmentAccessGrantedAt || user.joiningDate || user.createdAt;
+  if (!accessDt) return true;
+  const accessDay = new Date(accessDt);
+  accessDay.setHours(0, 0, 0, 0); // Start of day when access was granted
+  const ordDay = new Date(orderDate || Date.now());
+  return ordDay >= accessDay;
+};
+
+export const getNextSupportUser = async (department = null, orderDate = null) => {
+  const query = { role: 'support', isDeleted: { $ne: true } };
+  let supportUsers = await User.find(query).sort({ createdAt: 1 });
+  if (!supportUsers.length) return null;
+
+  // Filter support users matching the required department (Must have explicit access!)
+  const dept = department || 'migraine';
+  let matchingUsers = supportUsers.filter(u => isDeptMatch(u.departments, dept));
+  if (orderDate) {
+    const dateMatching = matchingUsers.filter(u => isStaffEligibleForOrderDate(u, orderDate));
+    if (dateMatching.length > 0) matchingUsers = dateMatching;
+  }
+  if (!matchingUsers.length) return null;
+  supportUsers = matchingUsers;
+
+  // Attendance check for today: only assign to staff who checked in and are present today
+  const activeUserIds = await getTodayActiveSupportUserIds(supportUsers.map(u => u._id));
+  const checkedInSupport = supportUsers.filter(u => activeUserIds.has(String(u._id)));
+  const eligibleUsers = checkedInSupport.length > 0 ? checkedInSupport : supportUsers;
+
+  // Pick user with oldest lastFollowupAssignedAt
+  let selectedUser = eligibleUsers[0];
+  for (let i = 1; i < eligibleUsers.length; i++) {
+    const u = eligibleUsers[i];
+    const selectedTime = selectedUser.lastFollowupAssignedAt ? new Date(selectedUser.lastFollowupAssignedAt).getTime() : -Infinity;
+    const uTime = u.lastFollowupAssignedAt ? new Date(u.lastFollowupAssignedAt).getTime() : -Infinity;
+    if (uTime < selectedTime) {
+      selectedUser = u;
+    }
+  }
+
+  await User.findByIdAndUpdate(selectedUser._id, { lastFollowupAssignedAt: new Date() }).catch(() => {});
+  return selectedUser._id;
+};
+
+export const distributeUnassignedFollowupsEqually = async () => {
+  const supportUsers = await User.find({ role: 'support', isDeleted: { $ne: true } })
+    .select('_id name departments departmentAccessGrantedAt joiningDate createdAt lastFollowupAssignedAt')
+    .sort({ createdAt: 1 })
+    .lean();
+  if (!supportUsers.length) return { distributed: 0 };
+
+  const activeCheckedInUserIds = await getTodayActiveSupportUserIds(supportUsers.map(u => u._id));
+  const checkedInUsers = supportUsers.filter(u => activeCheckedInUserIds.has(String(u._id)));
+
+  // Partition staff strictly by assigned departments (No department access = No assignment)
+  const pilesStaffAll = supportUsers.filter(u => isDeptMatch(u.departments, 'piles'));
+  const migraineStaffAll = supportUsers.filter(u => isDeptMatch(u.departments, 'migraine'));
+
+  const pilesStaffCheckedIn = checkedInUsers.filter(u => isDeptMatch(u.departments, 'piles'));
+  const migraineStaffCheckedIn = checkedInUsers.filter(u => isDeptMatch(u.departments, 'migraine'));
+
+  const deliveredOrders = await Order.find({
+    platform: 'shipmaxx',
+    status: { $in: ['DELIVERED', 'delivered', 'DEL', 'del'] },
+    followup_done: { $ne: true },
+    sent_to_verification: { $ne: true },
+  }).select('_id support_staff order_items problem notes department delivered_at status_updated_at createdAt').lean();
+
+  if (!deliveredOrders.length) return { distributed: 0 };
+
+  const userMap = {};
+  for (const u of supportUsers) {
+    userMap[String(u._id)] = u;
+  }
+
+  let pilesIdx = 0;
+  let migraineIdx = 0;
+  const orderStaffMap = {};
+  const orderIdsToReassign = [];
+
+  for (const o of deliveredOrders) {
+    const dept = detectOrderDepartment(o);
+    const orderDate = o.delivered_at || o.status_updated_at || o.createdAt;
+    const assignedId = o.support_staff ? String(o.support_staff) : null;
+    const currentStaff = assignedId ? userMap[assignedId] : null;
+
+    // Check department match & access date (Order date >= Staff access granted date)
+    const isDeptValid = assignedId && currentStaff && isDeptMatch(currentStaff.departments, dept);
+    const isDateValid = assignedId && currentStaff && isStaffEligibleForOrderDate(currentStaff, orderDate);
+
+    // If there are checked-in staff for this department today, ensure the assigned staff is also present/checked-in today
+    const eligiblePresentStaff = dept === 'piles' ? pilesStaffCheckedIn : migraineStaffCheckedIn;
+    const isAttendanceValid = eligiblePresentStaff.length === 0 || (assignedId && activeCheckedInUserIds.has(assignedId));
+
+    const isCurrentAssignmentValid = isDeptValid && isDateValid && isAttendanceValid;
+
+    if (!isCurrentAssignmentValid) {
+      // Find staff matching department and eligible for this order date
+      const poolCheckedIn = dept === 'piles' ? pilesStaffCheckedIn : migraineStaffCheckedIn;
+      const poolAll = dept === 'piles' ? pilesStaffAll : migraineStaffAll;
+      
+      const dateFilteredCheckedIn = poolCheckedIn.filter(u => isStaffEligibleForOrderDate(u, orderDate));
+      const dateFilteredAll = poolAll.filter(u => isStaffEligibleForOrderDate(u, orderDate));
+
+      const eligibleStaff = dateFilteredCheckedIn.length > 0 ? dateFilteredCheckedIn : (dateFilteredAll.length > 0 ? dateFilteredAll : (poolCheckedIn.length > 0 ? poolCheckedIn : poolAll));
+
+      if (eligibleStaff.length > 0) {
+        const selected = dept === 'piles'
+          ? eligibleStaff[(pilesIdx++) % eligibleStaff.length]
+          : eligibleStaff[(migraineIdx++) % eligibleStaff.length];
+
+        orderStaffMap[String(o._id)] = selected._id;
+        orderIdsToReassign.push(String(o._id));
+      }
+    }
+  }
+
+  if (orderIdsToReassign.length > 0) {
+    const orderBulkOps = orderIdsToReassign.map(oid => ({
+      updateOne: {
+        filter: { _id: oid },
+        update: { $set: { support_staff: orderStaffMap[oid] } }
+      }
+    }));
+    await Order.bulkWrite(orderBulkOps);
+
+    const fuBulkOps = orderIdsToReassign.map(oid => ({
+      updateMany: {
+        filter: { order_id: oid },
+        update: { $set: { staff: orderStaffMap[oid] } }
+      }
+    }));
+    await Followup.bulkWrite(fuBulkOps);
+  }
+
+  return { distributed: orderIdsToReassign.length, supportStaffCount: supportUsers.length, activeCheckedInCount: checkedInUsers.length };
+};
+
+export const autoAdvanceMissedFollowups = async () => {
+  try {
+    const now = new Date();
+    // Find all incomplete followups
+    const incompleteFUs = await Followup.find({ completed: { $ne: true } })
+      .sort({ order_id: 1, followup_number: 1 })
+      .lean();
+
+    if (!incompleteFUs.length) return { advanced: 0, completedOrders: 0 };
+
+    const orderFUMap = {};
+    for (const fu of incompleteFUs) {
+      const oid = String(fu.order_id);
+      if (!orderFUMap[oid]) orderFUMap[oid] = [];
+      orderFUMap[oid].push(fu);
+    }
+
+    const fuOps = [];
+    const orderDoneIds = [];
+
+    for (const [oid, fus] of Object.entries(orderFUMap)) {
+      for (const fu of fus) {
+        const k = fu.followup_number;
+        const schedTime = new Date(fu.scheduled_date).getTime();
+        const nextStageTime = schedTime + (DEFAULT_FOLLOWUP_GAP_DAYS * 86400000);
+
+        // If current time has reached or passed the start of the next cycle (6 days after scheduled date)
+        if (now.getTime() >= nextStageTime) {
+          fuOps.push({
+            updateOne: {
+              filter: { _id: fu._id, completed: { $ne: true } },
+              update: {
+                $set: {
+                  completed: true,
+                  completed_at: new Date(schedTime),
+                  status: 'auto_advanced',
+                  notes: fu.notes ? fu.notes : 'Auto-advanced (Missed stage)'
+                }
+              }
+            }
+          });
+
+          if (k >= DEFAULT_FOLLOWUP_TOTAL) {
+            orderDoneIds.push(oid);
+          }
+        }
+      }
+    }
+
+    if (fuOps.length > 0) {
+      await Followup.bulkWrite(fuOps);
+    }
+
+    if (orderDoneIds.length > 0) {
+      await Order.updateMany(
+        { _id: { $in: orderDoneIds } },
+        { $set: { followup_done: true, all_followups_done: true } }
+      );
+    }
+
+    return { advanced: fuOps.length, completedOrders: orderDoneIds.length };
+  } catch (err) {
+    console.error('[ShipMaxx autoAdvanceMissedFollowups Error]:', err.message);
+    return { error: err.message };
+  }
+};
+
+export const setAutoFollowUps = async (orderId, deliveredAt, existingStaffId = null) => {
   const total = DEFAULT_FOLLOWUP_TOTAL;
   const gap = DEFAULT_FOLLOWUP_GAP_DAYS;
   const base = new Date(deliveredAt);
   const templateName = process.env.INTERAKT_1ST_FOLLOWUP_TEMPLATE;
 
+  let staffId = existingStaffId;
+  if (!staffId) {
+    const orderDoc = await Order.findById(orderId).select('lead_id created_by support_staff staff').lean();
+    if (orderDoc?.support_staff || orderDoc?.staff) {
+      staffId = orderDoc.support_staff || orderDoc.staff;
+    } else {
+      staffId = await getNextSupportUser();
+    }
+  }
+
   const ops = Array.from({ length: total }, (_, i) => {
     const scheduled_date = new Date(base);
     scheduled_date.setDate(scheduled_date.getDate() + (i * gap)); // 1st call on day 0, 2nd on day 6, etc.
-    const insertDoc = { order_id: orderId, followup_number: i + 1, scheduled_date, status: 'scheduled', completed: false };
+    const insertDoc = { 
+      order_id: orderId, 
+      followup_number: i + 1, 
+      scheduled_date, 
+      status: 'scheduled', 
+      completed: false,
+      staff: staffId || undefined
+    };
     // Mark 1st followup as already messaged so cron doesn't send again
     if (i === 0 && templateName) insertDoc.auto_message_sent = true;
     return {
       updateOne: {
         filter: { order_id: orderId, followup_number: i + 1 },
-        update: { $setOnInsert: insertDoc },
+        update: { 
+          $setOnInsert: insertDoc,
+          ...(staffId ? { $set: { staff: staffId } } : {})
+        },
         upsert: true,
       },
     };
   });
 
   const bulkResult = await Followup.bulkWrite(ops);
-  await Order.findByIdAndUpdate(orderId, { auto_followups_set: true });
+  await Order.findByIdAndUpdate(orderId, { 
+    auto_followups_set: true,
+    ...(staffId ? { support_staff: staffId } : {})
+  });
 
   // Only send WA if the 1st followup was actually newly inserted (not pre-existing)
   const was1stInserted = bulkResult.upsertedIds && bulkResult.upsertedIds[0] !== undefined;
@@ -1154,7 +1445,7 @@ export const saveOrderNote = catchAsync(async (req, res) => {
   // Since `.lean()` was originally used (but wouldn't work on the returned doc directly), 
   // we can use `.toObject()` or just respond with the populated document's comments.
   const comments = order.toObject ? order.toObject().comments : order.comments;
-
+  invalidateFollowupCache();
   res.json(new ApiResponse(200, comments || [], 'Order note saved'));
 });
 
@@ -1853,34 +2144,41 @@ export const getInTransitOrdersFromSchema = catchAsync(async (req, res) => {
 async function getKitNumbersMap(ordersArray, OrderModel) {
   if (!ordersArray || ordersArray.length === 0) return {};
 
-  const allPhones = ordersArray
-    .map(o => String(o.billing_phone || '').replace(/\D/g, ''))
-    .filter(p => p.length >= 10);
-  const uniquePhones = [...new Set(allPhones)];
+  const cleanPhones = ordersArray
+    .map(o => String(o.billing_phone || '').replace(/\D/g, '').slice(-10))
+    .filter(p => p.length === 10);
+  const uniquePhones = [...new Set(cleanPhones)];
 
   if (uniquePhones.length === 0) return {};
 
-  // Find all delivered orders that match any of these phones
-  const regexConditions = uniquePhones.map(p => ({ billing_phone: { $regex: p } }));
+  // Build indexed search targets (exact 10-digit, +91 prefixed, 91 prefixed, 0 prefixed)
+  const phoneVariants = uniquePhones.flatMap(p => [
+    p,
+    `+91${p}`,
+    `91${p}`,
+    `0${p}`,
+    `+91 ${p}`,
+    `+91-${p}`
+  ]);
+
   const historicalOrders = await OrderModel.find({
     platform: 'shipmaxx',
-    status: /^delivered$/i,
-    $or: regexConditions
-  }).select('_id billing_phone delivered_at createdAt').lean();
+    status: /^(delivered|del)$/i,
+    billing_phone: { $in: phoneVariants }
+  }).select('_id billing_phone delivered_at status_updated_at createdAt').lean();
 
   const phoneHistory = {};
   for (const ho of historicalOrders) {
-    const p = String(ho.billing_phone || '').replace(/\D/g, '');
-    const matchedPhone = uniquePhones.find(up => p.includes(up) || up.includes(p));
-    const key = matchedPhone || p;
-    if (!phoneHistory[key]) phoneHistory[key] = [];
-    phoneHistory[key].push(ho);
+    const raw = String(ho.billing_phone || '').replace(/\D/g, '');
+    const p10 = raw.slice(-10);
+    if (!phoneHistory[p10]) phoneHistory[p10] = [];
+    phoneHistory[p10].push(ho);
   }
 
   const orderKitMap = {};
   for (const p in phoneHistory) {
     const list = phoneHistory[p];
-    list.sort((a, b) => new Date(a.delivered_at || a.createdAt) - new Date(b.delivered_at || b.createdAt));
+    list.sort((a, b) => new Date(a.delivered_at || a.status_updated_at || a.createdAt) - new Date(b.delivered_at || b.status_updated_at || b.createdAt));
     list.forEach((ho, index) => {
       orderKitMap[String(ho._id)] = index + 1;
     });
@@ -1888,94 +2186,250 @@ async function getKitNumbersMap(ordersArray, OrderModel) {
   return orderKitMap;
 }
 
-// ── Follow-ups ────────────────────────────────────────────────────────────────
-export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
-  const query = {
-    platform: 'shipmaxx',
-    status: /^(delivered|del)$/i,
-    followup_done: { $ne: true },
-    sent_to_verification: { $ne: true },
-  };
+// ── Follow-ups in-memory cache & single-flight deduplication ───────────────────
+let followupCacheData = null;
+let followupCacheTime = 0;
+let followupPendingPromise = null;
 
-  let delivered = await Order.find(query)
-    .select('-raw_response')
-    .populate({ path: 'lead_id', select: 'assignedTo createdBy status problem note', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'createdBy', select: 'name role' }] })
-    .populate('created_by', 'name role')
+export const invalidateFollowupCache = () => {
+  followupCacheData = null;
+  followupCacheTime = 0;
+};
+
+export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
+  const CACHE_TTL_MS = 10 * 60 * 1000; // 10m cache
+  if (followupCacheData && (Date.now() - followupCacheTime < CACHE_TTL_MS)) {
+    let cached = followupCacheData;
+    if (req.user?.role === 'support') {
+      const uid = String(req.user._id);
+      const userDepts = req.user.departments || [];
+      cached = followupCacheData.filter(o => {
+        const assignedId = o.support_staff?._id || o.support_staff || o.followups?.find(f => !f.completed)?.staff?._id || o.followups?.find(f => !f.completed)?.staff;
+        if (String(assignedId) !== uid) return false;
+        const dept = o.department || detectOrderDepartment(o);
+        return isDeptMatch(userDepts, dept);
+      });
+    }
+    return res.json(new ApiResponse(200, cached, 'Orders with follow-ups fetched (cached)'));
+  }
+
+  if (followupPendingPromise) {
+    const data = await followupPendingPromise;
+    return res.json(new ApiResponse(200, data, 'Orders with follow-ups fetched'));
+  }
+
+  followupPendingPromise = (async () => {
+    try {
+      const query = {
+        platform: 'shipmaxx',
+        status: { $in: ['DELIVERED', 'delivered', 'DEL', 'del'] },
+        followup_done: { $ne: true },
+        sent_to_verification: { $ne: true },
+      };
+
+      const delivered = await Order.find(query)
+        .select('_id order_id awb_code courier_name status delivery_attempt billing_customer_name billing_phone billing_email billing_address billing_city billing_state billing_pincode order_items payment_method sub_total lead_id created_by support_staff status_updated_at delivered_at createdAt problem notes comments followup_done sent_to_verification interakt_reply_text interakt_reply_at interakt_reply_read next_follow_up auto_followups_set department')
+        .lean();
+
+      if (!delivered || delivered.length === 0) {
+        followupCacheData = [];
+        followupCacheTime = Date.now();
+        return [];
+      }
+
+      for (const o of delivered) {
+        if (!o.delivered_at) {
+          o.delivered_at = o.status_updated_at || o.createdAt;
+        }
+      }
+
+      delivered.sort((a, b) => {
+        const da = new Date(a.delivered_at || a.status_updated_at || a.createdAt || 0).getTime();
+        const db = new Date(b.delivered_at || b.status_updated_at || b.createdAt || 0).getTime();
+        return db - da;
+      });
+
+      // Auto-set followups in background
+      const needsSetting = delivered.filter(o => !o.auto_followups_set);
+      if (needsSetting.length) {
+        Promise.all(needsSetting.map(o => setAutoFollowUps(o._id, o.delivered_at || o.status_updated_at || o.createdAt || new Date())))
+          .catch(err => console.error('[ShipMaxx Background setAutoFollowUps error]:', err.message));
+      }
+
+      // Automatically balance any unassigned follow-ups across support staff by department
+      distributeUnassignedFollowupsEqually().catch(err => console.error('[ShipMaxx distributeUnassignedFollowupsEqually error]:', err.message));
+
+      // Auto-advance missed/past-cycle followups to the next call stage
+      await autoAdvanceMissedFollowups().catch(err => console.error('[ShipMaxx autoAdvanceMissedFollowups error]:', err.message));
+
+      const orderStrIds = delivered.map(o => String(o._id));
+      const leadIds = delivered.map(o => o.lead_id).filter(Boolean);
+      const createdByIds = delivered.map(o => o.created_by).filter(Boolean);
+
+      const cleanPhones = delivered
+        .map(o => String(o.billing_phone || '').replace(/\D/g, '').slice(-10))
+        .filter(p => p.length === 10);
+      const uniquePhones = [...new Set(cleanPhones)];
+      const phoneVariants = uniquePhones.flatMap(p => [p, `+91${p}`, `91${p}`, `0${p}`]);
+
+      const [allFollowups, leads, historicalOrders, verifications] = await Promise.all([
+        Followup.find({ order_id: { $in: orderStrIds } })
+          .select('order_id followup_number scheduled_date followup_date completed completed_at relief_percentage notes note auto_message_sent staff')
+          .sort({ followup_number: 1 }).lean(),
+        leadIds.length > 0
+          ? Lead.find({ _id: { $in: leadIds } }).select('_id phone problem assignedTo createdBy status note').lean()
+          : [],
+        Order.find({ platform: 'shipmaxx', status: { $in: ['DELIVERED', 'delivered', 'DEL', 'del'] }, billing_phone: { $in: phoneVariants } })
+          .select('_id billing_phone delivered_at status_updated_at createdAt').lean(),
+        leadIds.length > 0
+          ? Verification.find({ lead: { $in: leadIds } }).select('lead problem notes createdAt').sort({ createdAt: -1 }).lean()
+          : []
+      ]);
+
+      const fuMap = {};
+      for (const fu of allFollowups) {
+        const key = String(fu.order_id);
+        if (!fuMap[key]) fuMap[key] = [];
+        fuMap[key].push(fu);
+      }
+
+      const leadMap = {};
+      for (const l of leads) leadMap[String(l._id)] = l;
+
+      const verifMap = {};
+      for (const v of verifications) {
+        const lId = String(v.lead);
+        if (!verifMap[lId]) verifMap[lId] = v;
+      }
+
+      const phoneHistory = {};
+      for (const ho of historicalOrders) {
+        const raw = String(ho.billing_phone || '').replace(/\D/g, '');
+        const p10 = raw.slice(-10);
+        if (!phoneHistory[p10]) phoneHistory[p10] = [];
+        phoneHistory[p10].push(ho);
+      }
+      const kitMap = {};
+      for (const p in phoneHistory) {
+        const list = phoneHistory[p];
+        list.sort((a, b) => new Date(a.delivered_at || a.status_updated_at || a.createdAt) - new Date(b.delivered_at || b.status_updated_at || b.createdAt));
+        list.forEach((ho, index) => {
+          kitMap[String(ho._id)] = index + 1;
+        });
+      }
+
+      const leadUserIds = leads.flatMap(l => [l.assignedTo, l.createdBy]).filter(Boolean);
+      const supportUserIds = [
+        ...delivered.map(o => o.support_staff).filter(Boolean),
+        ...allFollowups.map(f => f.staff).filter(Boolean)
+      ];
+      const allUserIds = [...new Set([...createdByIds, ...leadUserIds, ...supportUserIds])];
+      const users = allUserIds.length > 0 ? await User.find({ _id: { $in: allUserIds } }).select('_id name role email departments').lean() : [];
+      const userMap = {};
+      for (const u of users) userMap[String(u._id)] = u;
+
+      const enriched = delivered.map(o => {
+        const lId = o.lead_id ? String(o.lead_id) : null;
+        const leadObj = lId ? leadMap[lId] : null;
+        const verif = lId ? verifMap[lId] : null;
+        const createdByUser = o.created_by ? userMap[String(o.created_by)] : null;
+        const orderSupport = o.support_staff ? userMap[String(o.support_staff)] || null : null;
+        const dept = o.department || detectOrderDepartment(o);
+
+        let populatedLead = null;
+        if (leadObj) {
+          populatedLead = {
+            ...leadObj,
+            assignedTo: leadObj.assignedTo ? userMap[String(leadObj.assignedTo)] || leadObj.assignedTo : null,
+            createdBy: leadObj.createdBy ? userMap[String(leadObj.createdBy)] || leadObj.createdBy : null,
+          };
+        }
+
+        const mappedFollowups = (fuMap[String(o._id)] || []).map(fu => ({
+          ...fu,
+          staff: fu.staff ? userMap[String(fu.staff)] || fu.staff : (orderSupport || null)
+        }));
+
+        return {
+          ...o,
+          department: dept,
+          support_staff: orderSupport,
+          lead_id: populatedLead,
+          created_by: createdByUser || o.created_by,
+          followups: mappedFollowups,
+          verification_problem: verif?.problem || '',
+          verification_notes: (verif?.notes || []).map(n => n.text).join('\n') || '',
+          kit_number: kitMap[String(o._id)] || 1
+        };
+      });
+
+      followupCacheData = enriched;
+      followupCacheTime = Date.now();
+      return enriched;
+    } finally {
+      followupPendingPromise = null;
+    }
+  })();
+
+  const rawData = await (followupCacheData || followupPendingPromise);
+  let data = rawData || [];
+  if (req.user?.role === 'support') {
+    const uid = String(req.user._id);
+    const userDepts = req.user.departments || [];
+    data = data.filter(o => {
+      const assignedId = o.support_staff?._id || o.support_staff || o.followups?.find(f => !f.completed)?.staff?._id || o.followups?.find(f => !f.completed)?.staff;
+      if (String(assignedId) !== uid) return false;
+      const dept = o.department || detectOrderDepartment(o);
+      return isDeptMatch(userDepts, dept);
+    });
+  }
+  res.json(new ApiResponse(200, data, 'Orders with follow-ups fetched'));
+});
+
+export const autoAdvanceFollowupsEndpoint = catchAsync(async (req, res) => {
+  const result = await autoAdvanceMissedFollowups();
+  invalidateFollowupCache();
+  res.json(new ApiResponse(200, result, 'Missed follow-ups automatically advanced to their next call stage'));
+});
+
+export const autoAssignFollowups = catchAsync(async (req, res) => {
+  const result = await distributeUnassignedFollowupsEqually();
+  invalidateFollowupCache();
+  res.json(new ApiResponse(200, result, 'Follow-ups distributed equally among active support staff'));
+});
+
+export const assignSupportToOrder = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  const { staffId } = req.body;
+  if (!staffId) return res.status(400).json(new ApiResponse(400, null, 'staffId is required'));
+
+  const staffUser = await User.findOne({ _id: staffId, role: 'support', isDeleted: { $ne: true } });
+  if (!staffUser) {
+    return res.status(400).json(new ApiResponse(400, null, 'Selected user is not in the Support team (role: support)'));
+  }
+
+  await Promise.all([
+    Order.findByIdAndUpdate(id, { support_staff: staffId }),
+    Followup.updateMany({ order_id: id }, { $set: { staff: staffId } })
+  ]);
+
+  invalidateFollowupCache();
+  res.json(new ApiResponse(200, { success: true }, 'Support staff assigned successfully'));
+});
+
+export const getSupportStaffList = catchAsync(async (req, res) => {
+  const supportUsers = await User.find({ role: 'support', isDeleted: { $ne: true } })
+    .select('_id name email phone departments lastFollowupAssignedAt')
+    .sort({ name: 1 })
     .lean();
 
-  // Ensure effective delivery date is set on each object
-  for (const o of delivered) {
-    if (!o.delivered_at) {
-      o.delivered_at = o.status_updated_at || o.createdAt;
-    }
-  }
-
-  // Sort by effective delivery date (or status_updated_at / createdAt) descending
-  delivered.sort((a, b) => {
-    const da = new Date(a.delivered_at || a.status_updated_at || a.createdAt || 0).getTime();
-    const db = new Date(b.delivered_at || b.status_updated_at || b.createdAt || 0).getTime();
-    return db - da;
-  });
-
-  // Auto-set followups for orders that don't have them yet
-  const needsSetting = delivered.filter(o => !o.auto_followups_set);
-  if (needsSetting.length) {
-    await Promise.all(needsSetting.map(o => setAutoFollowUps(o._id, o.delivered_at || o.status_updated_at || o.createdAt || new Date())));
-  }
-
-  const allFollowups = await Followup.find({ order_id: { $in: delivered.map(o => o._id) } })
-    .sort({ followup_number: 1 }).lean();
-
-  const fuMap = {};
-  for (const fu of allFollowups) {
-    const key = String(fu.order_id);
-    if (!fuMap[key]) fuMap[key] = [];
-    fuMap[key].push(fu);
-  }
-
-  // Find leads for unlinked orders by phone to get their verification problems
-  const unlinkedPhones = delivered
-    .filter(o => !o.lead_id)
-    .map(o => String(o.billing_phone || '').replace(/\D/g, ''))
-    .filter(p => p.length >= 10);
-
-  const unlinkedLeads = unlinkedPhones.length > 0
-    ? await Lead.find({ phone: { $in: unlinkedPhones } }).select('_id phone problem').lean()
-    : [];
-
-  const unlinkedLeadMap = {};
-  for (const l of unlinkedLeads) unlinkedLeadMap[l.phone] = l;
-
-  // Fetch Verification records for all leads (linked and unlinked)
-  const linkedLeadIds = delivered.map(o => o.lead_id?._id).filter(Boolean);
-  const allLeadIds = [...linkedLeadIds, ...unlinkedLeads.map(l => l._id)];
-
-  const verifications = await Verification.find({ lead: { $in: allLeadIds } }).sort({ createdAt: -1 }).lean();
-  const verifMap = {};
-  for (const v of verifications) {
-    const lId = String(v.lead);
-    if (!verifMap[lId]) verifMap[lId] = v; // keep the latest one
-  }
-
-  const kitMap = await getKitNumbersMap(delivered, Order);
-
-  const enriched = delivered.map(o => {
-    let lId = o.lead_id?._id;
-    if (!lId) {
-      const cleanPhone = String(o.billing_phone || '').replace(/\D/g, '');
-      const matchedLead = unlinkedLeadMap[cleanPhone];
-      if (matchedLead) lId = matchedLead._id;
-    }
-    const verif = lId ? verifMap[String(lId)] : null;
-    return {
-      ...o,
-      followups: fuMap[String(o._id)] || [],
-      verification_problem: verif?.problem || '',
-      verification_notes: (verif?.notes || []).map(n => n.text).join('\n') || '',
-      kit_number: kitMap[String(o._id)] || 1
-    };
-  });
-  res.json(new ApiResponse(200, enriched, 'Orders with follow-ups fetched'));
+  const activeCheckedInUserIds = await getTodayActiveSupportUserIds(supportUsers.map(u => u._id));
+  const enriched = supportUsers.map(u => ({
+    ...u,
+    isPresentToday: activeCheckedInUserIds.has(String(u._id))
+  }));
+  
+  res.json(new ApiResponse(200, enriched, 'Support staff list fetched'));
 });
 
 export const completeFollowUp = catchAsync(async (req, res) => {
@@ -2020,29 +2474,55 @@ export const completeFollowUp = catchAsync(async (req, res) => {
   }
 
   await Order.findByIdAndUpdate(id, { next_follow_up: nextDate });
+  invalidateFollowupCache();
   res.json(new ApiResponse(200, { completedCount: current.followup_number, next_follow_up: nextDate, total_followups: total, followup_gap_days: gap }, 'Follow-up completed'));
 });
 
 export const getCompletedFollowUps = catchAsync(async (req, res) => {
   const { search, page = 1, per_page = 20 } = req.query;
-  const match = { platform: 'shipmaxx', status: /^delivered$/i, followup_done: true };
-  if (search) match.$or = [
-    { billing_customer_name: { $regex: search, $options: 'i' } },
-    { billing_phone: { $regex: search, $options: 'i' } },
-    { order_id: { $regex: search, $options: 'i' } },
-    { awb_code: { $regex: search, $options: 'i' } },
-  ];
+  const match = { platform: 'shipmaxx', status: /^(delivered|del)$/i, followup_done: true };
+  if (req.user?.role === 'support') {
+    match.support_staff = req.user._id;
+  }
+  if (search && search.trim()) {
+    const s = search.trim();
+    match.$or = [
+      { billing_customer_name: { $regex: s, $options: 'i' } },
+      { billing_phone: { $regex: s, $options: 'i' } },
+      { order_id: { $regex: s, $options: 'i' } },
+      { awb_code: { $regex: s, $options: 'i' } },
+    ];
+  }
 
   const skip = (Number(page) - 1) * Number(per_page);
   const [orders, total] = await Promise.all([
     Order.find(match)
+      .select('-raw_response')
       .populate({ path: 'lead_id', select: 'assignedTo createdBy status problem note', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'createdBy', select: 'name role' }] })
       .sort({ delivered_at: -1 }).skip(skip).limit(Number(per_page)).lean(),
     Order.countDocuments(match),
   ]);
 
-  const allFollowups = await Followup.find({ order_id: { $in: orders.map(o => o._id) } })
-    .sort({ followup_number: 1 }).lean();
+  if (!orders || orders.length === 0) {
+    return res.json(new ApiResponse(200, { data: [], total: 0, page: Number(page), per_page: Number(per_page) }, 'Completed follow-ups fetched'));
+  }
+
+  const orderIds = orders.map(o => o._id);
+  const unlinkedPhones = orders
+    .filter(o => !o.lead_id)
+    .map(o => String(o.billing_phone || '').replace(/\D/g, '').slice(-10))
+    .filter(p => p.length === 10);
+  const uniqueUnlinkedPhones = [...new Set(unlinkedPhones)];
+  const unlinkedPhoneVariants = uniqueUnlinkedPhones.flatMap(p => [p, `+91${p}`, `91${p}`, `0${p}`]);
+
+  const [allFollowups, unlinkedLeads, kitMap] = await Promise.all([
+    Followup.find({ order_id: { $in: orderIds } }).sort({ followup_number: 1 }).lean(),
+    uniqueUnlinkedPhones.length > 0
+      ? Lead.find({ phone: { $in: unlinkedPhoneVariants } }).select('_id phone problem').lean()
+      : [],
+    getKitNumbersMap(orders, Order)
+  ]);
+
   const fuMap = {};
   for (const fu of allFollowups) {
     const key = String(fu.order_id);
@@ -2050,35 +2530,29 @@ export const getCompletedFollowUps = catchAsync(async (req, res) => {
     fuMap[key].push(fu);
   }
 
-  // Find leads for unlinked orders by phone
-  const unlinkedPhones = orders
-    .filter(o => !o.lead_id)
-    .map(o => String(o.billing_phone || '').replace(/\D/g, ''))
-    .filter(p => p.length >= 10);
-
-  const unlinkedLeads = unlinkedPhones.length > 0
-    ? await Lead.find({ phone: { $in: unlinkedPhones } }).select('_id phone problem').lean()
-    : [];
-
   const unlinkedLeadMap = {};
-  for (const l of unlinkedLeads) unlinkedLeadMap[l.phone] = l;
+  for (const l of unlinkedLeads) {
+    const p10 = String(l.phone || '').replace(/\D/g, '').slice(-10);
+    if (p10) unlinkedLeadMap[p10] = l;
+  }
 
   const linkedLeadIds = orders.map(o => o.lead_id?._id).filter(Boolean);
   const allLeadIds = [...linkedLeadIds, ...unlinkedLeads.map(l => l._id)];
 
-  const verifications = await Verification.find({ lead: { $in: allLeadIds } }).sort({ createdAt: -1 }).lean();
+  const verifications = allLeadIds.length > 0
+    ? await Verification.find({ lead: { $in: allLeadIds } }).select('lead problem notes createdAt').sort({ createdAt: -1 }).lean()
+    : [];
+
   const verifMap = {};
   for (const v of verifications) {
     const lId = String(v.lead);
     if (!verifMap[lId]) verifMap[lId] = v; // keep the latest one
   }
 
-  const kitMap = await getKitNumbersMap(orders, Order);
-
   const enriched = orders.map(o => {
     let lId = o.lead_id?._id;
     if (!lId) {
-      const cleanPhone = String(o.billing_phone || '').replace(/\D/g, '');
+      const cleanPhone = String(o.billing_phone || '').replace(/\D/g, '').slice(-10);
       const matchedLead = unlinkedLeadMap[cleanPhone];
       if (matchedLead) lId = matchedLead._id;
     }
@@ -2111,11 +2585,13 @@ export const addFollowUp = catchAsync(async (req, res) => {
     completed_at: status === 'completed' ? new Date() : undefined,
   });
   const order = await Order.findByIdAndUpdate(id, { ...(next_follow_up ? { next_follow_up: new Date(next_follow_up) } : {}) }, { returnDocument: 'after' }).select('next_follow_up').lean();
+  invalidateFollowupCache();
   res.json(new ApiResponse(200, order, 'Follow up added'));
 });
 
 export const setNextFollowUp = catchAsync(async (req, res) => {
   const order = await Order.findByIdAndUpdate(req.params.id, { next_follow_up: req.body.next_follow_up ? new Date(req.body.next_follow_up) : null }, { returnDocument: 'after' }).select('next_follow_up').lean();
+  invalidateFollowupCache();
   res.json(new ApiResponse(200, order, 'Next follow up set'));
 });
 
@@ -2129,6 +2605,7 @@ export const updateFollowupRelief = catchAsync(async (req, res) => {
     { returnDocument: 'after' }
   );
   if (!fu) return res.status(404).json(new ApiResponse(404, null, 'Followup not found'));
+  invalidateFollowupCache();
   res.json(new ApiResponse(200, fu, 'Relief percentage updated'));
 });
 
@@ -2179,6 +2656,7 @@ export const updateOrderContact = catchAsync(async (req, res) => {
     selectedOrder[key] = orderObj[key];
   }
 
+  invalidateFollowupCache();
   res.json(new ApiResponse(200, selectedOrder, 'Contact updated'));
 });
 
@@ -2364,17 +2842,34 @@ export const sendToVerification = catchAsync(async (req, res) => {
     console.error('[OrderChain] Shipmaxx sendToVerification chain entry failed:', chainErr.message);
   }
 
+  invalidateFollowupCache();
   res.json(new ApiResponse(200, task, 'Order sent to verification successfully'));
 });
 
 // ── Manual Followup ───────────────────────────────────────────────────────────
 export const createManualFollowup = catchAsync(async (req, res) => {
-  const { name, phone, city, state, medicine, delivered_date, amount, order_id, courier_name, payment_method, pincode, address } = req.body;
+  const { name, phone, city, state, medicine, delivered_date, amount, order_id, courier_name, payment_method, pincode, address, kit_number, department } = req.body;
   if (!name || !phone || !medicine || !delivered_date)
     return res.status(400).json(new ApiResponse(400, null, 'name, phone, medicine, delivered_date are required'));
 
   const mockOrderId = order_id ? `${order_id}-M${Date.now()}` : `SMX-MANUAL-${Date.now()}`;
   const d = new Date(delivered_date);
+
+  const finalKitNum = Number(kit_number) || 1;
+  const tempOrder = {
+    order_items: [{ name: medicine }],
+    notes: medicine,
+    department: department || undefined
+  };
+  const targetDept = department || detectOrderDepartment(tempOrder);
+
+  // Assign support staff
+  let assignedStaff = null;
+  if (req.user && req.user.role === 'support') {
+    assignedStaff = req.user._id;
+  } else {
+    assignedStaff = await getNextSupportUser(targetDept, d);
+  }
 
   const newOrder = await Order.create({
     order_id: mockOrderId,
@@ -2392,6 +2887,9 @@ export const createManualFollowup = catchAsync(async (req, res) => {
     payment_method: payment_method || '',
     platform: 'shipmaxx',
     created_by: req.user._id,
+    support_staff: assignedStaff || req.user._id,
+    kit_number: finalKitNum,
+    department: targetDept,
     auto_followups_set: true,
   });
 
@@ -2401,11 +2899,25 @@ export const createManualFollowup = catchAsync(async (req, res) => {
   let baseDate = new Date();
   for (let i = 1; i <= total; i++) {
     if (i > 1) baseDate.setDate(baseDate.getDate() + gap);
-    followups.push({ order_id: newOrder._id, followup_number: i, scheduled_date: new Date(baseDate), status: 'scheduled', note: '' });
+    followups.push({
+      order_id: newOrder._id,
+      followup_number: i,
+      scheduled_date: new Date(baseDate),
+      status: 'scheduled',
+      note: '',
+      staff: assignedStaff || req.user._id
+    });
   }
-  await Followup.insertMany(followups);
+  const insertedFollowups = await Followup.insertMany(followups);
 
-  res.json(new ApiResponse(200, newOrder, 'Manual followup added successfully'));
+  invalidateFollowupCache();
+
+  const populatedOrder = await Order.findById(newOrder._id).populate('support_staff', 'name email role departments').lean();
+  if (populatedOrder) {
+    populatedOrder.followups = insertedFollowups;
+  }
+
+  res.json(new ApiResponse(200, populatedOrder || newOrder, 'Manual followup added successfully'));
 });
 
 // Temporarily adding a cleanup endpoint to remove Shiprocket duplicates

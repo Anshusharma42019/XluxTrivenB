@@ -73,6 +73,10 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    departmentAccessGrantedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,
