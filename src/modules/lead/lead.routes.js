@@ -5,6 +5,7 @@ import validate from '../../middleware/validate.js';
 import departmentFilter from '../../middleware/departmentFilter.js';
 import * as leadValidation from './lead.validation.js';
 import leadController from './lead.controller.js';
+import { cacheMiddleware } from '../../middleware/cache.js';
 
 const router = express.Router();
 
@@ -46,10 +47,14 @@ router.post('/cleanup-debug-leads', auth('admin', 'manager'), async (req, res) =
   }
 });
 
+
+
+const leadCache = cacheMiddleware(60);
+
 router
   .route('/')
   .post(auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, validate(leadValidation.createLead), leadController.createLead)
-  .get(auth('admin', 'manager', 'sales', 'support'), departmentFilter, validate(leadValidation.getLeads), leadController.getLeads);
+  .get(auth('admin', 'manager', 'sales', 'support'), departmentFilter, leadCache, validate(leadValidation.getLeads), leadController.getLeads);
 
 router.patch('/:leadId/assign', auth('admin', 'manager'), departmentFilter, validate(leadValidation.assignLead), leadController.assignLead);
 router.patch('/:leadId/cnp', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, leadController.markCNP);
@@ -58,11 +63,11 @@ router.post('/:leadId/notes', auth('admin', 'manager', 'sales', 'support'), depa
 router.delete('/:leadId/notes/:noteId', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, leadController.deleteNote);
 router.post('/:leadId/follow-up', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, leadController.addFollowUp);
 router.patch('/:leadId/next-follow-up', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, leadController.setNextFollowUp);
-router.get('/export', auth('admin', 'manager'), departmentFilter, leadController.exportLeads);
+router.get('/export', auth('admin', 'manager'), departmentFilter, leadCache, leadController.exportLeads);
 router.post('/distribute-unassigned', auth('admin', 'manager'), leadController.distributeUnassigned);
 router.post('/distribute-absent', auth('admin', 'manager'), leadController.distributeAbsentSales);
-router.get('/search-phone', auth('admin', 'manager', 'sales', 'support'), departmentFilter, leadController.searchByPhone);
-router.get('/follow-up/list', auth('admin', 'manager', 'sales', 'support'), departmentFilter, leadController.getFollowUpLeads);
+router.get('/search-phone', auth('admin', 'manager', 'sales', 'support'), departmentFilter, leadCache, leadController.searchByPhone);
+router.get('/follow-up/list', auth('admin', 'manager', 'sales', 'support'), departmentFilter, leadCache, leadController.getFollowUpLeads);
 
 // Bulk Message Routes
 router.post('/bulk-message', auth('admin', 'manager'), leadController.bulkMessage);

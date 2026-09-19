@@ -155,6 +155,67 @@ function classifyStatus(s = '') {
 }
 
 
+/* ─── Fast Batch Role Attachment ─────────────────────────────────────────────── *
+ * Replaces heavy nested Mongoose populates across thousands of orders with fast
+ * in-memory map lookups. Resolves user roles in 3 indexed batch queries.
+ */
+async function attachRolesToOrders(orders) {
+  if (!orders || orders.length === 0) return orders;
+
+  const userIds = new Set();
+  const leadIds = new Set();
+  const verifIds = new Set();
+
+  for (const o of orders) {
+    if (o.verified_by) userIds.add(String(o.verified_by._id || o.verified_by));
+    if (o.task_created_by) userIds.add(String(o.task_created_by._id || o.task_created_by));
+    if (o.created_by) userIds.add(String(o.created_by._id || o.created_by));
+    if (o.lead_id) leadIds.add(String(o.lead_id._id || o.lead_id));
+    if (o.verification_id) verifIds.add(String(o.verification_id._id || o.verification_id));
+  }
+
+  const [users, leads, verifications] = await Promise.all([
+    userIds.size ? mongoose.model('User').find({ _id: { $in: Array.from(userIds) } }, { role: 1 }).lean() : [],
+    leadIds.size ? mongoose.model('Lead').find({ _id: { $in: Array.from(leadIds) } }, { assignedTo: 1 }).lean() : [],
+    verifIds.size ? mongoose.model('Verification').find({ _id: { $in: Array.from(verifIds) } }, { assignedTo: 1 }).lean() : []
+  ]);
+
+  const userMap = new Map();
+  users.forEach(u => userMap.set(String(u._id), u));
+
+  const assignedToUserIds = new Set();
+  leads.forEach(l => { if (l.assignedTo) assignedToUserIds.add(String(l.assignedTo._id || l.assignedTo)); });
+  verifications.forEach(v => { if (v.assignedTo) assignedToUserIds.add(String(v.assignedTo._id || v.assignedTo)); });
+
+  if (assignedToUserIds.size > 0) {
+    const assignedUsers = await mongoose.model('User').find({ _id: { $in: Array.from(assignedToUserIds) } }, { role: 1 }).lean();
+    assignedUsers.forEach(u => userMap.set(String(u._id), u));
+  }
+
+  const leadMap = new Map();
+  leads.forEach(l => {
+    const u = l.assignedTo ? userMap.get(String(l.assignedTo._id || l.assignedTo)) : null;
+    leadMap.set(String(l._id), { assignedTo: u || null });
+  });
+
+  const verifMap = new Map();
+  verifications.forEach(v => {
+    const u = v.assignedTo ? userMap.get(String(v.assignedTo._id || v.assignedTo)) : null;
+    verifMap.set(String(v._id), { assignedTo: u || null });
+  });
+
+  for (const o of orders) {
+    if (o.verified_by) o.verified_by = userMap.get(String(o.verified_by._id || o.verified_by)) || o.verified_by;
+    if (o.task_created_by) o.task_created_by = userMap.get(String(o.task_created_by._id || o.task_created_by)) || o.task_created_by;
+    if (o.created_by) o.created_by = userMap.get(String(o.created_by._id || o.created_by)) || o.created_by;
+    if (o.lead_id) o.lead_id = leadMap.get(String(o.lead_id._id || o.lead_id)) || o.lead_id;
+    if (o.verification_id) o.verification_id = verifMap.get(String(o.verification_id._id || o.verification_id)) || o.verification_id;
+  }
+
+  return orders;
+}
+
+
 /* ─── Fetch orders from both platforms ──────────────────────────────────────── *
  * Cohort View: Only fetch orders CREATED this period.
  * This guarantees the primary cards sum up perfectly to Total Shipments.
@@ -162,16 +223,9 @@ function classifyStatus(s = '') {
  */
 async function fetchOrderStats(filter) {
   const proj = { status: 1, delivery_attempt: 1, delivered_at: 1, createdAt: 1, sub_total: 1, total: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1, interakt_reply_text: 1, interakt_reply_at: 1, task_created_by: 1 };
-  const populates = [
-    { path: 'lead_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
-    { path: 'verified_by', select: 'role' },
-    { path: 'task_created_by', select: 'role' },
-    { path: 'verification_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
-    { path: 'created_by', select: 'role' }
-  ];
   const [sr, sm] = await Promise.all([
-    Order.find(filter, proj).populate(populates).lean(),
-    ShipmaxxOrder.find(filter, proj).populate(populates).lean(),
+    Order.find(filter, proj).lean(),
+    ShipmaxxOrder.find(filter, proj).lean(),
   ]);
   const all = [...sr, ...sm].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
   
@@ -184,6 +238,7 @@ async function fetchOrderStats(filter) {
       deduped.push(o);
     }
   }
+  await attachRolesToOrders(deduped);
   return deduped;
 }
 
@@ -307,18 +362,18 @@ async function autoLinkOrders() {
     const unlinkedSm = await ShipmaxxOrder.findOne({ $or: [{ lead_id: null }, { verified_by: null }] }).select('_id').lean();
     if (!unlinkedSr && !unlinkedSm) return; // nothing to do
 
-    await import('../task/task.model.js');
-    const { allLeads, byPhone, byName, byPin } = await getLeadLookup();
+    const { byPhone, byName, byPin } = await getLeadLookup();
 
     const models = [
       { name: 'Shiprocket Order', model: Order },
       { name: 'Shipmaxx Order',   model: ShipmaxxOrder }
     ];
 
-    // ── Step 1: match unlinked orders to leads ──────────────────────────────
+    // ── Step 1: match unlinked orders to leads (batch max 25 per cycle) ─────
     for (const { model } of models) {
       const unlinked = await model.find({ lead_id: null })
         .select('_id billing_customer_name billing_phone billing_pincode raw_response')
+        .limit(25)
         .lean();
       if (unlinked.length === 0) continue;
 
@@ -334,25 +389,10 @@ async function autoLinkOrders() {
           const cleanPhone = String(phone).replace(/\D/g, '');
           if (cleanPhone.length >= 10) matchedLead = byPhone[cleanPhone.slice(-10)];
           if (!matchedLead) matchedLead = byPhone[cleanPhone];
-          if (!matchedLead && cleanPhone.length >= 10) {
-            matchedLead = allLeads.find(l => {
-              const lp = String(l.phone).replace(/\D/g, '');
-              return lp.length >= 10 && (lp.includes(cleanPhone) || cleanPhone.includes(lp));
-            });
-          }
         }
         if (!matchedLead && customerName) {
           const lowerName = customerName.toLowerCase().trim();
           matchedLead = byName[lowerName];
-          if (!matchedLead) {
-            const words = lowerName.split(/\s+/).filter(w => w.length > 2);
-            if (words.length > 0) {
-              matchedLead = allLeads.find(l => {
-                const ln = (l.name || '').toLowerCase();
-                return words.every(w => ln.includes(w));
-              });
-            }
-          }
         }
         if (!matchedLead && pincode) {
           const pin = String(pincode).trim();
@@ -366,24 +406,36 @@ async function autoLinkOrders() {
       if (bulkOps.length > 0) await model.bulkWrite(bulkOps).catch(() => {});
     }
 
-    // ── Step 2: link staff details for orders missing them ──────────────────
+    // ── Step 2: link staff details in BATCH (max 50 per cycle) ───────────────
     for (const { model } of models) {
       const orders = await model.find({
-        lead_id:          { $ne: null },
+        lead_id: { $ne: null },
         $or: [
           { verified_by:     null },
           { verification_id: null },
           { task_created_by: null }
         ]
-      }).select('_id lead_id').lean();
+      }).select('_id lead_id').limit(50).lean();
       if (orders.length === 0) continue;
+
+      const leadIds = Array.from(new Set(orders.map(o => String(o.lead_id)).filter(Boolean)));
+      if (leadIds.length === 0) continue;
+
+      const verifications = await Verification.find({ lead: { $in: leadIds } })
+        .populate('task', 'createdBy')
+        .sort({ createdAt: -1 })
+        .lean();
+
+      const verifMap = new Map();
+      verifications.forEach(v => {
+        if (v.lead && !verifMap.has(String(v.lead))) {
+          verifMap.set(String(v.lead), v);
+        }
+      });
 
       const bulkOps = [];
       for (const o of orders) {
-        const verif = await Verification.findOne({ lead: o.lead_id })
-          .populate('task', 'createdBy')
-          .sort({ createdAt: -1 })
-          .lean();
+        const verif = verifMap.get(String(o.lead_id));
         if (verif) {
           bulkOps.push({
             updateOne: {
@@ -498,10 +550,17 @@ export async function getKPIs(params) {
   const backlogActiveFilter = { $and: [ backlogFilter, { status: { $nin: ['DELIVERED', 'DEL'] }, status_updated_at: { $gte: start, $lte: end } } ] };
 
   const [blActSr, blActSm, blDelSr, blDelSm] = await Promise.all([
-    Order.find(backlogActiveFilter, projBl).populate(populates).lean(),
-    ShipmaxxOrder.find(backlogActiveFilter, projBl).populate(populates).lean(),
-    Order.find(backlogDeliveredFilter, projBl).populate(populates).lean(),
-    ShipmaxxOrder.find(backlogDeliveredFilter, projBl).populate(populates).lean(),
+    Order.find(backlogActiveFilter, projBl).lean(),
+    ShipmaxxOrder.find(backlogActiveFilter, projBl).lean(),
+    Order.find(backlogDeliveredFilter, projBl).lean(),
+    ShipmaxxOrder.find(backlogDeliveredFilter, projBl).lean(),
+  ]);
+
+  await Promise.all([
+    attachRolesToOrders(blActSr),
+    attachRolesToOrders(blActSm),
+    attachRolesToOrders(blDelSr),
+    attachRolesToOrders(blDelSm)
   ]);
 
   const dedup = (arr) => {
@@ -1009,11 +1068,23 @@ export async function getShipments(params) {
     const sortField = ['interaktReplies', 'reply_reattempt', 'reply_dawa'].includes(status) ? 'interakt_reply_at' : ((status && status !== 'totalShipments') ? 'status_updated_at' : 'createdAt');
     let srOrders = [];
     let smOrders = [];
+    const fetchLimit = skip + Number(limit);
+
     if (!platform || platform === 'shiprocket') {
-      srOrders = await Order.find(baseFilter, proj).populate(populates).lean();
+      const [records, count] = await Promise.all([
+        Order.find(baseFilter, proj).populate(populates).sort({ [sortField]: -1 }).limit(fetchLimit).lean(),
+        Order.countDocuments(baseFilter)
+      ]);
+      srOrders = records;
+      srTotal = count;
     }
     if (!platform || platform === 'shipmaxx') {
-      smOrders = await ShipmaxxOrder.find(baseFilter, proj).populate(populates).lean();
+      const [records, count] = await Promise.all([
+        ShipmaxxOrder.find(baseFilter, proj).populate(populates).sort({ [sortField]: -1 }).limit(fetchLimit).lean(),
+        ShipmaxxOrder.countDocuments(baseFilter)
+      ]);
+      smOrders = records;
+      smTotal = count;
     }
 
     const all = [
@@ -1035,8 +1106,6 @@ export async function getShipments(params) {
       }
     }
 
-    srTotal = deduped.length; // use srTotal as the combined total for ease
-    smTotal = 0;
     combined = deduped.slice(skip, skip + Number(limit));
   }
 

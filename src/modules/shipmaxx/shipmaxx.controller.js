@@ -378,8 +378,7 @@ export const setAutoFollowUps = async (orderId, deliveredAt, existingStaffId = n
       followup_number: i + 1, 
       scheduled_date, 
       status: 'scheduled', 
-      completed: false,
-      staff: staffId || undefined
+      completed: false
     };
     // Mark 1st followup as already messaged so cron doesn't send again
     if (i === 0 && templateName) insertDoc.auto_message_sent = true;
@@ -2612,9 +2611,10 @@ export const updateFollowupRelief = catchAsync(async (req, res) => {
 // ── Order Activity & Contact ──────────────────────────────────────────────────
 export const getOrderActivity = catchAsync(async (req, res) => {
   const order = await Order.findOne({ _id: req.params.id, platform: 'shipmaxx' })
-    .select('comments notes order_id billing_customer_name status createdAt')
+    .select('comments notes order_id billing_customer_name status createdAt lead_id')
     .populate('comments.createdBy', 'name role').lean();
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
+
   const activity = (order.comments || [])
     .filter(c => !c.text?.startsWith('[WhatsApp Reply]'))
     .map(c => ({
@@ -2625,6 +2625,31 @@ export const getOrderActivity = catchAsync(async (req, res) => {
       actor: c.createdBy,
       createdAt: c.createdAt,
     }));
+
+  if (order.lead_id) {
+    try {
+      const lead = await Lead.findById(order.lead_id).select('comments').populate('comments.createdBy', 'name role').lean();
+      if (lead && Array.isArray(lead.comments)) {
+        lead.comments.forEach(lc => {
+          if (!lc.text?.startsWith('[WhatsApp Reply]')) {
+            const exists = activity.some(a => a.description === lc.text);
+            if (!exists) {
+              activity.push({
+                _id: lc._id,
+                type: lc.type || 'lead_note',
+                title: 'Note Added',
+                description: lc.text || '',
+                actor: lc.createdBy,
+                createdAt: lc.createdAt,
+              });
+            }
+          }
+        });
+      }
+    } catch (e) {}
+  }
+
+  activity.sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
   res.json(new ApiResponse(200, activity, 'Activity fetched'));
 });
 

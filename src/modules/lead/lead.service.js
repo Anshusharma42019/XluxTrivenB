@@ -472,6 +472,8 @@ export const distributeAbsentSalesLeads = async () => {
   return { success: true, message: `Successfully redistributed ${distributedCount} leads from absent staff.` };
 };
 
+const _activeExclusionCache = new Map();
+
 export const getLeads = async (filter, options, userRole, userId, userDepartments = []) => {
   const query = { isDeleted: false };
 
@@ -548,10 +550,11 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
   const limit = parseInt(options.limit) || 20;
   const skip = (page - 1) * limit;
   const sortCriteria = isWhatsapp ? { updatedAt: -1 } : { createdAt: -1 };
+  const StatusModel = getStatusModel(filter.status);
 
   const pipeline = [ { $match: query } ];
 
-  if (!filter.cnp && !isExport && !isWhatsapp) {
+  if (!filter.cnp && !isExport && !isWhatsapp && !StatusModel) {
     const isOnHold = filter.status === 'on_hold';
     const isInterested = filter.status === 'interested';
 
@@ -565,12 +568,24 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
     if (userRole === 'sales') matchFilterBase.assignedTo = new mongoose.Types.ObjectId(userId);
     else if (filter.department) matchFilterBase.department = filter.department;
 
-    const [activeTaskLeads, activeCnpLeads, activeVerLeads, activeCallAgainLeads] = await Promise.all([
-      Task.distinct('lead', { status: { $in: taskStatuses }, isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }),
-      !isOnHold ? Cnp.distinct('lead', { isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }) : Promise.resolve([]),
-      Verification.distinct('lead', { status: isOnHold ? 'on_hold' : { $ne: 'on_hold' }, isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }),
-      !isOnHold ? CallAgain.distinct('lead', { isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }) : Promise.resolve([])
-    ]);
+    const cacheKey = `${userId}-${userRole}-${filter.department || ''}-${filter.status || ''}`;
+    let cachedExclusions = _activeExclusionCache.get(cacheKey);
+    let activeTaskLeads, activeCnpLeads, activeVerLeads, activeCallAgainLeads;
+
+    if (cachedExclusions && (Date.now() - cachedExclusions.at < 30000)) {
+      ({ activeTaskLeads, activeCnpLeads, activeVerLeads, activeCallAgainLeads } = cachedExclusions);
+    } else {
+      [activeTaskLeads, activeCnpLeads, activeVerLeads, activeCallAgainLeads] = await Promise.all([
+        Task.distinct('lead', { status: { $in: taskStatuses }, isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }),
+        !isOnHold ? Cnp.distinct('lead', { isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }) : Promise.resolve([]),
+        Verification.distinct('lead', { status: isOnHold ? 'on_hold' : { $ne: 'on_hold' }, isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }),
+        !isOnHold ? CallAgain.distinct('lead', { isDeleted: { $ne: true }, isArchived: { $ne: true }, ...matchFilterBase }) : Promise.resolve([])
+      ]);
+      _activeExclusionCache.set(cacheKey, {
+        at: Date.now(),
+        activeTaskLeads, activeCnpLeads, activeVerLeads, activeCallAgainLeads
+      });
+    }
 
     const toObjectIds = (arr) => [...new Set(arr.filter(Boolean).map(id => String(id)))]
       .filter(id => id !== 'null' && id !== 'undefined' && mongoose.isValidObjectId(id))
@@ -595,7 +610,6 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
 
   pipeline.push({ $sort: sortCriteria });
 
-  const StatusModel = getStatusModel(filter.status);
   if (StatusModel) {
     const leadQuery = { ...pipeline[0].$match, isArchived: { $ne: true } };
     const statusQuery = { ...pipeline[0].$match, isArchived: { $ne: true }, isDeleted: { $ne: true } };
@@ -603,23 +617,34 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
     delete statusQuery.status; // All records in a dedicated StatusModel belong to that section regardless of alias naming (closed_lost vs not_interested)
 
 
-    const [statusLeads, legacyLeads] = await Promise.all([
-      StatusModel.find(statusQuery)
-        .select('-notes -follow_ups')
-        .populate('assignedTo', 'name email role')
-        .populate('createdBy', 'name email')
-        .lean(),
-      Lead.find(leadQuery)
-        .select('-notes -follow_ups')
-        .populate('assignedTo', 'name email role')
-        .populate('createdBy', 'name email')
-        .lean()
+    const fetchLimit = !isExport ? (skip + limit) : 0;
+
+    let statusQueryExec = StatusModel.find(statusQuery)
+      .sort(sortCriteria)
+      .select('-notes -follow_ups')
+      .populate('assignedTo', 'name email role')
+      .populate('createdBy', 'name email')
+      .lean();
+    if (fetchLimit) statusQueryExec = statusQueryExec.limit(fetchLimit);
+
+    let leadQueryExec = Lead.find(leadQuery)
+      .sort(sortCriteria)
+      .select('-notes -follow_ups')
+      .populate('assignedTo', 'name email role')
+      .populate('createdBy', 'name email')
+      .lean();
+    if (fetchLimit) leadQueryExec = leadQueryExec.limit(fetchLimit);
+
+    const [statusLeads, legacyLeads, countStatus, countLead] = await Promise.all([
+      statusQueryExec,
+      leadQueryExec,
+      !isExport ? StatusModel.countDocuments(statusQuery) : Promise.resolve(0),
+      !isExport ? Lead.countDocuments(leadQuery) : Promise.resolve(0)
     ]);
 
     const seen = new Set();
     const merged = [...statusLeads, ...legacyLeads].filter(item => {
       if ((!item.name && item.title) || item.originalCollection === 'tasks' || item.transferredFrom === 'tasks') {
-        StatusModel.deleteMany({ _id: item._id }).catch(() => {});
         return false;
       }
       const idStr = String(item._id);
@@ -634,7 +659,7 @@ export const getLeads = async (filter, options, userRole, userId, userDepartment
       return sortCriteria.updatedAt === -1 || sortCriteria.createdAt === -1 ? dateB - dateA : dateA - dateB;
     });
 
-    const totalCount = merged.length;
+    const totalCount = !isExport ? (countStatus + countLead) : merged.length;
     const allLeads = !isExport ? merged.slice(skip, skip + limit) : merged;
     return { leads: allLeads, total: totalCount, page: !isExport ? page : 1, limit: !isExport ? limit : (totalCount || 1), totalPages: !isExport ? Math.ceil(totalCount / (limit || 1)) : 1 };
   }

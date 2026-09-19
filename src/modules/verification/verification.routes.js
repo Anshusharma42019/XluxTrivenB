@@ -4,19 +4,18 @@ import auth from '../../middleware/auth.js';
 import requireCheckedIn from '../../middleware/requireCheckedIn.js';
 import departmentFilter from '../../middleware/departmentFilter.js';
 import Verification from './verification.model.js';
+import Lead from '../lead/lead.model.js';
+import User from '../user/user.model.js';
+import { Order } from '../shiprocket/models/order.model.js';
+import Followup from '../shiprocket/models/followup.model.js';
 import { sendDispatchNotification, sendVerificationConfirmation } from '../interakt/interakt.service.js';
 // ── Commission workflow: append-only chain entry + submitter lock ─────────────
 import { appendOrderChain } from '../commission/orderChain.service.js';
 
 const router = express.Router();
 
-
-
 router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, async (req, res) => {
   try {
-    const Lead = (await import('../lead/lead.model.js')).default;
-    const User = (await import('../user/user.model.js')).default;
-
     const query = { status: { $nin: ['verified', 'dispatch', 'dispatched', 'on_hold'] }, isDeleted: { $ne: true } };
     if (req.query.department) {
       query.department = req.query.department;
@@ -56,30 +55,28 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
       }
     }
 
-    // Apply text regex search matching
+    // Apply text search matching with parallel queries
     const search = req.query.search;
     if (search) {
-      const matchingLeads = await Lead.find({
-        $or: [
-          { name: new RegExp(search, 'i') },
-          { phone: new RegExp(search, 'i') }
-        ]
-      }).select('_id').lean();
-      const matchingLeadIds = matchingLeads.map(l => l._id);
+      const searchRegex = new RegExp(search, 'i');
+      const [matchingLeads, matchingUsers] = await Promise.all([
+        Lead.find({
+          $or: [{ name: searchRegex }, { phone: searchRegex }]
+        }).select('_id').lean(),
+        User.find({ name: searchRegex }).select('_id').lean()
+      ]);
 
-      const matchingUsers = await User.find({
-        name: new RegExp(search, 'i')
-      }).select('_id').lean();
+      const matchingLeadIds = matchingLeads.map(l => l._id);
       const matchingUserIds = matchingUsers.map(u => u._id);
 
       query.$and = [
         ...(query.$and || []),
         {
           $or: [
-            { title: new RegExp(search, 'i') },
+            { title: searchRegex },
             { lead: { $in: matchingLeadIds } },
             { assignedTo: { $in: matchingUserIds } },
-            { district: new RegExp(search, 'i') }
+            { district: searchRegex }
           ]
         }
       ];
@@ -89,54 +86,70 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
     const limit = parseInt(req.query.limit) || 15;
     const skip = (page - 1) * limit;
 
-    const total = await Verification.countDocuments(query);
-    const records = await Verification.find(query)
-      .populate('assignedTo', 'name email departments')
-      .populate('verifiedBy', 'name email')
-      .populate({
-        path: 'lead',
-        select: 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem department createdBy pending_reorder_source',
-        populate: { path: 'createdBy', select: 'name role' }
-      })
-      .populate({
-        path: 'task',
-        select: 'department createdBy',
-        populate: { path: 'createdBy', select: 'name role' }
-      })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean();
+    // Parallelize countDocuments and find records
+    const [total, records] = await Promise.all([
+      Verification.countDocuments(query),
+      Verification.find(query)
+        .populate('assignedTo', 'name email departments')
+        .populate('verifiedBy', 'name email')
+        .populate({
+          path: 'lead',
+          select: 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem department createdBy pending_reorder_source',
+          populate: { path: 'createdBy', select: 'name role' }
+        })
+        .populate({
+          path: 'task',
+          select: 'department createdBy',
+          populate: { path: 'createdBy', select: 'name role' }
+        })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean()
+    ]);
 
-    // Auto-backfill department from assignedTo.departments or lead.department if missing
+    // Async background auto-backfill of department if missing
     const deptUpdates = records.filter(r => !r.department);
     if (deptUpdates.length > 0) {
       deptUpdates.forEach(r => {
         const dept = r.assignedTo?.departments?.[0] || r.lead?.department || r.task?.department || 'migraine';
         r.department = dept;
-        Verification.updateOne({ _id: r._id }, { $set: { department: dept } }).catch(err => console.error('[Verification] Auto-backfill dept error:', err.message));
+        Verification.updateOne({ _id: r._id }, { $set: { department: dept } }).catch(() => {});
       });
     }
 
-    // Backfill relief_percentage from followups for records missing it
-    try {
-      const missing = records.filter(r => r.relief_percentage == null && r.lead);
-      if (missing.length > 0) {
-        const { Order } = (await import('../shiprocket/models/order.model.js'));
-        const Followup = (await import('../shiprocket/models/followup.model.js')).default;
-        const leadIds = missing.map(r => r.lead?._id || r.lead).filter(Boolean);
-        const orders = await Order.find({ lead_id: { $in: leadIds } }).select('_id lead_id').lean();
+    const leadIds = records.map(r => r.lead?._id || r.lead).filter(Boolean);
+    if (leadIds.length > 0) {
+      const missingReliefRecords = records.filter(r => r.relief_percentage == null && r.lead);
+
+      const [orderCounts, ordersForRelief] = await Promise.all([
+        Order.aggregate([
+          { $match: { lead_id: { $in: leadIds } } },
+          { $group: { _id: '$lead_id', count: { $sum: 1 } } }
+        ]),
+        missingReliefRecords.length > 0
+          ? Order.find({ lead_id: { $in: missingReliefRecords.map(r => r.lead?._id || r.lead) } }).select('_id lead_id').lean()
+          : Promise.resolve([])
+      ]);
+
+      const countMap = {};
+      for (const oc of orderCounts) countMap[String(oc._id)] = oc.count;
+
+      records.forEach(r => {
+        const lId = String(r.lead?._id || r.lead);
+        r.kit_number = (countMap[lId] || 0) + 1;
+      });
+
+      if (ordersForRelief.length > 0) {
         const orderMap = {};
-        for (const o of orders) orderMap[String(o.lead_id)] = String(o._id);
+        for (const o of ordersForRelief) orderMap[String(o.lead_id)] = String(o._id);
         const orderIds = Object.values(orderMap).map(id => new mongoose.Types.ObjectId(id));
 
-        // Query all latest followups with a relief_percentage in a single query
         const followupsList = await Followup.find({ 
           order_id: { $in: orderIds }, 
           relief_percentage: { $ne: null } 
         }).sort({ followup_number: -1 }).lean();
 
-        // Map orderId to the latest relief_percentage
         const reliefMap = {};
         for (const f of followupsList) {
           const oId = String(f.order_id);
@@ -145,34 +158,17 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
           }
         }
 
-        // Apply relief_percentages in-memory and write to DB in background
-        missing.forEach(r => {
+        missingReliefRecords.forEach(r => {
           const leadId = String(r.lead?._id || r.lead);
           const orderId = orderMap[leadId];
           const relief = reliefMap[orderId];
           if (relief != null) {
             r.relief_percentage = relief;
-            Verification.findByIdAndUpdate(r._id, { relief_percentage: relief }).catch(err => console.error('[Verification] Auto-backfill relief percentage error:', err.message));
+            Verification.findByIdAndUpdate(r._id, { relief_percentage: relief }).catch(() => {});
           }
         });
       }
-    } catch (backfillErr) {
-      console.error('[Verification] backfill relief_percentage error:', backfillErr.message);
     }
-
-    const leadIds = records.map(r => r.lead?._id || r.lead).filter(Boolean);
-    const { Order } = (await import('../shiprocket/models/order.model.js'));
-    const orderCounts = await Order.aggregate([
-      { $match: { lead_id: { $in: leadIds } } },
-      { $group: { _id: '$lead_id', count: { $sum: 1 } } }
-    ]);
-    const countMap = {};
-    for (const oc of orderCounts) countMap[String(oc._id)] = oc.count;
-
-    records.forEach(r => {
-      const lId = String(r.lead?._id || r.lead);
-      r.kit_number = (countMap[lId] || 0) + 1;
-    });
 
     res.json({
       status: 200,

@@ -93,9 +93,32 @@ const getStaffMonthlyChart = catchAsync(async (req, res) => {
   res.json(new ApiResponse(httpStatus.OK, data, 'Monthly chart fetched'));
 });
 
+const SWR_STAFF_CACHE = new Map();
+
 const getAllStaffStats = catchAsync(async (req, res) => {
-  const { date, from, to, preset } = req.query;
+  const { date, from, to, preset, refresh } = req.query;
+  const userRole = req.user?.role || 'admin';
+  const userId = ['sales', 'support', 'logistics'].includes(userRole) ? req.user._id : 'all';
+  const cacheKey = `staff_stats_${preset || 'today'}_${from || ''}_${to || ''}_${date || ''}_${userRole}_${userId}`;
+
+  const cached = SWR_STAFF_CACHE.get(cacheKey);
+  const now = Date.now();
+
+  if (cached && refresh !== 'true' && refresh !== true) {
+    res.setHeader('X-Cache', 'HIT-SWR');
+    if (now - cached.timestamp > 30000 && !cached.isRevalidating) {
+      cached.isRevalidating = true;
+      dashboardService.getAllStaffStats(date, from, to, preset, req.user)
+        .then(freshData => {
+          SWR_STAFF_CACHE.set(cacheKey, { data: freshData, timestamp: Date.now(), isRevalidating: false });
+        })
+        .catch(() => { cached.isRevalidating = false; });
+    }
+    return res.json(new ApiResponse(httpStatus.OK, cached.data, 'All staff stats fetched'));
+  }
+
   const data = await dashboardService.getAllStaffStats(date, from, to, preset, req.user);
+  SWR_STAFF_CACHE.set(cacheKey, { data, timestamp: Date.now(), isRevalidating: false });
   res.json(new ApiResponse(httpStatus.OK, data, 'All staff stats fetched'));
 });
 

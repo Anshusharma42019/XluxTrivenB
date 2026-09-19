@@ -12,6 +12,12 @@ export const cacheMiddleware = (ttlSeconds = 300) => {
       return next();
     }
 
+    // Support bypass if refresh=true is passed
+    if (req.query.refresh === 'true' || req.query.refresh === true) {
+      res.setHeader('X-Cache', 'BYPASS');
+      return next();
+    }
+
     // Generate a secure user-scoped key to maintain data separation
     const userKey = req.user
       ? `${req.user._id}-${req.user.role}-${JSON.stringify(req.userDepartments || [])}`

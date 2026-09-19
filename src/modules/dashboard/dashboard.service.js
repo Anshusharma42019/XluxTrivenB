@@ -460,12 +460,12 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
       ...(isAllTime ? {} : { createdAt: { $gte: startOfDay, $lte: endOfDay } }) 
     }).select('assignedTo status cnp notes follow_ups createdAt updatedAt').lean(),
     Order.find({ 
-      status: { $not: /^(new|pending|cancelled)$/i },
+      status: { $nin: ['new', 'pending', 'cancelled', 'NEW', 'PENDING', 'CANCELLED', 'New', 'Pending', 'Cancelled'] },
       ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
     }).select('comments lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
       .lean(),
     ShipmaxxOrder.find({ 
-      status: { $not: /^(new|pending|cancelled)$/i },
+      status: { $nin: ['new', 'pending', 'cancelled', 'NEW', 'PENDING', 'CANCELLED', 'New', 'Pending', 'Cancelled'] },
       ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
     }).select('comments lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
       .lean(),
@@ -688,12 +688,13 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     createdAt: { $gte: rtoLookbackStart, $lte: endOfDay }
   };
 
+  const rtoStatusList = ['rto', 'RTO', 'rra', 'RRA', 'rto_verification', 'RTO_VERIFICATION', 'rto_delivered', 'RTO_DELIVERED', 'rto_in_transit', 'RTO_IN_TRANSIT'];
   const [rtoOrdersSM, rtoOrdersSR] = await Promise.all([
-    ShipmaxxOrder.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
+    ShipmaxxOrder.find({ status: { $in: rtoStatusList }, ...rtoTimeFilter })
       .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by')
       .populate('lead_id', 'assignedTo')
       .lean(),
-    Order.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
+    Order.find({ status: { $in: rtoStatusList }, ...rtoTimeFilter })
       .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by')
       .populate('lead_id', 'assignedTo')
       .lean()
@@ -1375,12 +1376,12 @@ export async function getPhoneToSalesAgentMap(OrderModel, ShipmaxxOrderModel, Le
     if (uniquePhones.length === 0) {
       allHistory = targetOrders;
     } else {
-      const phoneRegexes = uniquePhones.map(p => new RegExp(p + '$'));
+      const exactPhoneVariants = uniquePhones.flatMap(p => [p, `91${p}`, `+91${p}`, `0${p}`, `+${p}`]);
       const selectFields = '_id lead_id task_created_by created_by verified_by source_order_id billing_phone status createdAt';
       const statusList = ['DELIVERED', 'Delivered', 'delivered', 'DEL', 'del'];
       const [sr, sm] = await Promise.all([
-        OrderModel.find({ billing_phone: { $in: phoneRegexes }, status: { $in: statusList } }).select(selectFields).lean(),
-        ShipmaxxOrderModel.find({ billing_phone: { $in: phoneRegexes }, status: { $in: statusList } }).select(selectFields).lean()
+        OrderModel.find({ billing_phone: { $in: exactPhoneVariants }, status: { $in: statusList } }).select(selectFields).lean(),
+        ShipmaxxOrderModel.find({ billing_phone: { $in: exactPhoneVariants }, status: { $in: statusList } }).select(selectFields).lean()
       ]);
       allHistory = [...sr, ...sm];
     }
