@@ -48,6 +48,27 @@ router.get('/debug/fix-rto-status', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+router.get('/debug/fix-218875', async (req, res) => {
+  try {
+    const targetDate = new Date('2026-09-20T11:21:00.000+05:30');
+    const result = await Order.updateMany(
+      { $or: [{ order_id: '218875' }, { awb_code: '372537513255' }] },
+      { $set: { delivered_at: targetDate, status_updated_at: targetDate, status: 'DELIVERED' } }
+    );
+    try {
+      const DeliveredOrder = (await import('./models/shipmaxxDeliveredOrder.model.js')).ShipmaxxDeliveredOrder;
+      await DeliveredOrder.updateMany(
+        { $or: [{ order_id: '218875' }, { awb_code: '372537513255' }] },
+        { $set: { delivered_at: targetDate } }
+      );
+    } catch (err) {}
+    res.json({ success: true, updatedCount: result.modifiedCount, targetDate });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 
 // Run once after deploying the cron status_updated_at fix to correct any timestamps
 // that were erroneously stamped with today's date by previous cron runs.
@@ -387,6 +408,7 @@ router.get('/cleanup-duplicates', c.cleanupDuplicates);
 router.post('/orders/:id/complete-followup', auth(), c.completeFollowUp);
 router.patch('/orders/:id/followup-relief', auth(), c.updateFollowupRelief);
 router.patch('/orders/:id/contact', auth(), c.updateOrderContact);
+router.patch('/orders/:id/delivered-date', auth(), c.updateDeliveredDate);
 router.get('/orders/:id/activity', auth(), c.getOrderActivity);
 router.post('/orders/:id/send-to-verification', auth(), c.sendToVerification);
 router.patch('/orders/:id/read-reply', auth(), c.readReply);

@@ -181,8 +181,24 @@ export const createTask = async (data, createdBy, creatorRole, userDepartments =
       task = await Task.create({ ...data, createdBy, status: data.status || 'pending', isDeleted: false, isArchived: false });
       await Cnp.updateMany({ lead: data.lead }, { $set: { isArchived: true, isDeleted: true } });
     }
-    // Immediately reset lead.cnp = false so task is not filtered out in getTasks/getDailyTasks
-    await Lead.findByIdAndUpdate(data.lead, { $set: { cnp: false, status: 'task' } }).catch(() => {});
+    // Immediately reset lead.cnp = false and update status to 'task' across main Lead model and status collections
+    const leadId = data.lead._id || data.lead;
+    await Lead.findByIdAndUpdate(leadId, { $set: { cnp: false, status: 'task' } }).catch(() => {});
+    try {
+      const { transitionRecord } = await import('../transition/transition.service.js');
+      await transitionRecord(Lead, leadId, 'task', { cnp: false, status: 'task' }, createdBy);
+    } catch (e) {
+      console.error('[createTask] transitionRecord note:', e.message);
+    }
+    try {
+      const { InterestedLead, NotInterestedLead } = await import('../transition/statusModels.js');
+      await InterestedLead.updateMany({ _id: leadId }, { $set: { isDeleted: true, isArchived: true, status: 'task' } }).catch(() => {});
+      await NotInterestedLead.updateMany({ _id: leadId }, { $set: { isDeleted: true, isArchived: true, status: 'task' } }).catch(() => {});
+    } catch (e) {}
+    try {
+      const { cache } = await import('../../utils/cache.js');
+      cache.delPattern('route:/api/v1/leads');
+    } catch (e) {}
   } else {
     task = await Task.create({ ...data, createdBy, status: data.status || 'pending', isDeleted: false, isArchived: false });
   }

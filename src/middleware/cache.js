@@ -67,6 +67,10 @@ export const cacheInvalidatorMiddleware = (req, res, next) => {
         cache.delPattern('route:/api/v1/dashboard');
         cache.delPattern('route:/api/v1/ops-dashboard');
         cache.delPattern('route:/api/v1/shipmaxx');
+        cache.delPattern('route:/api/v1/leads');
+        cache.delPattern('route:/api/v1/tasks');
+        cache.delPattern('route:/api/v1/cnp');
+        cache.delPattern('route:/api/v1/call-again');
         invalidated = true;
       }
     };

@@ -2685,6 +2685,44 @@ export const updateOrderContact = catchAsync(async (req, res) => {
   res.json(new ApiResponse(200, selectedOrder, 'Contact updated'));
 });
 
+export const updateDeliveredDate = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  const { delivered_at } = req.body;
+  if (!delivered_at) return res.status(400).json(new ApiResponse(400, null, 'delivered_at date is required'));
+  
+  const targetDate = new Date(delivered_at);
+  if (isNaN(targetDate.getTime())) return res.status(400).json(new ApiResponse(400, null, 'Invalid date string'));
+
+  const mongoose = (await import('mongoose')).default;
+  const query = {
+    platform: 'shipmaxx',
+    $or: [
+      ...(mongoose.Types.ObjectId.isValid(id) ? [{ _id: id }] : []),
+      { order_id: String(id) },
+      { awb_code: String(id) }
+    ]
+  };
+
+  const order = await Order.findOne(query);
+  if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
+
+  await Order.updateWithTransaction(
+    { _id: order._id },
+    { $set: { delivered_at: targetDate, status_updated_at: targetDate, status: 'DELIVERED' } }
+  );
+
+  try {
+    const DeliveredOrder = (await import('./models/shipmaxxDeliveredOrder.model.js')).ShipmaxxDeliveredOrder;
+    await DeliveredOrder.updateOne(
+      { $or: [{ order_id: order.order_id }, { awb_code: order.awb_code }] },
+      { $set: { delivered_at: targetDate } }
+    );
+  } catch (err) {}
+
+  invalidateFollowupCache();
+  res.json(new ApiResponse(200, { order_id: order.order_id, delivered_at: targetDate }, 'Delivered date updated successfully'));
+});
+
 // ── Search by phone (for order creation auto-fill) ────────────────────────────
 export const searchOrderByPhone = catchAsync(async (req, res) => {
   const { phone } = req.query;
