@@ -386,6 +386,16 @@ export const createOrder = catchAsync(async (req, res) => {
     const verif = await mongoose.model('Verification').findOne({ lead: body.lead_id }).populate('task', 'createdBy').sort({ createdAt: -1 }).lean();
     if (verif) {
       verifiedBy = verif.verifiedBy || verif.assignedTo;
+      if (verif.changedBy) {
+        const User = mongoose.model('User');
+        const vUser = verifiedBy ? await User.findById(verifiedBy).select('role').lean() : null;
+        if (!vUser || ['admin', 'manager', 'logistic'].includes(vUser.role)) {
+          const cUser = await User.findById(verif.changedBy).select('role').lean();
+          if (cUser?.role === 'sales') {
+            verifiedBy = verif.changedBy;
+          }
+        }
+      }
       verificationId = verif._id; // Lock verification_id on order permanently
       taskCreatedBy = verif.task?.createdBy || null;
     }

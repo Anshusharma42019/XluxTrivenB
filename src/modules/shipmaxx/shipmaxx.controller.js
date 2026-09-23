@@ -580,6 +580,16 @@ export const createOrder = catchAsync(async (req, res) => {
       const verDoc = await Verification.findOne({ lead: matchedLeadId, isDeleted: { $ne: true } }).populate('task', 'createdBy').sort({ createdAt: -1 }).lean();
       if (verDoc) {
         verifiedBy = verDoc.verifiedBy || verDoc.assignedTo || req.user?._id;
+        if (verDoc.changedBy) {
+          const User = mongoose.model('User');
+          const vUser = verifiedBy ? await User.findById(verifiedBy).select('role').lean() : null;
+          if (!vUser || ['admin', 'manager', 'logistic'].includes(vUser.role)) {
+            const cUser = await User.findById(verDoc.changedBy).select('role').lean();
+            if (cUser?.role === 'sales') {
+              verifiedBy = verDoc.changedBy;
+            }
+          }
+        }
         verificationId = verDoc._id; // Lock verification_id on order permanently
         taskCreatedBy = verDoc.task?.createdBy || null;
       }
@@ -685,6 +695,16 @@ export const createOrderAndShipment = catchAsync(async (req, res) => {
       const verDoc = await Verification.findOne({ lead: matchedLeadId, isDeleted: { $ne: true } }).populate('task', 'createdBy').sort({ createdAt: -1 }).lean();
       if (verDoc) {
         verifiedBy = verDoc.verifiedBy || verDoc.assignedTo || req.user?._id;
+        if (verDoc.changedBy) {
+          const User = mongoose.model('User');
+          const vUser = verifiedBy ? await User.findById(verifiedBy).select('role').lean() : null;
+          if (!vUser || ['admin', 'manager', 'logistic'].includes(vUser.role)) {
+            const cUser = await User.findById(verDoc.changedBy).select('role').lean();
+            if (cUser?.role === 'sales') {
+              verifiedBy = verDoc.changedBy;
+            }
+          }
+        }
         verificationId = verDoc._id; // Lock verification_id on order permanently
         taskCreatedBy = verDoc.task?.createdBy || null;
       }

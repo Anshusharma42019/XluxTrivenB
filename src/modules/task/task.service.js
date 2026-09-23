@@ -50,10 +50,25 @@ const syncProfileToLead = async (task) => {
 };
 
 const handleVerificationSync = async (task, userId) => {
+  let verifAssignedTo = task.assignedTo?._id || task.assignedTo;
+  if (userId) {
+    const userDoc = await User.findById(userId).select('role').lean();
+    if (userDoc?.role === 'sales') {
+      verifAssignedTo = userId;
+    } else if (verifAssignedTo) {
+      const assignedDoc = await User.findById(verifAssignedTo).select('role').lean();
+      if (['admin', 'manager', 'logistic'].includes(assignedDoc?.role)) {
+        verifAssignedTo = userId;
+      }
+    } else {
+      verifAssignedTo = userId;
+    }
+  }
+
   const record = {
     task: task._id,
     title: task.title,
-    assignedTo: task.assignedTo?._id || task.assignedTo,
+    assignedTo: verifAssignedTo,
     department: task.department,
     changedBy: userId,
     lead: task.lead?._id || task.lead,
@@ -79,10 +94,16 @@ const handleVerificationSync = async (task, userId) => {
   };
   const existing = await Verification.findOne({ task: task._id }, '_id assignedTo');
   
-  // For existing records: preserve the original assignedTo (closer's name).
-  // Only overwrite task metadata fields (address, price, etc.), NOT who owns the record.
+  // For existing records: preserve original assignedTo if it is a sales agent.
+  // If it was assigned to admin/manager/logistic, upgrade assignedTo to the sales agent verifAssignedTo.
   if (existing) {
     const { assignedTo: _drop, ...updateFields } = record;
+    if (existing.assignedTo) {
+      const exUser = await User.findById(existing.assignedTo).select('role').lean();
+      if (['admin', 'manager', 'logistic'].includes(exUser?.role) && verifAssignedTo && String(verifAssignedTo) !== String(existing.assignedTo)) {
+        updateFields.assignedTo = verifAssignedTo;
+      }
+    }
     await Verification.findOneAndUpdate(
       { task: task._id },
       { $set: updateFields },
@@ -319,6 +340,9 @@ export const updateTask = async (id, data, userRole, userId, userDepartments = [
   const task = await getTaskById(id, userRole, userId, userDepartments);
   // Sales staff cannot reassign tasks to other users
   if (userRole === 'sales') delete data.assignedTo;
+  if (data.status === 'verification' && userRole === 'sales') {
+    data.assignedTo = userId;
+  }
   const oldAssignedTo = task.assignedTo ? String(task.assignedTo._id || task.assignedTo) : null;
   Object.assign(task, data);
   await task.save();

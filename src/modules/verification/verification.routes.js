@@ -645,12 +645,25 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
     if (status) {
       update.status = status;
       if (status === 'verified' || status === 'dispatch' || status === 'dispatched') {
-        // Jo bhi verification me laya tha (assignedTo) — usi ko 100% credit.
-        // Button koi bhi dabaye, original owner ka verifiedBy set hoga.
-        update.verifiedBy = recordBefore.assignedTo || req.user._id;
-        // Agar koi owner hi nahi tha, to verify karne wala hi owner ban jaaye
-        if (!recordBefore.assignedTo && !update.assignedTo) {
-          update.assignedTo = req.user._id;
+        // Jo bhi verification me laya tha (assignedTo / changedBy) — usi ko 100% credit.
+        let targetCloser = recordBefore.assignedTo || req.user._id;
+        if (recordBefore.assignedTo) {
+          const ownerUser = await User.findById(recordBefore.assignedTo).select('role').lean();
+          if (['admin', 'manager', 'logistic'].includes(ownerUser?.role)) {
+            if (recordBefore.changedBy) {
+              const changedByUser = await User.findById(recordBefore.changedBy).select('role').lean();
+              if (changedByUser?.role === 'sales') {
+                targetCloser = recordBefore.changedBy;
+              }
+            }
+            if (req.user?.role === 'sales') {
+              targetCloser = req.user._id;
+            }
+          }
+        }
+        update.verifiedBy = targetCloser;
+        if (!recordBefore.assignedTo || (targetCloser && String(targetCloser) !== String(recordBefore.assignedTo))) {
+          update.assignedTo = targetCloser;
         }
       } else if (!update.assignedTo && !recordBefore.assignedTo) {
         // Pehli baar koi action le raha hai aur koi owner nahi — use hi assign karo

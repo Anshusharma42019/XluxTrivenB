@@ -7,6 +7,7 @@ import * as leadValidation from './lead.validation.js';
 import leadController from './lead.controller.js';
 import { cacheMiddleware } from '../../middleware/cache.js';
 
+
 const router = express.Router();
 
 // Public route — no token required (website inquiry form)
