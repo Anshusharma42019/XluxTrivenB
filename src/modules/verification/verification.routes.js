@@ -94,12 +94,12 @@ router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, 
         .populate('verifiedBy', 'name email')
         .populate({
           path: 'lead',
-          select: 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem department createdBy pending_reorder_source',
+          select: 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem department createdBy pending_reorder_source notes',
           populate: { path: 'createdBy', select: 'name role' }
         })
         .populate({
           path: 'task',
-          select: 'department createdBy',
+          select: 'department createdBy notes',
           populate: { path: 'createdBy', select: 'name role' }
         })
         .sort({ createdAt: -1 })
@@ -249,7 +249,7 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'support'), departmentFil
               cityVillageType: task.cityVillageType, cityVillage: task.cityVillage,
               houseNo: task.houseNo, postOffice: task.postOffice, district: task.district,
               landmark: task.landmark, pincode: task.pincode, state: task.state,
-              reminderAt: task.reminderAt, notes: task.notes,
+              reminderAt: task.reminderAt,
               problem: task.problem, age: task.age, weight: task.weight, height: task.height,
               otherProblems: task.otherProblems, problemDuration: task.problemDuration, price: task.price,
               department: task.department,
@@ -486,8 +486,12 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
       .populate('verifiedBy', 'name email')
       .populate({
         path: 'lead',
-        select: 'name phone status onHoldReason onHoldUntil address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem createdBy pending_reorder_source',
+        select: 'name phone status onHoldReason onHoldUntil address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem createdBy pending_reorder_source notes',
         populate: { path: 'createdBy', select: 'name role' }
+      })
+      .populate({
+        path: 'task',
+        select: 'department createdBy notes',
       })
       .sort({ onHoldUntil: -1 })
       .lean();
@@ -647,18 +651,28 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
       if (status === 'verified' || status === 'dispatch' || status === 'dispatched') {
         // Jo bhi verification me laya tha (assignedTo / changedBy) — usi ko 100% credit.
         let targetCloser = recordBefore.assignedTo || req.user._id;
-        if (recordBefore.assignedTo) {
-          const ownerUser = await User.findById(recordBefore.assignedTo).select('role').lean();
-          if (['admin', 'manager', 'logistic'].includes(ownerUser?.role)) {
-            if (recordBefore.changedBy) {
-              const changedByUser = await User.findById(recordBefore.changedBy).select('role').lean();
-              if (changedByUser?.role === 'sales') {
-                targetCloser = recordBefore.changedBy;
+        let closerUser = await User.findById(targetCloser).select('role').lean();
+        
+        if (!closerUser || ['admin', 'manager', 'logistic'].includes(closerUser?.role)) {
+          if (recordBefore.changedBy) {
+            const cbUser = await User.findById(recordBefore.changedBy).select('role').lean();
+            if (cbUser && ['sales', 'support'].includes(cbUser.role)) {
+              targetCloser = recordBefore.changedBy;
+              closerUser = cbUser;
+            }
+          }
+          if ((!closerUser || ['admin', 'manager', 'logistic'].includes(closerUser?.role)) && recordBefore.lead) {
+            const leadDoc = await mongoose.model('Lead').findById(recordBefore.lead).select('assignedTo').lean();
+            if (leadDoc && leadDoc.assignedTo) {
+              const leadUser = await User.findById(leadDoc.assignedTo).select('role').lean();
+              if (leadUser && ['sales', 'support'].includes(leadUser.role)) {
+                targetCloser = leadDoc.assignedTo;
+                closerUser = leadUser;
               }
             }
-            if (req.user?.role === 'sales') {
-              targetCloser = req.user._id;
-            }
+          }
+          if ((!closerUser || ['admin', 'manager', 'logistic'].includes(closerUser?.role)) && req.user && ['sales', 'support'].includes(req.user.role)) {
+            targetCloser = req.user._id;
           }
         }
         update.verifiedBy = targetCloser;
@@ -934,6 +948,61 @@ router.delete('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFi
     } catch (err) {
       return res.json({ message: 'Record already deleted' });
     }
+  } catch (e) {
+    res.status(500).json({ status: 500, message: e.message });
+  }
+});
+
+router.post('/:id/notes', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, async (req, res) => {
+  try {
+    const { text } = req.body;
+    if (!text || !text.trim()) {
+      return res.status(400).json({ status: 400, message: 'Note text is required' });
+    }
+
+    const noteObj = { text: text.trim(), createdBy: req.user._id, createdAt: new Date() };
+
+    let record = await Verification.findByIdAndUpdate(
+      req.params.id,
+      { $push: { notes: noteObj } },
+      { returnDocument: 'after' }
+    )
+      .populate('assignedTo', 'name email')
+      .populate('verifiedBy', 'name email')
+      .populate('notes.createdBy', 'name');
+
+    if (!record) {
+      // Check if ID is a Lead ID (pipeline-only record)
+      const Lead = (await import('../lead/lead.model.js')).default;
+      const lead = await Lead.findByIdAndUpdate(
+        req.params.id,
+        { $push: { notes: { text: text.trim(), createdBy: req.user._id, createdAt: new Date() } } },
+        { returnDocument: 'after' }
+      ).populate('notes.createdBy', 'name');
+
+      if (!lead) return res.status(404).json({ status: 404, message: 'Record not found' });
+      
+      record = {
+        _id: lead._id,
+        title: lead.name,
+        status: 'on_hold',
+        notes: lead.notes,
+        lead: lead,
+        _isPipelineOnly: true
+      };
+    } else {
+      // Perform background update to related Lead without holding up response
+      if (record.lead) {
+        (async () => {
+          const Lead = (await import('../lead/lead.model.js')).default;
+          await Lead.findByIdAndUpdate(record.lead._id || record.lead, {
+            $push: { notes: { text: text.trim(), createdBy: req.user._id, createdAt: new Date() } }
+          }).catch(() => {});
+        })();
+      }
+    }
+
+    res.json({ status: 200, data: record, message: 'Note added successfully' });
   } catch (e) {
     res.status(500).json({ status: 500, message: e.message });
   }

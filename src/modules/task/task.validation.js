@@ -1,6 +1,13 @@
 import { z } from 'zod';
 
-const statusEnum = z.enum(['pending', 'completed', 'overdue', 'cancelled', 'verification', 'cnp', 'interested', 'cancel_call', 'ready_to_shipment', 'dispatch', 'dispatched', 'new', 'old', 'on_hold', 'closed_lost']);
+const statusEnum = z.enum(['pending', 'completed', 'overdue', 'cancelled', 'verification', 'cnp', 'interested', 'cancel_call', 'ready_to_shipment', 'dispatch', 'dispatched', 'new', 'old', 'on_hold', 'closed_lost', 'task', 'follow_up', 'scheduled']);
+
+export const addNote = {
+  params: z.object({ taskId: z.string() }),
+  body: z.object({
+    text: z.string().min(1, 'Note text is required'),
+  }),
+};
 
 export const createTask = {
   body: z.object({

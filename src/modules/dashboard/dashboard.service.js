@@ -404,6 +404,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   const { Order } = await import('../shiprocket/models/order.model.js');
   const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
   const ReorderCommission = (await import('../commission/reorderCommission.model.js')).default;
+  const { OnHoldOrder } = await import('../transition/statusModels.js');
 
   const userQuery = { role: { $in: ['sales', 'manager', 'doctor', 'support', 'logistics'] }, isDeleted: false };
   if (requestingUser && ['sales', 'support', 'logistics'].includes(requestingUser.role)) {
@@ -415,6 +416,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   for (const u of allUsers) {
     statsMap[String(u._id)] = {
       user: u,
+      checkIn: null, checkOut: null,
       todayVerifications: 0, monthVerifications: 0, pendingTasks: 0, todayTarget: 0,
       todayCnp: 0, todayCallAgain: 0, todayInterested: 0, todayNotInterested: 0, todayClosedLost: 0,
       leadsAdded: 0, tasksAssigned: 0, verifiedCount: 0, onHoldCount: 0, readyToShipmentCount: 0, deliveredCount: 0,
@@ -426,7 +428,8 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
       commentsCount: 0, cnpComments: 0, callAgainComments: 0, interestedComments: 0,
       ofdCommentsCount: 0, rtoCommentsCount: 0,
       commission: 0,
-      _noteSet: new Set(), _intSet: new Set(), _cnpSet: new Set(), _caSet: new Set()
+      _noteSet: new Set(), _intSet: new Set(), _cnpSet: new Set(), _caSet: new Set(), _onHoldSet: new Set(),
+      _assignedLeadTaskSet: new Set()
     };
   }
   let totalUniqueDelivered = 0; // Grand total of unique delivered orders across all staff
@@ -437,7 +440,8 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   // 2. Fetch Bulk Data in parallel
   const [
     allAttendances, allAppointments, allTargets, allVerifications, allTasks, 
-    allCnps, allCallAgains, allLeadsData, allOrdersSR, allOrdersSM, allCommissions
+    allCnps, allCallAgains, allLeadsData, allOrdersSR, allOrdersSM, allCommissions,
+    allOnHoldOrders
   ] = await Promise.all([
     Attendance.find({ date: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('user checkIn checkOut workingHours').lean(),
     Appointment.find({ appointmentDate: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('doctorName status').lean(),
@@ -457,17 +461,24 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     CallAgain.find({ ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }).select('lead assignedTo status notes updatedAt').lean(),
     Lead.find({ 
       isDeleted: false, 
-      ...(isAllTime ? {} : { createdAt: { $gte: startOfDay, $lte: endOfDay } }) 
+      ...(isAllTime ? {} : {
+        $or: [
+          { createdAt: { $gte: startOfDay, $lte: endOfDay } },
+          { updatedAt: { $gte: startOfDay, $lte: endOfDay } }
+        ]
+      }) 
     }).select('assignedTo status cnp notes follow_ups createdAt updatedAt').lean(),
     Order.find({ 
       status: { $nin: ['new', 'pending', 'cancelled', 'NEW', 'PENDING', 'CANCELLED', 'New', 'Pending', 'Cancelled'] },
       ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
     }).select('comments lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
+      .populate('lead_id', 'assignedTo')
       .lean(),
     ShipmaxxOrder.find({ 
       status: { $nin: ['new', 'pending', 'cancelled', 'NEW', 'PENDING', 'CANCELLED', 'New', 'Pending', 'Cancelled'] },
       ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
     }).select('comments lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
+      .populate('lead_id', 'assignedTo')
       .lean(),
     ReorderCommission.aggregate([
       { $match: { 
@@ -475,7 +486,11 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
           ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } }) 
       }},
       { $group: { _id: '$staff_id', totalCommission: { $sum: '$commission_amount' } } }
-    ])
+    ]),
+    OnHoldOrder ? OnHoldOrder.find({
+      isDeleted: { $ne: true },
+      ...(isAllTime ? {} : { updatedAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
+    }).select('assignedTo created_by task_created_by updatedAt createdAt').lean() : Promise.resolve([])
   ]);
 
   // Process Commissions
@@ -490,6 +505,25 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   const isToday = (date) => isAllTime || (new Date(date) >= startOfDay && new Date(date) <= endOfDay);
   const isMonth = (date) => new Date(date) >= monthStart && new Date(date) <= monthEnd;
 
+  const addOnHold = (uid, idStr) => {
+    if (!uid || !statsMap[uid]) return;
+    if (!statsMap[uid]._onHoldSet) statsMap[uid]._onHoldSet = new Set();
+    if (!statsMap[uid]._onHoldSet.has(idStr)) {
+      statsMap[uid]._onHoldSet.add(idStr);
+      statsMap[uid].onHoldCount++;
+    }
+  };
+
+  // Process OnHoldOrder collection
+  if (Array.isArray(allOnHoldOrders)) {
+    for (const oh of allOnHoldOrders) {
+      const uid = String(oh.assignedTo || oh.task_created_by || oh.created_by || '');
+      if (uid && statsMap[uid] && (isToday(oh.updatedAt) || isToday(oh.createdAt))) {
+        addOnHold(uid, String(oh._id));
+      }
+    }
+  }
+
   // Process Attendances
   for (const a of allAttendances) {
     const uid = String(a.user);
@@ -497,6 +531,8 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
       let liveHours = 0;
       if (a.checkIn && !a.checkOut) liveHours = (Date.now() - new Date(a.checkIn).getTime()) / (1000 * 60 * 60);
       statsMap[uid].workingHours += (a.workingHours || 0) + liveHours;
+      if (a.checkIn) statsMap[uid].checkIn = a.checkIn;
+      if (a.checkOut) statsMap[uid].checkOut = a.checkOut;
     }
   }
 
@@ -525,17 +561,25 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
 
   // Process Verifications
   for (const v of allVerifications) {
-    const uid = String(v.verifiedBy || v.assignedTo);
-    if (statsMap[uid] && statsMap[uid].user.role !== 'doctor') {
-      statsMap[uid].assignedVerifications++;
-      if (isToday(v.createdAt)) {
-        statsMap[uid].todayVerifications++;
-        statsMap[uid].verifiedCount++;
+    const assignUid = v.assignedTo ? String(v.assignedTo) : null;
+    const verifyUid = v.verifiedBy ? String(v.verifiedBy) : null;
+    
+    if (assignUid && statsMap[assignUid] && ['sales', 'support'].includes(statsMap[assignUid].user.role)) {
+      statsMap[assignUid].assignedVerifications++;
+      if (isToday(v.createdAt) || isToday(v.updatedAt)) {
+        statsMap[assignUid].todayVerifications++;
+        statsMap[assignUid].verifiedCount++;
       }
-      if (isMonth(v.createdAt)) statsMap[uid].monthVerifications++;
-      if (isToday(v.updatedAt) && v.status === 'on_hold') {
-        statsMap[uid].onHoldCount++;
+      if (isMonth(v.createdAt)) statsMap[assignUid].monthVerifications++;
+    }
+    if (verifyUid && verifyUid !== assignUid && statsMap[verifyUid] && ['sales', 'support'].includes(statsMap[verifyUid].user.role)) {
+      if (isToday(v.createdAt) || isToday(v.updatedAt)) {
+        statsMap[verifyUid].todayVerifications++;
+        statsMap[verifyUid].verifiedCount++;
       }
+    }
+    if (v.status === 'on_hold' && (isToday(v.updatedAt) || isToday(v.createdAt))) {
+      addOnHold(assignUid || verifyUid, String(v._id));
     }
   }
 
@@ -554,7 +598,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   // Process Cnp (Strict CRM rule: exclusively count updated Cnp documents)
   for (const c of allCnps) {
     const uid = String(c.assignedTo || '');
-    if (statsMap[uid] && isToday(c.updatedAt)) {
+    if (statsMap[uid] && ['sales', 'support'].includes(statsMap[uid].user.role) && (isToday(c.updatedAt) || isToday(c.createdAt))) {
       statsMap[uid].todayCnp++;
     }
     if (c.notes && c.notes.length) {
@@ -565,7 +609,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   // Process CallAgain (Strict CRM rule: exclusively count updated CallAgain documents)
   for (const ca of allCallAgains) {
     const uid = String(ca.assignedTo || '');
-    if (statsMap[uid] && isToday(ca.updatedAt)) {
+    if (statsMap[uid] && ['sales', 'support'].includes(statsMap[uid].user.role) && (isToday(ca.updatedAt) || isToday(ca.createdAt))) {
       if (ca.status !== 'interested') statsMap[uid].todayCallAgain++;
       if (ca.status === 'interested') statsMap[uid].todayInterested++;
     }
@@ -579,14 +623,20 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     const uid = String(t.assignedTo || '');
     if (statsMap[uid] && statsMap[uid].user.role !== 'doctor') {
       if (t.status === 'pending') statsMap[uid].pendingTasks++;
-      if (isAllTime || (t.createdAt && new Date(t.createdAt).getTime() >= startOfDay.getTime() && new Date(t.createdAt).getTime() <= endOfDay.getTime())) {
-        statsMap[uid].tasksAssigned++;
+      if (statsMap[uid].user.role === 'sales') {
+        if (isAllTime || (t.createdAt && new Date(t.createdAt).getTime() >= startOfDay.getTime() && new Date(t.createdAt).getTime() <= endOfDay.getTime()) || (t.updatedAt && new Date(t.updatedAt).getTime() >= startOfDay.getTime() && new Date(t.updatedAt).getTime() <= endOfDay.getTime())) {
+          if (!statsMap[uid]._assignedLeadTaskSet) statsMap[uid]._assignedLeadTaskSet = new Set();
+          statsMap[uid]._assignedLeadTaskSet.add(t.lead ? `lead_${t.lead}` : `task_${t._id}`);
+        }
       }
-      if (isToday(t.updatedAt)) {
+      if (isToday(t.updatedAt) || isToday(t.createdAt)) {
         if (t.status === 'interested') {
           statsMap[uid].todayInterested++;
         }
         if (t.status === 'cancel_call') statsMap[uid].todayNotInterested++;
+        if (t.status === 'on_hold') {
+          addOnHold(uid, String(t._id));
+        }
       }
     }
     if (t.notes && t.notes.length) {
@@ -597,15 +647,24 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     }
   }
 
-  // Process Leads (Strict CRM rule: only createdAt for leadsAdded / Leads Assigned)
+  // Process Leads (Strict calendar date assignment tracking - Sales only)
   for (const l of allLeadsData) {
     const uid = String(l.assignedTo || '');
     if (statsMap[uid] && statsMap[uid].user.role !== 'doctor') {
-      if (isToday(l.createdAt)) {
-        statsMap[uid].leadsAdded++;
+      if (statsMap[uid].user.role === 'sales') {
+        if (isAllTime || (l.createdAt && new Date(l.createdAt).getTime() >= startOfDay.getTime() && new Date(l.createdAt).getTime() <= endOfDay.getTime()) || (l.updatedAt && new Date(l.updatedAt).getTime() >= startOfDay.getTime() && new Date(l.updatedAt).getTime() <= endOfDay.getTime())) {
+          if (!statsMap[uid]._assignedLeadTaskSet) statsMap[uid]._assignedLeadTaskSet = new Set();
+          statsMap[uid]._assignedLeadTaskSet.add(`lead_${l._id}`);
+          if (isToday(l.createdAt)) {
+            statsMap[uid].leadsAdded++;
+          }
+        }
       }
-      if (isToday(l.updatedAt)) {
+      if (isToday(l.updatedAt) || isToday(l.createdAt)) {
         if (l.status === 'closed_lost') statsMap[uid].todayClosedLost++;
+        if (l.status === 'on_hold') {
+          addOnHold(uid, String(l._id));
+        }
       }
     }
     if (l.notes && l.notes.length) {
@@ -631,26 +690,118 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     }
   }
 
-  // Process Orders (SR and SM)
+  // Deduplicated Order Booking Attribution
+  const globalBookedSet = new Set();
+  const getCleanIdStr = (id) => id ? String(id._id || id).replace(/^(lead_|task_)/, '') : null;
+
   const processOrder = (o) => {
-    const lUid = o.lead_id && typeof o.lead_id === 'object' ? String(o.lead_id.assignedTo) : null;
-    let uid = lUid;
-    
-    if (!uid && o.created_by) {
-      const createdByUid = String(o.created_by._id || o.created_by);
-      if (statsMap[createdByUid] && statsMap[createdByUid].user.role === 'sales') {
-        uid = createdByUid;
+    const taskUser = o.task_created_by ? String(o.task_created_by._id || o.task_created_by) : null;
+    const leadUser = o.lead_id && typeof o.lead_id === 'object' && o.lead_id.assignedTo ? String(o.lead_id.assignedTo._id || o.lead_id.assignedTo) : null;
+    const createdUser = o.created_by ? String(o.created_by._id || o.created_by) : null;
+    const verifiedUser = o.verified_by ? String(o.verified_by._id || o.verified_by) : null;
+    const isOldOrder = Boolean(o.source_order_id);
+
+    if (isToday(o.createdAt)) {
+      const orderKey = getCleanIdStr(o._id);
+      const leadKey = getCleanIdStr(o.lead_id);
+
+      const isAlreadyCounted = (orderKey && globalBookedSet.has(orderKey)) || (leadKey && globalBookedSet.has(leadKey));
+      if (!isAlreadyCounted) {
+        if (orderKey) globalBookedSet.add(orderKey);
+        if (leadKey) globalBookedSet.add(leadKey);
+
+        let uid = null;
+        if (isOldOrder) {
+          // Re-order (2nd+ kit): Attribute to Support who re-verified it
+          const supportCandidates = [verifiedUser, createdUser, taskUser, leadUser].filter(Boolean);
+          for (const cand of supportCandidates) {
+            if (statsMap[cand] && statsMap[cand].user.role === 'support') {
+              uid = cand;
+              break;
+            }
+          }
+          if (!uid) {
+            for (const cand of [leadUser, taskUser, createdUser, verifiedUser].filter(Boolean)) {
+              if (statsMap[cand] && statsMap[cand].user.role === 'sales') {
+                uid = cand;
+                break;
+              }
+            }
+          }
+        } else {
+          // New order (1st kit): Attribute to Sales who generated the lead
+          const salesCandidates = [taskUser, leadUser, createdUser, verifiedUser].filter(Boolean);
+          for (const cand of salesCandidates) {
+            if (statsMap[cand] && statsMap[cand].user.role === 'sales') {
+              uid = cand;
+              break;
+            }
+          }
+          if (!uid) {
+            for (const cand of [verifiedUser, createdUser, taskUser].filter(Boolean)) {
+              if (statsMap[cand] && statsMap[cand].user.role === 'support') {
+                uid = cand;
+                break;
+              }
+            }
+          }
+        }
+
+        if (uid && statsMap[uid] && ['sales', 'support'].includes(statsMap[uid].user.role)) {
+          statsMap[uid].readyToShipmentCount++;
+        }
       }
     }
 
-    if (uid && statsMap[uid] && statsMap[uid].user.role !== 'doctor') {
-      if (isToday(o.createdAt)) statsMap[uid].readyToShipmentCount++;
-      if (isMonth(o.createdAt)) statsMap[uid].monthDispatchedCount++;
+    if (isMonth(o.createdAt)) {
+      const candidates = [taskUser, leadUser, createdUser, verifiedUser].filter(Boolean);
+      let dispUid = null;
+      for (const cand of candidates) {
+        if (statsMap[cand] && ['sales', 'support'].includes(statsMap[cand].user.role)) {
+          dispUid = cand;
+          break;
+        }
+      }
+      if (dispUid && statsMap[dispUid]) {
+        statsMap[dispUid].monthDispatchedCount++;
+      }
     }
   };
 
   for (const o of allOrdersSR) processOrder(o);
   for (const o of allOrdersSM) processOrder(o);
+
+  // Process Tasks status for any un-ordered ready_to_shipment items
+  for (const t of allTasks) {
+    const uid = String(t.assignedTo || '');
+    if (statsMap[uid] && statsMap[uid].user.role === 'sales') {
+      if (isToday(t.createdAt) || isToday(t.updatedAt)) {
+        if (['ready_to_shipment', 'dispatch', 'dispatched'].includes(t.status)) {
+          const tKey = getCleanIdStr(t.lead || t._id);
+          if (tKey && !globalBookedSet.has(tKey)) {
+            globalBookedSet.add(tKey);
+            statsMap[uid].readyToShipmentCount++;
+          }
+        }
+      }
+    }
+  }
+
+  // Process Leads status for any un-ordered ready_to_shipment items
+  for (const l of allLeadsData) {
+    const uid = String(l.assignedTo || '');
+    if (statsMap[uid] && statsMap[uid].user.role === 'sales') {
+      if (isToday(l.createdAt) || isToday(l.updatedAt)) {
+        if (['ready_to_shipment', 'dispatch', 'dispatched'].includes(l.status)) {
+          const lKey = getCleanIdStr(l._id);
+          if (lKey && !globalBookedSet.has(lKey)) {
+            globalBookedSet.add(lKey);
+            statsMap[uid].readyToShipmentCount++;
+          }
+        }
+      }
+    }
+  }
 
   const ofdRegex = /^(out_for_delivery|ofd|undelivered|undelivered_attempt_failure|ndr)$/i;
   const rtoRegex = /^(rto|rto_verification|rto_delivered|rto_in_transit|rra)$/i;
@@ -751,10 +902,11 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
               uniqueCountedForStaff = cand;
             }
             // Also credit the original Sales agent (dual attribution - does NOT inflate unique count)
-            if (phone && phoneToSales[phone] && statsMap[phoneToSales[phone]]) {
+            if (phone && phoneToSales[phone] && statsMap[phoneToSales[phone]] && statsMap[phoneToSales[phone]].user.role === 'sales') {
               statsMap[phoneToSales[phone]].newDeliveredCount++;
               statsMap[phoneToSales[phone]].deliveredCount++;
             }
+            break;
           } else if (statsMap[cand].user.role === 'sales') {
             // Sales staff owns this lead — 1st kit delivery
             statsMap[cand].newDeliveredCount++;
@@ -763,13 +915,22 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
               statsMap[cand].uniqueDeliveredCount++;
               uniqueCountedForStaff = cand;
             }
+            break;
           }
-          break;
+        }
+      }
+      // Fallback: If no candidate was Sales/Support (e.g. verified/created by Manager/Logistics), credit original Sales agent via phoneToSales
+      if (!uniqueCountedForStaff && phone && phoneToSales[phone] && statsMap[phoneToSales[phone]]) {
+        if (statsMap[phoneToSales[phone]].user.role === 'sales') {
+          statsMap[phoneToSales[phone]].newDeliveredCount++;
+          statsMap[phoneToSales[phone]].deliveredCount++;
+          statsMap[phoneToSales[phone]].uniqueDeliveredCount++;
+          uniqueCountedForStaff = phoneToSales[phone];
         }
       }
     } else {
       // Reorder (2nd+ kit) — credit Support who re-verified it
-      const supportCand = [vId, cId, lId].filter(Boolean);
+      const supportCand = [vId, cId, lId, tId].filter(Boolean);
       for (const cand of supportCand) {
         if (statsMap[cand] && statsMap[cand].user.role === 'support') {
           statsMap[cand].supportOldDeliveredCount++;
@@ -782,7 +943,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
         }
       }
       // Also credit original Sales agent via phone map (dual attribution - does NOT inflate unique count)
-      if (phone && phoneToSales[phone] && statsMap[phoneToSales[phone]]) {
+      if (phone && phoneToSales[phone] && statsMap[phoneToSales[phone]] && statsMap[phoneToSales[phone]].user.role === 'sales') {
         statsMap[phoneToSales[phone]].salesOldDeliveredCount++;
         statsMap[phoneToSales[phone]].deliveredCount++;
         // If no support was found, count unique under sales
@@ -798,6 +959,10 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   }
 
   for (const k in statsMap) {
+    if (statsMap[k]._assignedLeadTaskSet) {
+      statsMap[k].tasksAssigned = statsMap[k]._assignedLeadTaskSet.size;
+      delete statsMap[k]._assignedLeadTaskSet;
+    }
     delete statsMap[k]._intSet;
     delete statsMap[k]._noteSet;
     delete statsMap[k]._cnpSet;

@@ -573,25 +573,45 @@ export const createOrder = catchAsync(async (req, res) => {
 
     const subTotal = (products || []).reduce((sum, p) => sum + (Number(p.price) * (Number(p.quantity) || 1)), 0) + (Number(other_charges) || 0) - (Number(total_discount) || 0);
     // Find verified_by and verification_id from Verification record for this lead
-    let verifiedBy = req.user?._id;
+    let verifiedBy = null;
     let verificationId = null;
     let taskCreatedBy = null;
     if (matchedLeadId) {
       const verDoc = await Verification.findOne({ lead: matchedLeadId, isDeleted: { $ne: true } }).populate('task', 'createdBy').sort({ createdAt: -1 }).lean();
       if (verDoc) {
-        verifiedBy = verDoc.verifiedBy || verDoc.assignedTo || req.user?._id;
-        if (verDoc.changedBy) {
-          const User = mongoose.model('User');
-          const vUser = verifiedBy ? await User.findById(verifiedBy).select('role').lean() : null;
-          if (!vUser || ['admin', 'manager', 'logistic'].includes(vUser.role)) {
+        verifiedBy = verDoc.verifiedBy || verDoc.assignedTo;
+        const User = mongoose.model('User');
+        let vUser = verifiedBy ? await User.findById(verifiedBy).select('role').lean() : null;
+        if (!vUser || ['admin', 'manager', 'logistic'].includes(vUser?.role)) {
+          if (verDoc.changedBy) {
             const cUser = await User.findById(verDoc.changedBy).select('role').lean();
-            if (cUser?.role === 'sales') {
+            if (cUser && ['sales', 'support'].includes(cUser.role)) {
               verifiedBy = verDoc.changedBy;
+              vUser = cUser;
+            }
+          }
+          if (!vUser || ['admin', 'manager', 'logistic'].includes(vUser?.role)) {
+            const leadObj = await Lead.findById(matchedLeadId).select('assignedTo').lean();
+            if (leadObj && leadObj.assignedTo) {
+              const lUser = await User.findById(leadObj.assignedTo).select('role').lean();
+              if (lUser && ['sales', 'support'].includes(lUser.role)) {
+                verifiedBy = leadObj.assignedTo;
+                vUser = lUser;
+              }
             }
           }
         }
         verificationId = verDoc._id; // Lock verification_id on order permanently
         taskCreatedBy = verDoc.task?.createdBy || null;
+      }
+    }
+
+    let createdByStaff = req.user?._id;
+    if (req.user) {
+      const User = mongoose.model('User');
+      const uRole = (await User.findById(req.user._id).select('role').lean())?.role;
+      if (['admin', 'manager', 'logistic'].includes(uRole)) {
+        if (verifiedBy) createdByStaff = verifiedBy;
       }
     }
 
@@ -609,7 +629,7 @@ export const createOrder = catchAsync(async (req, res) => {
       sub_total: subTotal,
       order_items: (products || []).map(p => ({ name: p.name, sku: p.sku, units: p.quantity, selling_price: p.price })),
       platform: 'shipmaxx',
-      created_by: req.user?._id,
+      created_by: createdByStaff,
       verified_by: verifiedBy,
       verification_id: verificationId, // Permanently links order to the Closer's verification record
       task_created_by: taskCreatedBy,

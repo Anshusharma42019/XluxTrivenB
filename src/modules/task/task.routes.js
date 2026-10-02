@@ -49,7 +49,7 @@ router
   .patch(auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, validate(taskValidation.updateTask), taskController.updateTask)
   .delete(auth('admin', 'manager'), departmentFilter, validate(taskValidation.deleteTask), taskController.deleteTask);
 
-router.post('/:taskId/notes', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, taskController.addNote);
+router.post('/:taskId/notes', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, validate(taskValidation.addNote), taskController.addNote);
 
 export default router;
 

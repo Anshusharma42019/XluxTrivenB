@@ -386,18 +386,38 @@ export const createOrder = catchAsync(async (req, res) => {
     const verif = await mongoose.model('Verification').findOne({ lead: body.lead_id }).populate('task', 'createdBy').sort({ createdAt: -1 }).lean();
     if (verif) {
       verifiedBy = verif.verifiedBy || verif.assignedTo;
-      if (verif.changedBy) {
-        const User = mongoose.model('User');
-        const vUser = verifiedBy ? await User.findById(verifiedBy).select('role').lean() : null;
-        if (!vUser || ['admin', 'manager', 'logistic'].includes(vUser.role)) {
+      const User = mongoose.model('User');
+      let vUser = verifiedBy ? await User.findById(verifiedBy).select('role').lean() : null;
+      if (!vUser || ['admin', 'manager', 'logistic'].includes(vUser?.role)) {
+        if (verif.changedBy) {
           const cUser = await User.findById(verif.changedBy).select('role').lean();
-          if (cUser?.role === 'sales') {
+          if (cUser && ['sales', 'support'].includes(cUser.role)) {
             verifiedBy = verif.changedBy;
+            vUser = cUser;
+          }
+        }
+        if (!vUser || ['admin', 'manager', 'logistic'].includes(vUser?.role)) {
+          const leadObj = await mongoose.model('Lead').findById(body.lead_id).select('assignedTo').lean();
+          if (leadObj && leadObj.assignedTo) {
+            const lUser = await User.findById(leadObj.assignedTo).select('role').lean();
+            if (lUser && ['sales', 'support'].includes(lUser.role)) {
+              verifiedBy = leadObj.assignedTo;
+              vUser = lUser;
+            }
           }
         }
       }
       verificationId = verif._id; // Lock verification_id on order permanently
       taskCreatedBy = verif.task?.createdBy || null;
+    }
+  }
+
+  let createdByStaff = req.user?._id;
+  if (req.user) {
+    const User = mongoose.model('User');
+    const uRole = (await User.findById(req.user._id).select('role').lean())?.role;
+    if (['admin', 'manager', 'logistic'].includes(uRole)) {
+      if (verifiedBy) createdByStaff = verifiedBy;
     }
   }
 
@@ -411,7 +431,7 @@ export const createOrder = catchAsync(async (req, res) => {
       status: data?.status || 'NEW',
       status_code: data?.status_code,
       lead_id: body.lead_id || undefined,
-      created_by: req.user?._id,
+      created_by: createdByStaff,
       verified_by: verifiedBy,
       verification_id: verificationId, // Permanently links order to the Closer's verification record
       task_created_by: taskCreatedBy,

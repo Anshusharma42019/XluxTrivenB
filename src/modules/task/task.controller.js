@@ -1,6 +1,8 @@
 import httpStatus from 'http-status';
 import catchAsync from '../../utils/catchAsync.js';
 import ApiResponse from '../../utils/ApiResponse.js';
+import ApiError from '../../utils/ApiError.js';
+import Task from './task.model.js';
 import * as taskService from './task.service.js';
 
 const createTask = catchAsync(async (req, res) => {
@@ -34,19 +36,28 @@ const deleteTask = catchAsync(async (req, res) => {
 });
 
 const addNote = catchAsync(async (req, res) => {
+  const noteText = req.body.text;
+  if (!noteText || typeof noteText !== 'string' || !noteText.trim()) {
+    throw new ApiError(httpStatus.BAD_REQUEST, 'Note text is required');
+  }
+
   const task = await taskService.getTaskById(req.params.taskId, req.user.role, req.user._id, req.userDepartments);
-  task.notes.push({ text: req.body.text });
-  await task.save();
+  
+  const updatedTask = await Task.findByIdAndUpdate(
+    task._id,
+    { $push: { notes: { text: noteText.trim(), createdAt: new Date() } } },
+    { new: true }
+  );
 
   if (task.lead) {
     const leadId = task.lead._id || task.lead;
     const Lead = (await import('../lead/lead.model.js')).default;
     await Lead.findByIdAndUpdate(leadId, {
-      $push: { notes: { text: req.body.text, createdBy: req.user._id } }
+      $push: { notes: { text: noteText.trim(), createdBy: req.user._id } }
     });
   }
 
-  res.json(new ApiResponse(httpStatus.OK, task, 'Note added'));
+  res.json(new ApiResponse(httpStatus.OK, updatedTask || task, 'Note added'));
 });
 
 const getTaskByLead = catchAsync(async (req, res) => {
