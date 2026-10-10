@@ -5,7 +5,7 @@ import * as dashboardService from './dashboard.service.js';
 import { getStaffDeliveryStats } from './dashboard.service.js';
 
 const cache = new Map();
-const CACHE_TTL = 5000; // 5 seconds — ensure responsive dynamic updates when filtering real data
+const CACHE_TTL = 60000; // 60 seconds memory cache (automatically purged on data changes)
 
 const withCache = async (key, fetchFn, bypass = false) => {
   if (!bypass) {
@@ -75,11 +75,11 @@ const getStaffVerifications = catchAsync(async (req, res) => {
 });
 
 const getStaffTodayLists = catchAsync(async (req, res) => {
-  const { date, staffId, from, to, department, refresh } = req.query;
+  const { date, staffId, from, to, preset, department, refresh } = req.query;
   const userDepts = ['sales', 'support', 'logistics'].includes(req.user.role) ? req.userDepartments : (department ? [department] : []);
   
-  const cacheKey = `todayLists_${req.user.role}_${req.user._id}_${date}_${staffId}_${from}_${to}_${userDepts.join(',')}`;
-  const data = await withCache(cacheKey, () => dashboardService.getStaffTodayLists(req.user.role, req.user._id, date, staffId, from, to, userDepts), refresh === 'true' || refresh === true);
+  const cacheKey = `todayLists_${req.user.role}_${req.user._id}_${date}_${staffId}_${from}_${to}_${preset}_${userDepts.join(',')}`;
+  const data = await withCache(cacheKey, () => dashboardService.getStaffTodayLists(req.user.role, req.user._id, date, staffId, from, to, preset, userDepts), refresh === 'true' || refresh === true);
   
   res.json(new ApiResponse(httpStatus.OK, data, 'Staff today lists fetched'));
 });
@@ -97,28 +97,8 @@ const SWR_STAFF_CACHE = new Map();
 
 const getAllStaffStats = catchAsync(async (req, res) => {
   const { date, from, to, preset, refresh } = req.query;
-  const userRole = req.user?.role || 'admin';
-  const userId = ['sales', 'support', 'logistics'].includes(userRole) ? req.user._id : 'all';
-  const cacheKey = `staff_stats_${preset || 'today'}_${from || ''}_${to || ''}_${date || ''}_${userRole}_${userId}`;
-
-  const cached = SWR_STAFF_CACHE.get(cacheKey);
-  const now = Date.now();
-
-  if (cached && refresh !== 'true' && refresh !== true) {
-    res.setHeader('X-Cache', 'HIT-SWR');
-    if (now - cached.timestamp > 30000 && !cached.isRevalidating) {
-      cached.isRevalidating = true;
-      dashboardService.getAllStaffStats(date, from, to, preset, req.user)
-        .then(freshData => {
-          SWR_STAFF_CACHE.set(cacheKey, { data: freshData, timestamp: Date.now(), isRevalidating: false });
-        })
-        .catch(() => { cached.isRevalidating = false; });
-    }
-    return res.json(new ApiResponse(httpStatus.OK, cached.data, 'All staff stats fetched'));
-  }
-
-  const data = await dashboardService.getAllStaffStats(date, from, to, preset, req.user);
-  SWR_STAFF_CACHE.set(cacheKey, { data, timestamp: Date.now(), isRevalidating: false });
+  const cacheKey = `allStaff_${req.user.role}_${req.user._id}_${date}_${from}_${to}_${preset}`;
+  const data = await withCache(cacheKey, () => dashboardService.getAllStaffStats(date, from, to, preset, req.user), refresh === 'true' || refresh === true);
   res.json(new ApiResponse(httpStatus.OK, data, 'All staff stats fetched'));
 });
 
@@ -164,4 +144,25 @@ const getMyDeliveryStats = catchAsync(async (req, res) => {
   res.json(new ApiResponse(httpStatus.OK, data, 'My delivery stats fetched'));
 });
 
-export default { debugDeliveries, getStats, getRevenueChart, getStaffStats, setStaffTarget, getTargetHistory, getStaffVerifications, getStaffTodayLists, getStaffMonthlyChart, getAllStaffStats, getStaffCommission, getAllStaffCommissions, saveCommissionOverride, getUnassignedOrders, assignOrder, getStaffDeliveryStats: getStaffDeliveryStatsHandler, getMyDeliveryStats };
+const getEmployeePerformanceMatrix = catchAsync(async (req, res) => {
+  const data = await dashboardService.getEmployeePerformanceMatrix(req.query);
+  res.json(new ApiResponse(httpStatus.OK, data, 'Performance matrix fetched'));
+});
+
+const getStaffDetailKPIs = catchAsync(async (req, res) => {
+  const data = await dashboardService.getStaffDetailKPIs(req.query);
+  res.json(new ApiResponse(httpStatus.OK, data, 'Staff KPIs fetched'));
+});
+
+const getTaskDrilldown = catchAsync(async (req, res) => {
+  const data = await dashboardService.getTaskDrilldown(req.query);
+  res.json(new ApiResponse(httpStatus.OK, data, 'Task drilldown fetched'));
+});
+
+export default { 
+  debugDeliveries, getStats, getRevenueChart, getStaffStats, setStaffTarget, 
+  getTargetHistory, getStaffVerifications, getStaffTodayLists, getStaffMonthlyChart, 
+  getAllStaffStats, getStaffCommission, getAllStaffCommissions, saveCommissionOverride, 
+  getUnassignedOrders, assignOrder, getStaffDeliveryStats: getStaffDeliveryStatsHandler, 
+  getMyDeliveryStats, getEmployeePerformanceMatrix, getStaffDetailKPIs, getTaskDrilldown 
+};

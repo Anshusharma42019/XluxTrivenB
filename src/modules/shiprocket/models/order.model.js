@@ -85,6 +85,10 @@ const orderSchema = new mongoose.Schema({
   raw_response: mongoose.Schema.Types.Mixed,
 }, { timestamps: true });
 
+orderSchema.index({ createdAt: -1 });
+orderSchema.index({ created_by: 1, createdAt: -1 });
+orderSchema.index({ verified_by: 1, createdAt: -1 });
+orderSchema.index({ task_created_by: 1, createdAt: -1 });
 orderSchema.index({ status: 1, createdAt: -1 });
 orderSchema.index({ status: 1, delivered_at: -1 });
 orderSchema.index({ lead_id: 1, createdAt: -1 });

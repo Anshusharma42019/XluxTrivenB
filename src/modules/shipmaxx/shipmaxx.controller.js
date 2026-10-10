@@ -1369,6 +1369,9 @@ export const getStatusOrders = catchAsync(async (req, res) => {
 
   // Backfill missing customer data from raw_response or lead_id
   for (const o of orders) {
+    if (!o.delivered_at && /^(delivered|rto_delivered|DEL|RTD)$/i.test(o.status)) {
+      o.delivered_at = o.status_updated_at || o.createdAt;
+    }
     if (!o.billing_customer_name || !o.billing_phone) {
       const raw = o.raw_response;
       if (raw) {
@@ -1378,6 +1381,9 @@ export const getStatusOrders = catchAsync(async (req, res) => {
         if (!o.billing_city) o.billing_city = c.city || raw.billing_city || raw.city || '';
         if (!o.billing_state) o.billing_state = c.state || raw.billing_state || raw.state || '';
         if (!o.billing_pincode) o.billing_pincode = c.pincode || raw.billing_pincode || raw.pincode || '';
+        if (!o.delivered_at && (raw.delivered_at || raw.delivered_date)) {
+          o.delivered_at = raw.delivered_at || raw.delivered_date;
+        }
       }
       // Also try lead_id populated name/phone
       if (!o.billing_customer_name && o.lead_id?.name) o.billing_customer_name = o.lead_id.name;
@@ -1967,8 +1973,26 @@ export const getOrders = catchAsync(async (req, res) => {
 
 // ── Delivered Orders ──────────────────────────────────────────────────────────
 export const getDeliveredOrders = catchAsync(async (req, res) => {
-  const { search, page = 1, per_page = 50, from, to, payment_method } = req.query;
+  const { search, page = 1, per_page = 50, from, to, payment_method, sort = 'asc' } = req.query;
   const statusFilter = { $in: [/^delivered$/i, /^DEL$/i] };
+
+  // Populate missing delivered_at timestamps from status_updated_at or createdAt
+  const missingDelivered = await Order.find({
+    platform: 'shipmaxx',
+    status: statusFilter,
+    $or: [{ delivered_at: { $exists: false } }, { delivered_at: null }]
+  }).select('_id status_updated_at createdAt').lean().catch(() => []);
+
+  if (missingDelivered && missingDelivered.length > 0) {
+    const bulkOps = missingDelivered.map(ord => ({
+      updateOne: {
+        filter: { _id: ord._id },
+        update: { $set: { delivered_at: ord.status_updated_at || ord.createdAt || new Date() } }
+      }
+    }));
+    await Order.bulkWrite(bulkOps).catch(() => {});
+  }
+
   const baseConditions = [
     { platform: 'shipmaxx', status: statusFilter }
   ];
@@ -2013,32 +2037,35 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
   const pageNum = isGetAll ? 1 : Math.max(1, Number(page) || 1);
   const skipNum = isGetAll ? 0 : (pageNum - 1) * limitNum;
 
-  const [orders, total, totalRevenueAgg] = await Promise.all([
-    Order.find(match)
-      .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
-      .populate('verified_by', 'name role')
-      .sort({ delivered_at: -1, createdAt: -1, _id: -1 })
-      .skip(skipNum).limit(limitNum).lean(),
-    Order.countDocuments(match),
-    Order.aggregate([
-      { $match: match },
-      { $group: { _id: null, totalRevenue: { $sum: '$sub_total' } } }
-    ])
-  ]);
+  const sortDir = String(sort).toLowerCase() === 'desc' ? -1 : 1;
 
-  const totalRevenue = totalRevenueAgg?.[0]?.totalRevenue || 0;
+  // Ensure delivered orders FROM September 1, 2026 onwards have sequential bill numbers (TW-0001, TW-0002...)
+  const septCutoff = new Date('2026-09-01T00:00:00.000+05:30');
 
-  // Ensure delivered orders have sequential bill numbers (TW-0001, TW-0002, TW-0003...)
-  const allDelivered = await Order.find({ platform: 'shipmaxx', status: statusFilter })
+  // Clean up bill_seq/bill_number from orders delivered before Sept 1, 2026
+  await Order.updateMany(
+    {
+      platform: 'shipmaxx',
+      status: statusFilter,
+      delivered_at: { $lt: septCutoff }
+    },
+    { $unset: { bill_seq: 1, bill_number: 1 } }
+  ).catch(() => {});
+
+  const septemberDelivered = await Order.find({
+    platform: 'shipmaxx',
+    status: statusFilter,
+    delivered_at: { $gte: septCutoff }
+  })
     .sort({ delivered_at: 1, status_updated_at: 1, createdAt: 1, _id: 1 })
-    .select('_id bill_seq bill_number')
+    .select('_id bill_seq bill_number delivered_at status_updated_at createdAt')
     .lean();
 
   const seqMap = new Map();
-  if (allDelivered.length > 0) {
+  if (septemberDelivered.length > 0) {
     let seq = 1;
     const bulkOps = [];
-    for (const ord of allDelivered) {
+    for (const ord of septemberDelivered) {
       const seqStr = String(seq).padStart(4, '0');
       const generatedNum = `TW-${seqStr}`;
       seqMap.set(String(ord._id), { seq, billNumber: generatedNum });
@@ -2056,6 +2083,21 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
       await Order.bulkWrite(bulkOps).catch(() => {});
     }
   }
+
+  const [orders, total, totalRevenueAgg] = await Promise.all([
+    Order.find(match)
+      .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
+      .populate('verified_by', 'name role')
+      .sort({ delivered_at: sortDir, status_updated_at: sortDir, createdAt: sortDir, _id: sortDir })
+      .skip(skipNum).limit(limitNum).lean(),
+    Order.countDocuments(match),
+    Order.aggregate([
+      { $match: match },
+      { $group: { _id: null, totalRevenue: { $sum: '$sub_total' } } }
+    ])
+  ]);
+
+  const totalRevenue = totalRevenueAgg?.[0]?.totalRevenue || 0;
 
   orders.forEach(o => {
     let staffName = undefined;
@@ -2075,20 +2117,27 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
     o.verification_staff_id = staffId;
     o.verification_staff_name = staffName;
 
-    // Set sequence-wise bill_number (e.g. TW-0001, TW-0002...)
-    const seqData = seqMap.get(String(o._id));
-    if (seqData) {
-      o.bill_seq = seqData.seq;
-      o.bill_number = seqData.billNumber;
-      o.billNumber = seqData.billNumber;
-    } else if (o.bill_seq) {
-      const seqBillNum = `TW-${String(o.bill_seq).padStart(4, '0')}`;
-      o.bill_number = seqBillNum;
-      o.billNumber = seqBillNum;
+    // Set sequence-wise bill_number ONLY for September 2026 onwards
+    const ordDate = new Date(o.delivered_at || o.status_updated_at || o.createdAt);
+    if (!isNaN(ordDate.getTime()) && ordDate >= septCutoff) {
+      const seqData = seqMap.get(String(o._id));
+      if (seqData) {
+        o.bill_seq = seqData.seq;
+        o.bill_number = seqData.billNumber;
+        o.billNumber = seqData.billNumber;
+      } else if (o.bill_seq) {
+        const seqBillNum = `TW-${String(o.bill_seq).padStart(4, '0')}`;
+        o.bill_number = seqBillNum;
+        o.billNumber = seqBillNum;
+      } else {
+        o.bill_seq = null;
+        o.bill_number = null;
+        o.billNumber = null;
+      }
     } else {
-      const idPart = (o.order_id || o._id || '000').toString().replace(/\D/g, '').slice(-4) || '0001';
-      o.bill_number = `TW-${idPart.padStart(4, '0')}`;
-      o.billNumber = o.bill_number;
+      o.bill_seq = null;
+      o.bill_number = null;
+      o.billNumber = null;
     }
   });
   res.json(new ApiResponse(200, { data: orders, total, totalRevenue, page: pageNum, per_page: isGetAll ? total : limitNum }, 'Delivered orders fetched'));

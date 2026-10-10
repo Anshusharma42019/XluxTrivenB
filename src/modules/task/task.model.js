@@ -45,6 +45,9 @@ const taskSchema = new mongoose.Schema(
       text: { type: String, required: true },
       createdAt: { type: Date, default: Date.now },
     }],
+    last_action_at: { type: Date, default: null },
+    next_call_at: { type: Date, default: null },
+    cnp_attempts: { type: Number, default: 0 },
     department: {
       type: String,
       enum: ['migraine', 'piles'],
@@ -58,10 +61,15 @@ const taskSchema = new mongoose.Schema(
 
 taskSchema.index({ assignedTo: 1, dueDate: 1, status: 1 });
 taskSchema.index({ status: 1, lead: 1, isDeleted: 1 });
+taskSchema.index({ assignedTo: 1, status: 1, isDeleted: 1, createdAt: -1 });
+taskSchema.index({ assignedTo: 1, status: 1, isDeleted: 1, updatedAt: -1 });
+taskSchema.index({ assignedTo: 1, isDeleted: 1, createdAt: -1 });
 taskSchema.index({ status: 1, isDeleted: 1, _id: 1 }); // fast distinct for ready_to_shipment
 taskSchema.index({ assignedTo: 1, status: 1, updatedAt: -1 });
 taskSchema.index({ department: 1, status: 1, updatedAt: -1 });
 taskSchema.index({ assignedTo: 1, department: 1, status: 1, isDeleted: 1, updatedAt: -1 });
+taskSchema.index({ assignedTo: 1, last_action_at: -1, status: 1 });
+taskSchema.index({ next_call_at: 1, status: 1 });
 taskSchema.index({ lead: 1 });
 taskSchema.index({ lead: 1, isDeleted: 1 });
 

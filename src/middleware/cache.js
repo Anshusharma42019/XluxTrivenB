@@ -12,7 +12,7 @@ export const cacheMiddleware = (ttlSeconds = 300) => {
       return next();
     }
 
-    // Support bypass if refresh=true is passed
+    // Support bypass if explicit refresh=true is passed
     if (req.query.refresh === 'true' || req.query.refresh === true) {
       res.setHeader('X-Cache', 'BYPASS');
       return next();
@@ -23,8 +23,13 @@ export const cacheMiddleware = (ttlSeconds = 300) => {
       ? `${req.user._id}-${req.user.role}-${JSON.stringify(req.userDepartments || [])}`
       : 'anonymous';
 
+    // Normalize query params so cache key hits even if cache-busting params are sent
+    const cleanQuery = { ...req.query };
+    delete cleanQuery._t;
+    delete cleanQuery.refresh;
+
     // Formulate cache key based on route path, query params and user scope
-    const cacheKey = `route:${req.baseUrl || ''}${req.path}:${userKey}:${JSON.stringify(req.query)}`;
+    const cacheKey = `route:${req.baseUrl || ''}${req.path}:${userKey}:${JSON.stringify(cleanQuery)}`;
 
     // Try fetching from cache
     const cachedData = cache.get(cacheKey);
@@ -64,13 +69,13 @@ export const cacheInvalidatorMiddleware = (req, res, next) => {
 
     const invalidate = () => {
       if (!invalidated && res.statusCode >= 200 && res.statusCode < 300) {
-        cache.delPattern('route:/api/v1/dashboard');
-        cache.delPattern('route:/api/v1/ops-dashboard');
+        const path = req.originalUrl || req.url || '';
+        // Always invalidate dashboard if order/shipment/verification/ops/lead/task/cnp route mutated
+        if (/shipment|order|shipmaxx|verification|ops-dashboard|ndr|lead|task|cnp|call-again|appointment|user/i.test(path)) {
+          cache.delPattern('route:/api/v1/ops-dashboard');
+          cache.delPattern('route:/api/v1/dashboard');
+        }
         cache.delPattern('route:/api/v1/shipmaxx');
-        cache.delPattern('route:/api/v1/leads');
-        cache.delPattern('route:/api/v1/tasks');
-        cache.delPattern('route:/api/v1/cnp');
-        cache.delPattern('route:/api/v1/call-again');
         invalidated = true;
       }
     };

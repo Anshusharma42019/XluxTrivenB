@@ -77,9 +77,15 @@ const shipmaxxOrderSchema = new mongoose.Schema({
   interakt_reply_text: { type: String, default: null, index: true },
   interakt_reply_at: { type: Date, default: null },
   interakt_reply_read: { type: Boolean, default: false },
+  bill_number: { type: String, index: true },
+  bill_seq: { type: Number, index: true },
   raw_response: mongoose.Schema.Types.Mixed,
 }, { timestamps: true });
 
+shipmaxxOrderSchema.index({ createdAt: -1 });
+shipmaxxOrderSchema.index({ created_by: 1, createdAt: -1 });
+shipmaxxOrderSchema.index({ verified_by: 1, createdAt: -1 });
+shipmaxxOrderSchema.index({ task_created_by: 1, createdAt: -1 });
 shipmaxxOrderSchema.index({ status: 1, createdAt: -1 });
 shipmaxxOrderSchema.index({ status: 1, delivered_at: -1 });
 shipmaxxOrderSchema.index({ lead_id: 1, createdAt: -1 });

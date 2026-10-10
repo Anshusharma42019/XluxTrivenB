@@ -124,7 +124,7 @@ export const getStaffStats = async (userId, targetDate, from, to, userDepartment
     todayNotInterested,
     todayClosedLost,
     leadsAdded,
-    verifiedCount,
+    verifiedCount: Math.max(verifiedCount, todayVerifications),
     onHoldCount,
     date: dateStr,
     newDeliveredCount,
@@ -241,33 +241,20 @@ export const getTargetHistory = async (userId, month, year, days) => {
   });
 };
 
-export const getStaffTodayLists = async (userRole, userId, targetDate, targetStaffId, from, to, userDepartments = []) => {
-  const IST_OFFSET = 5.5 * 60 * 60 * 1000;
-  let start, end;
-
-  const isAllTime = from === 'all' || to === 'all';
-  if (isAllTime) {
-    const target = targetDate ? new Date(targetDate) : new Date();
-    start = new Date(Date.UTC(target.getFullYear(), target.getMonth(), target.getDate()) - IST_OFFSET);
-    end = new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1);
-  } else if (from && to) {
-    start = new Date(`${from}T00:00:00.000+05:30`);
-    end = new Date(`${to}T23:59:59.999+05:30`);
-  } else {
-    const target = targetDate ? new Date(targetDate) : new Date();
-    start = new Date(Date.UTC(target.getFullYear(), target.getMonth(), target.getDate()) - IST_OFFSET);
-    end = new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1);
-  }
+export const getStaffTodayLists = async (userRole, userId, targetDate, targetStaffId, from, to, preset, userDepartments = []) => {
+  const range = buildStatsDateRange(preset, from, to);
+  const isAllTime = range.isAllTime;
+  const start = range.start;
+  const end = range.end;
 
   const filter = isAllTime ? {} : { createdAt: { $gte: start, $lte: end } };
   const updateFilter = isAllTime ? {} : { updatedAt: { $gte: start, $lte: end } };
   const taskFilter = { isDeleted: false, ...(isAllTime ? {} : { updatedAt: { $gte: start, $lte: end } }) };
 
   let sid = null;
-  if (userRole === 'manager' || userRole === 'admin') {
-    if (targetStaffId) sid = new mongoose.Types.ObjectId(targetStaffId);
-  } else if (userRole === 'sales') {
-    sid = new mongoose.Types.ObjectId(userId);
+  const staffIdToUse = targetStaffId || userId;
+  if (staffIdToUse && mongoose.Types.ObjectId.isValid(String(staffIdToUse))) {
+    sid = new mongoose.Types.ObjectId(String(staffIdToUse));
   }
 
   if (sid) {
@@ -282,29 +269,40 @@ export const getStaffTodayLists = async (userRole, userId, targetDate, targetSta
     taskFilter.department = { $in: userDepartments };
   }
 
-  // Build base filters (assignedTo + department only, no date) for queue-type statuses
-  const baseFilter = {};
-  if (sid) baseFilter.assignedTo = sid;
-  if (userDepartments && userDepartments.length > 0) baseFilter.department = { $in: userDepartments };
+  const { Order } = await import('../shiprocket/models/order.model.js');
+  const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
+  const Lead = (await import('../lead/lead.model.js')).default;
+  const Task = (await import('../task/task.model.js')).default;
 
-  const [cnpList, callAgainList, interestedList, notInterestedList, onHoldList, verificationList] = await Promise.all([
+  const orderDateFilter = isAllTime ? {} : { createdAt: { $gte: start, $lte: end } };
+
+  const [cnpList, callAgainList, interestedList, notInterestedList, onHoldList, verificationList, taskList, staffStatsRes] = await Promise.all([
     Cnp.find(updateFilter)
       .populate('lead', 'name phone').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(100).lean(),
     CallAgain.find(updateFilter)
       .populate('lead', 'name phone').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(100).lean(),
-    // Interested & Not Interested: date-filtered by updatedAt — shows leads marked interested in selected period
     Task.find({ ...taskFilter, status: 'interested' })
       .populate('lead', 'name phone').sort({ updatedAt: -1 }).limit(100).lean(),
     Task.find({ ...taskFilter, status: 'cancel_call' })
       .populate('lead', 'name phone').sort({ updatedAt: -1 }).limit(100).lean(),
-    // On Hold: date-filtered — verifications put on hold within selected period
     Verification.find({ ...updateFilter, status: 'on_hold' })
       .populate('lead', 'name phone').sort({ updatedAt: -1 }).limit(100).lean(),
     Verification.find({ ...filter })
       .populate('lead', 'name phone status').sort({ createdAt: -1 }).limit(100).lean(),
+    Task.find({ ...taskFilter })
+      .populate('lead', 'name phone').sort({ updatedAt: -1 }).limit(100).lean(),
+    sid ? getAllStaffStats(targetDate, from, to, preset) : Promise.resolve(null),
   ]);
 
-  return { cnpList, callAgainList, interestedList, notInterestedList, onHoldList, verificationList };
+  let bookedOrders = [];
+  if (sid && staffStatsRes && staffStatsRes.staffStats) {
+    const foundStaff = staffStatsRes.staffStats.find(s => String(s.user._id) === String(sid));
+    if (foundStaff && foundStaff.bookedOrders) {
+      bookedOrders = foundStaff.bookedOrders;
+    }
+  }
+
+  return { cnpList, callAgainList, interestedList, notInterestedList, onHoldList, verificationList, taskList, bookedOrders };
 };
 
 export const getStaffMonthlyChart = async (userId) => {
@@ -354,8 +352,17 @@ function buildStatsDateRange(preset, fromDate, toDate) {
   if (isAll) {
     return { isAllTime: true, start: null, end: null };
   }
-  if (preset === 'month' || preset === 'mtd' || fromDate === 'month') {
+  if (preset === 'month' || preset === 'mtd' || fromDate === 'month' || preset === 'this_month') {
     const start = new Date(Date.UTC(y, m, 1) - IST_OFFSET);
+    return { isAllTime: false, start: start, end: now };
+  }
+  if (preset === 'last_month' || preset === 'lastMonth') {
+    const start = new Date(Date.UTC(y, m - 1, 1) - IST_OFFSET);
+    const end = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999) - IST_OFFSET);
+    return { isAllTime: false, start: start, end: end };
+  }
+  if (preset === 'last7' || preset === 'weekly' || preset === '7d' || fromDate === 'last7') {
+    const start = new Date(istNow.getTime() - 7 * 24 * 60 * 60 * 1000);
     return { isAllTime: false, start: start, end: now };
   }
   if (preset === 'today' || fromDate === 'today') {
@@ -416,10 +423,10 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   for (const u of allUsers) {
     statsMap[String(u._id)] = {
       user: u,
-      checkIn: null, checkOut: null,
+      checkIn: null, checkOut: null, prevCheckOut: null,
       todayVerifications: 0, monthVerifications: 0, pendingTasks: 0, todayTarget: 0,
       todayCnp: 0, todayCallAgain: 0, todayInterested: 0, todayNotInterested: 0, todayClosedLost: 0,
-      leadsAdded: 0, tasksAssigned: 0, verifiedCount: 0, onHoldCount: 0, readyToShipmentCount: 0, deliveredCount: 0,
+      leadsAdded: 0, tasksAssigned: 0, afterCheckoutLeads: 0, afterCheckoutTasks: 0, verifiedCount: 0, onHoldCount: 0, readyToShipmentCount: 0, deliveredCount: 0,
       rtoCount: 0, monthDispatchedCount: 0, monthDeliveredCount: 0, monthRtoCount: 0,
       assignedVerifications: 0, workingHours: 0, workingPercentage: 0,
       totalAppointments: 0, completedAppointments: 0, cancelledAppointments: 0,
@@ -428,6 +435,7 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
       commentsCount: 0, cnpComments: 0, callAgainComments: 0, interestedComments: 0,
       ofdCommentsCount: 0, rtoCommentsCount: 0,
       commission: 0,
+      bookedOrders: [],
       _noteSet: new Set(), _intSet: new Set(), _cnpSet: new Set(), _caSet: new Set(), _onHoldSet: new Set(),
       _assignedLeadTaskSet: new Set()
     };
@@ -437,47 +445,61 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   const queryMinStart = isAllTime ? null : (startOfDay < monthStart ? startOfDay : monthStart);
   const queryMaxEnd = isAllTime ? null : (endOfDay > monthEnd ? endOfDay : monthEnd);
 
+  const yestStart = new Date(startOfDay.getTime() - 24 * 60 * 60 * 1000);
+
   // 2. Fetch Bulk Data in parallel
   const [
     allAttendances, allAppointments, allTargets, allVerifications, allTasks, 
     allCnps, allCallAgains, allLeadsData, allOrdersSR, allOrdersSM, allCommissions,
     allOnHoldOrders
   ] = await Promise.all([
-    Attendance.find({ date: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('user checkIn checkOut workingHours').lean(),
+    Attendance.find({ date: { $gte: yestStart, $lte: endOfDay }, isDeleted: false }).select('user date checkIn checkOut workingHours').lean(),
     Appointment.find({ appointmentDate: { $gte: startOfDay, $lte: endOfDay }, isDeleted: false }).select('doctorName status').lean(),
     StaffTarget.find({ date: { $gte: fromDate || dateStr, $lte: toDate || dateStr } }).lean(),
     Verification.find({ isDeleted: { $ne: true }, ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } }) }).select('assignedTo verifiedBy status createdAt updatedAt').lean(),
     Task.find({ 
-      isDeleted: false, 
       ...(isAllTime ? {} : {
         $or: [
           { status: 'pending' }, 
-          { createdAt: { $gte: startOfDay, $lte: endOfDay } },
-          { updatedAt: { $gte: startOfDay, $lte: endOfDay } }
+          { createdAt: { $gte: yestStart, $lte: endOfDay } },
+          { updatedAt: { $gte: yestStart, $lte: endOfDay } }
         ]
       })
     }).select('lead assignedTo status notes updatedAt createdAt').lean(),
-    Cnp.find({ ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }).select('assignedTo notes updatedAt').lean(),
-    CallAgain.find({ ...(isAllTime ? {} : { updatedAt: { $gte: startOfDay, $lte: endOfDay } }) }).select('lead assignedTo status notes updatedAt').lean(),
+    Cnp.find({ 
+      ...(isAllTime ? {} : { 
+        $or: [
+          { createdAt: { $gte: yestStart, $lte: endOfDay } },
+          { updatedAt: { $gte: yestStart, $lte: endOfDay } }
+        ]
+      }) 
+    }).select('assignedTo notes createdAt updatedAt').lean(),
+    CallAgain.find({ 
+      ...(isAllTime ? {} : { 
+        $or: [
+          { createdAt: { $gte: yestStart, $lte: endOfDay } },
+          { updatedAt: { $gte: yestStart, $lte: endOfDay } }
+        ]
+      }) 
+    }).select('lead assignedTo status notes createdAt updatedAt').lean(),
     Lead.find({ 
-      isDeleted: false, 
       ...(isAllTime ? {} : {
         $or: [
-          { createdAt: { $gte: startOfDay, $lte: endOfDay } },
-          { updatedAt: { $gte: startOfDay, $lte: endOfDay } }
+          { createdAt: { $gte: yestStart, $lte: endOfDay } },
+          { updatedAt: { $gte: yestStart, $lte: endOfDay } }
         ]
       }) 
     }).select('assignedTo status cnp notes follow_ups createdAt updatedAt').lean(),
     Order.find({ 
-      status: { $nin: ['new', 'pending', 'cancelled', 'NEW', 'PENDING', 'CANCELLED', 'New', 'Pending', 'Cancelled'] },
+      status: { $nin: ['cancelled', 'CANCELLED', 'Cancelled'] },
       ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
-    }).select('comments lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
+    }).select('comments billing_phone shipping_phone lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
       .populate('lead_id', 'assignedTo')
       .lean(),
     ShipmaxxOrder.find({ 
-      status: { $nin: ['new', 'pending', 'cancelled', 'NEW', 'PENDING', 'CANCELLED', 'New', 'Pending', 'Cancelled'] },
+      status: { $nin: ['cancelled', 'CANCELLED', 'Cancelled'] },
       ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
-    }).select('comments lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
+    }).select('comments billing_phone shipping_phone lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
       .populate('lead_id', 'assignedTo')
       .lean(),
     ReorderCommission.aggregate([
@@ -489,9 +511,50 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     ]),
     OnHoldOrder ? OnHoldOrder.find({
       isDeleted: { $ne: true },
-      ...(isAllTime ? {} : { updatedAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
+      ...(isAllTime ? {} : { updatedAt: { $gte: yestStart, $lte: queryMaxEnd } })
     }).select('assignedTo created_by task_created_by updatedAt createdAt').lean() : Promise.resolve([])
   ]);
+
+  // Build Phone-to-Staff mapping across Lead, Task, and Verification to match unlinked orders by customer phone number
+  const phoneToStaffMap = new Map();
+  const userRoleMap = {};
+  allUsers.forEach(u => { userRoleMap[String(u._id)] = u.role; });
+
+  const addPhoneToMap = (phone, ...candidateIds) => {
+    if (!phone) return;
+    const p = String(phone).replace(/\D/g, '').slice(-10);
+    if (p.length !== 10) return;
+    for (const cand of candidateIds) {
+      if (!cand) continue;
+      const cid = String(cand._id || cand);
+      const role = userRoleMap[cid];
+      if (role === 'sales' || role === 'support') {
+        if (!phoneToStaffMap.has(p) || userRoleMap[phoneToStaffMap.get(p)] !== 'sales') {
+          phoneToStaffMap.set(p, cid);
+          if (role === 'sales') break;
+        }
+      }
+    }
+  };
+
+  const targetPhones = new Set();
+  [...allOrdersSR, ...allOrdersSM].forEach(o => {
+    const p1 = String(o.billing_phone || '').replace(/\D/g, '').slice(-10);
+    const p2 = String(o.shipping_phone || '').replace(/\D/g, '').slice(-10);
+    if (p1.length === 10) targetPhones.add(p1);
+    if (p2.length === 10) targetPhones.add(p2);
+  });
+  const phoneArray = Array.from(targetPhones);
+
+  const [allLeadsPhone, allTasksPhone, allVerifsPhone] = await Promise.all([
+    phoneArray.length ? Lead.find({ isDeleted: false, $or: [{ phone: { $in: phoneArray } }, { mobile: { $in: phoneArray } }] }).select('phone mobile assignedTo createdBy changedBy').lean() : [],
+    phoneArray.length ? Task.find({ isDeleted: false, $or: [{ phone: { $in: phoneArray } }, { mobile: { $in: phoneArray } }] }).select('phone mobile assignedTo createdBy changedBy').lean() : [],
+    phoneArray.length ? Verification.find({ isDeleted: { $ne: true }, $or: [{ phone: { $in: phoneArray } }, { mobile: { $in: phoneArray } }] }).select('phone mobile assignedTo verifiedBy changedBy').lean() : [],
+  ]);
+
+  for (const l of allLeadsPhone) addPhoneToMap(l.phone || l.mobile, l.assignedTo, l.changedBy, l.createdBy);
+  for (const t of allTasksPhone) addPhoneToMap(t.phone || t.mobile, t.assignedTo, t.changedBy, t.createdBy);
+  for (const v of allVerifsPhone) addPhoneToMap(v.phone || v.mobile, v.verifiedBy, v.assignedTo, v.changedBy);
 
   // Process Commissions
   for (const c of allCommissions) {
@@ -501,8 +564,119 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     }
   }
 
-  // Helper to check date range
-  const isToday = (date) => isAllTime || (new Date(date) >= startOfDay && new Date(date) <= endOfDay);
+  // Process Attendances FIRST to establish checkIn/checkOut boundaries for shift-based counting
+  const attendanceByDateMap = new Map();
+  for (const a of allAttendances) {
+    const uid = String(a.user);
+    if (statsMap[uid]) {
+      if (a.date) {
+        const dObj = new Date(a.date);
+        const istDateStr = new Date(dObj.getTime() + IST_OFFSET).toISOString().slice(0, 10);
+        attendanceByDateMap.set(`${uid}_${istDateStr}`, a);
+      }
+      const aTime = new Date(a.date).getTime();
+      if (aTime < startOfDay.getTime()) {
+        if (a.checkOut) statsMap[uid].prevCheckOut = a.checkOut;
+      } else {
+        let liveHours = 0;
+        if (a.checkIn && !a.checkOut) liveHours = (Date.now() - new Date(a.checkIn).getTime()) / (1000 * 60 * 60);
+        statsMap[uid].workingHours += (a.workingHours || 0) + liveHours;
+        if (a.checkIn) statsMap[uid].checkIn = a.checkIn;
+        if (a.checkOut) statsMap[uid].checkOut = a.checkOut;
+      }
+    }
+  }
+
+  // Finalize attendance workingPercentage and doctor appointments
+  for (const uid in statsMap) {
+    const expectedHours = 9;
+    statsMap[uid].workingPercentage = Math.min(Math.round((statsMap[uid].workingHours / expectedHours) * 100), 100);
+    
+    if (statsMap[uid].user.role === 'doctor') {
+      const docRegex = new RegExp(statsMap[uid].user.name.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&'), 'i');
+      for (const app of allAppointments) {
+        if (docRegex.test(app.doctorName)) {
+          statsMap[uid].totalAppointments++;
+          if (app.status === 'completed') statsMap[uid].completedAppointments++;
+          if (app.status === 'cancelled') statsMap[uid].cancelledAppointments++;
+        }
+      }
+    }
+  }
+
+  // Helper for Post-Checkout & Overnight assignments across any preset
+  const isAfterCheckout = (date, uid = null) => {
+    if (isAllTime || !date || !uid || !statsMap[uid]) return false;
+    const dTime = new Date(date).getTime();
+    if (isNaN(dTime)) return false;
+    if (dTime < startOfDay.getTime() || dTime > endOfDay.getTime()) return false;
+
+    const istDateStr = new Date(dTime + IST_OFFSET).toISOString().slice(0, 10);
+    const todayAtt = attendanceByDateMap.get(`${uid}_${istDateStr}`);
+
+    if (todayAtt && todayAtt.checkOut) {
+      const coTime = new Date(todayAtt.checkOut).getTime();
+      if (dTime > coTime) return true;
+    }
+
+    const prevDateObj = new Date(dTime - 24 * 60 * 60 * 1000);
+    const prevIstDateStr = new Date(prevDateObj.getTime() + IST_OFFSET).toISOString().slice(0, 10);
+    const prevAtt = attendanceByDateMap.get(`${uid}_${prevIstDateStr}`);
+
+    if (prevAtt && prevAtt.checkOut && todayAtt && todayAtt.checkIn) {
+      const prevCoTime = new Date(prevAtt.checkOut).getTime();
+      const ciTime = new Date(todayAtt.checkIn).getTime();
+      if (dTime >= prevCoTime && dTime < ciTime) return true;
+    }
+
+    if (!todayAtt && statsMap[uid].checkOut && (!preset || preset === 'today')) {
+      const coTime = new Date(statsMap[uid].checkOut).getTime();
+      if (dTime > coTime) return true;
+    }
+
+    return false;
+  };
+
+  // Helper to check date range & shift boundaries
+  const isToday = (date, uid = null, checkShiftBoundary = false) => {
+    if (isAllTime) return true;
+    if (!date) return false;
+    const dTime = new Date(date).getTime();
+    if (isNaN(dTime)) return false;
+    if (dTime < startOfDay.getTime() || dTime > endOfDay.getTime()) return false;
+    if (checkShiftBoundary && uid && isAfterCheckout(date, uid)) {
+      return false;
+    }
+    return true;
+  };
+
+  // Helper to check shift boundary (Yesterday Checkout -> Today Checkout or Live Now)
+  const isActionInShiftWindow = (date, uid) => {
+    if (isAllTime) return true;
+    if (!date) return false;
+    const dTime = new Date(date).getTime();
+    if (isNaN(dTime)) return false;
+
+    const isCustomRange = fromDate && toDate && fromDate !== 'all' && toDate !== 'all' && preset !== 'today';
+    if (isCustomRange) {
+      return dTime >= startOfDay.getTime() && dTime <= endOfDay.getTime();
+    }
+
+    if (!uid || !statsMap[uid]) {
+      return dTime >= startOfDay.getTime() && dTime <= endOfDay.getTime();
+    }
+
+    let shiftStart = statsMap[uid].prevCheckOut
+      ? new Date(statsMap[uid].prevCheckOut).getTime()
+      : startOfDay.getTime() - 5 * 60 * 60 * 1000;
+
+    let shiftEnd = statsMap[uid].checkOut
+      ? new Date(statsMap[uid].checkOut).getTime()
+      : Date.now();
+
+    return dTime >= shiftStart && dTime <= shiftEnd;
+  };
+
   const isMonth = (date) => new Date(date) >= monthStart && new Date(date) <= monthEnd;
 
   const addOnHold = (uid, idStr) => {
@@ -518,37 +692,8 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   if (Array.isArray(allOnHoldOrders)) {
     for (const oh of allOnHoldOrders) {
       const uid = String(oh.assignedTo || oh.task_created_by || oh.created_by || '');
-      if (uid && statsMap[uid] && (isToday(oh.updatedAt) || isToday(oh.createdAt))) {
+      if (uid && statsMap[uid] && (isActionInShiftWindow(oh.updatedAt, uid) || isActionInShiftWindow(oh.createdAt, uid))) {
         addOnHold(uid, String(oh._id));
-      }
-    }
-  }
-
-  // Process Attendances
-  for (const a of allAttendances) {
-    const uid = String(a.user);
-    if (statsMap[uid]) {
-      let liveHours = 0;
-      if (a.checkIn && !a.checkOut) liveHours = (Date.now() - new Date(a.checkIn).getTime()) / (1000 * 60 * 60);
-      statsMap[uid].workingHours += (a.workingHours || 0) + liveHours;
-      if (a.checkIn) statsMap[uid].checkIn = a.checkIn;
-      if (a.checkOut) statsMap[uid].checkOut = a.checkOut;
-    }
-  }
-
-  // Finalize attendance workingPercentage and doctor appointments
-  for (const uid in statsMap) {
-    const expectedHours = 9; // Max 1 attendance per day per user assumed in loop
-    statsMap[uid].workingPercentage = Math.min(Math.round((statsMap[uid].workingHours / expectedHours) * 100), 100);
-    
-    if (statsMap[uid].user.role === 'doctor') {
-      const docRegex = new RegExp(statsMap[uid].user.name.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&'), 'i');
-      for (const app of allAppointments) {
-        if (docRegex.test(app.doctorName)) {
-          statsMap[uid].totalAppointments++;
-          if (app.status === 'completed') statsMap[uid].completedAppointments++;
-          if (app.status === 'cancelled') statsMap[uid].cancelledAppointments++;
-        }
       }
     }
   }
@@ -566,25 +711,23 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     
     if (assignUid && statsMap[assignUid] && ['sales', 'support'].includes(statsMap[assignUid].user.role)) {
       statsMap[assignUid].assignedVerifications++;
-      if (isToday(v.createdAt) || isToday(v.updatedAt)) {
+      if (isActionInShiftWindow(v.createdAt, assignUid)) {
         statsMap[assignUid].todayVerifications++;
-        statsMap[assignUid].verifiedCount++;
       }
       if (isMonth(v.createdAt)) statsMap[assignUid].monthVerifications++;
     }
     if (verifyUid && verifyUid !== assignUid && statsMap[verifyUid] && ['sales', 'support'].includes(statsMap[verifyUid].user.role)) {
-      if (isToday(v.createdAt) || isToday(v.updatedAt)) {
+      if (isActionInShiftWindow(v.createdAt, verifyUid)) {
         statsMap[verifyUid].todayVerifications++;
-        statsMap[verifyUid].verifiedCount++;
       }
     }
-    if (v.status === 'on_hold' && (isToday(v.updatedAt) || isToday(v.createdAt))) {
+    if (v.status === 'on_hold' && (isActionInShiftWindow(v.updatedAt, assignUid || verifyUid) || isActionInShiftWindow(v.createdAt, assignUid || verifyUid))) {
       addOnHold(assignUid || verifyUid, String(v._id));
     }
   }
 
   const addNoteStats = (uid, n, cat) => {
-    if (!statsMap[uid] || !isToday(n.createdAt)) return;
+    if (!statsMap[uid] || !isActionInShiftWindow(n.createdAt, uid)) return;
     const key = `${new Date(n.createdAt).getTime()}_${(n.text || '').trim()}`;
     if (!statsMap[uid]._noteSet.has(key)) {
       statsMap[uid]._noteSet.add(key);
@@ -595,23 +738,24 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     }
   };
 
-  // Process Cnp (Strict CRM rule: exclusively count updated Cnp documents)
+  // Process Cnp
   for (const c of allCnps) {
     const uid = String(c.assignedTo || '');
-    if (statsMap[uid] && ['sales', 'support'].includes(statsMap[uid].user.role) && (isToday(c.updatedAt) || isToday(c.createdAt))) {
-      statsMap[uid].todayCnp++;
+    if (statsMap[uid] && ['sales', 'support'].includes(statsMap[uid].user.role) && (isActionInShiftWindow(c.updatedAt, uid) || isActionInShiftWindow(c.createdAt, uid))) {
+      if (!statsMap[uid]._cnpSet) statsMap[uid]._cnpSet = new Set();
+      statsMap[uid]._cnpSet.add(String(c._id));
     }
     if (c.notes && c.notes.length) {
       for (const n of c.notes) addNoteStats(n.createdBy ? String(n.createdBy) : uid, n, 'cnp');
     }
   }
 
-  // Process CallAgain (Strict CRM rule: exclusively count updated CallAgain documents)
+  // Process CallAgain
   for (const ca of allCallAgains) {
     const uid = String(ca.assignedTo || '');
-    if (statsMap[uid] && ['sales', 'support'].includes(statsMap[uid].user.role) && (isToday(ca.updatedAt) || isToday(ca.createdAt))) {
-      if (ca.status !== 'interested') statsMap[uid].todayCallAgain++;
-      if (ca.status === 'interested') statsMap[uid].todayInterested++;
+    if (statsMap[uid] && ['sales', 'support'].includes(statsMap[uid].user.role) && (isActionInShiftWindow(ca.updatedAt, uid) || isActionInShiftWindow(ca.createdAt, uid))) {
+      if (!statsMap[uid]._caSet) statsMap[uid]._caSet = new Set();
+      statsMap[uid]._caSet.add(String(ca._id));
     }
     if (ca.notes && ca.notes.length) {
       for (const n of ca.notes) addNoteStats(n.createdBy ? String(n.createdBy) : uid, n, ca.status === 'interested' ? 'interested' : 'call_again');
@@ -622,28 +766,54 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   for (const t of allTasks) {
     const uid = String(t.assignedTo || '');
     if (statsMap[uid] && statsMap[uid].user.role !== 'doctor') {
-      if (t.status === 'pending') statsMap[uid].pendingTasks++;
-      if (statsMap[uid].user.role === 'sales') {
-        if (isAllTime || (t.createdAt && new Date(t.createdAt).getTime() >= startOfDay.getTime() && new Date(t.createdAt).getTime() <= endOfDay.getTime()) || (t.updatedAt && new Date(t.updatedAt).getTime() >= startOfDay.getTime() && new Date(t.updatedAt).getTime() <= endOfDay.getTime())) {
-          if (!statsMap[uid]._assignedLeadTaskSet) statsMap[uid]._assignedLeadTaskSet = new Set();
-          statsMap[uid]._assignedLeadTaskSet.add(t.lead ? `lead_${t.lead}` : `task_${t._id}`);
+      if (t.status === 'pending' || !t.status) {
+        statsMap[uid].pendingTasks++;
+      }
+      const isAssignedInRange = isActionInShiftWindow(t.createdAt, uid);
+      if (['sales', 'support', 'logistics', 'manager'].includes(statsMap[uid].user.role)) {
+        if (isAssignedInRange) {
+          statsMap[uid].tasksAssigned++;
+
+          // Categorize status for shift assigned tasks to guarantee 100% mathematical consistency
+          const st = String(t.status || 'pending').toLowerCase();
+          if (st === 'cnp') {
+            statsMap[uid].todayCnp++;
+          } else if (['call_again', 'follow_up'].includes(st)) {
+            statsMap[uid].todayCallAgain++;
+          } else if (['verified', 'completed', 'verification', 'ready_to_shipment', 'dispatch', 'dispatched'].includes(st)) {
+            statsMap[uid].verifiedCount++;
+          } else if (['not_interested', 'cancel_call', 'closed_lost', 'cancelled'].includes(st)) {
+            statsMap[uid].todayNotInterested++;
+          } else if (st === 'interested') {
+            statsMap[uid].todayInterested++;
+          }
+        }
+        if (isAfterCheckout(t.createdAt, uid)) {
+          statsMap[uid].afterCheckoutTasks++;
         }
       }
-      if (isToday(t.updatedAt) || isToday(t.createdAt)) {
-        if (t.status === 'interested') {
-          statsMap[uid].todayInterested++;
-        }
-        if (t.status === 'cancel_call') statsMap[uid].todayNotInterested++;
-        if (t.status === 'on_hold') {
-          addOnHold(uid, String(t._id));
-        }
+      if (t.status === 'on_hold' && (isActionInShiftWindow(t.updatedAt, uid) || isActionInShiftWindow(t.createdAt, uid))) {
+        addOnHold(uid, String(t._id));
       }
     }
     if (t.notes && t.notes.length) {
-      const isInterestedToday = t.status === 'interested' && isToday(t.updatedAt);
+      const isInterestedToday = t.status === 'interested' && isActionInShiftWindow(t.updatedAt, uid);
       for (const n of t.notes) {
         addNoteStats(n.createdBy ? String(n.createdBy) : uid, n, isInterestedToday ? 'interested' : 'other');
       }
+    }
+  }
+
+  // Combine Cnp and CallAgain action logs so all calls made in shift are accurately captured
+  for (const uid in statsMap) {
+    if (statsMap[uid]._cnpSet && statsMap[uid]._cnpSet.size > 0) {
+      statsMap[uid].todayCnp = Math.max(statsMap[uid].todayCnp, statsMap[uid]._cnpSet.size);
+    }
+    if (statsMap[uid]._caSet && statsMap[uid]._caSet.size > 0) {
+      statsMap[uid].todayCallAgain = Math.max(statsMap[uid].todayCallAgain, statsMap[uid]._caSet.size);
+    }
+    if (statsMap[uid].todayVerifications > 0) {
+      statsMap[uid].verifiedCount = Math.max(statsMap[uid].verifiedCount, statsMap[uid].todayVerifications);
     }
   }
 
@@ -652,15 +822,14 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     const uid = String(l.assignedTo || '');
     if (statsMap[uid] && statsMap[uid].user.role !== 'doctor') {
       if (statsMap[uid].user.role === 'sales') {
-        if (isAllTime || (l.createdAt && new Date(l.createdAt).getTime() >= startOfDay.getTime() && new Date(l.createdAt).getTime() <= endOfDay.getTime()) || (l.updatedAt && new Date(l.updatedAt).getTime() >= startOfDay.getTime() && new Date(l.updatedAt).getTime() <= endOfDay.getTime())) {
-          if (!statsMap[uid]._assignedLeadTaskSet) statsMap[uid]._assignedLeadTaskSet = new Set();
-          statsMap[uid]._assignedLeadTaskSet.add(`lead_${l._id}`);
-          if (isToday(l.createdAt)) {
-            statsMap[uid].leadsAdded++;
-          }
+        if (isAllTime || isToday(l.createdAt, uid)) {
+          statsMap[uid].leadsAdded++;
+        }
+        if (isAfterCheckout(l.createdAt, uid)) {
+          statsMap[uid].afterCheckoutLeads++;
         }
       }
-      if (isToday(l.updatedAt) || isToday(l.createdAt)) {
+      if (isToday(l.updatedAt, uid) || isToday(l.createdAt, uid)) {
         if (l.status === 'closed_lost') statsMap[uid].todayClosedLost++;
         if (l.status === 'on_hold') {
           addOnHold(uid, String(l._id));
@@ -701,6 +870,10 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     const verifiedUser = o.verified_by ? String(o.verified_by._id || o.verified_by) : null;
     const isOldOrder = Boolean(o.source_order_id);
 
+    // Phone-based matching for unlinked orders
+    const oPhone = String(o.billing_phone || o.shipping_phone || '').replace(/\D/g, '').slice(-10);
+    const phoneUser = (oPhone.length === 10 && phoneToStaffMap.has(oPhone)) ? phoneToStaffMap.get(oPhone) : null;
+
     if (isToday(o.createdAt)) {
       const orderKey = getCleanIdStr(o._id);
       const leadKey = getCleanIdStr(o.lead_id);
@@ -711,17 +884,25 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
         if (leadKey) globalBookedSet.add(leadKey);
 
         let uid = null;
+        const candList = [
+          leadUser, 
+          phoneUser,
+          verifiedUser, 
+          createdUser, 
+          taskUser, 
+          o.support_staff ? String(o.support_staff._id || o.support_staff) : null
+        ].filter(Boolean);
+
         if (isOldOrder) {
-          // Re-order (2nd+ kit): Attribute to Support who re-verified it
-          const supportCandidates = [verifiedUser, createdUser, taskUser, leadUser].filter(Boolean);
-          for (const cand of supportCandidates) {
+          // Re-order (2nd+ kit): Attribute to Support who re-verified it, then Sales
+          for (const cand of candList) {
             if (statsMap[cand] && statsMap[cand].user.role === 'support') {
               uid = cand;
               break;
             }
           }
           if (!uid) {
-            for (const cand of [leadUser, taskUser, createdUser, verifiedUser].filter(Boolean)) {
+            for (const cand of candList) {
               if (statsMap[cand] && statsMap[cand].user.role === 'sales') {
                 uid = cand;
                 break;
@@ -729,16 +910,15 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
             }
           }
         } else {
-          // New order (1st kit): Attribute to Sales who generated the lead
-          const salesCandidates = [taskUser, leadUser, createdUser, verifiedUser].filter(Boolean);
-          for (const cand of salesCandidates) {
+          // New order (1st kit): Attribute to Sales who generated/owns the lead, then Support
+          for (const cand of candList) {
             if (statsMap[cand] && statsMap[cand].user.role === 'sales') {
               uid = cand;
               break;
             }
           }
           if (!uid) {
-            for (const cand of [verifiedUser, createdUser, taskUser].filter(Boolean)) {
+            for (const cand of candList) {
               if (statsMap[cand] && statsMap[cand].user.role === 'support') {
                 uid = cand;
                 break;
@@ -749,12 +929,23 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
 
         if (uid && statsMap[uid] && ['sales', 'support'].includes(statsMap[uid].user.role)) {
           statsMap[uid].readyToShipmentCount++;
+          if (!statsMap[uid].bookedOrders) statsMap[uid].bookedOrders = [];
+          statsMap[uid].bookedOrders.push({
+            _id: o._id,
+            order_id: o.order_id || o.awb_code || (o._id ? String(o._id).slice(-6) : ''),
+            customer_name: o.billing_customer_name || o.shipping_customer_name || (o.lead_id && typeof o.lead_id === 'object' ? o.lead_id.name : null) || 'Customer',
+            phone: o.billing_phone || o.shipping_phone || (o.lead_id && typeof o.lead_id === 'object' ? o.lead_id.phone : null) || '',
+            sub_total: o.sub_total || o.total || o.price || 0,
+            platform: o.platform || 'shipmaxx',
+            status: o.status || 'NEW',
+            createdAt: o.createdAt || o.updatedAt || new Date()
+          });
         }
       }
     }
 
     if (isMonth(o.createdAt)) {
-      const candidates = [taskUser, leadUser, createdUser, verifiedUser].filter(Boolean);
+      const candidates = [leadUser, verifiedUser, createdUser, taskUser].filter(Boolean);
       let dispUid = null;
       for (const cand of candidates) {
         if (statsMap[cand] && ['sales', 'support'].includes(statsMap[cand].user.role)) {
@@ -771,37 +962,6 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   for (const o of allOrdersSR) processOrder(o);
   for (const o of allOrdersSM) processOrder(o);
 
-  // Process Tasks status for any un-ordered ready_to_shipment items
-  for (const t of allTasks) {
-    const uid = String(t.assignedTo || '');
-    if (statsMap[uid] && statsMap[uid].user.role === 'sales') {
-      if (isToday(t.createdAt) || isToday(t.updatedAt)) {
-        if (['ready_to_shipment', 'dispatch', 'dispatched'].includes(t.status)) {
-          const tKey = getCleanIdStr(t.lead || t._id);
-          if (tKey && !globalBookedSet.has(tKey)) {
-            globalBookedSet.add(tKey);
-            statsMap[uid].readyToShipmentCount++;
-          }
-        }
-      }
-    }
-  }
-
-  // Process Leads status for any un-ordered ready_to_shipment items
-  for (const l of allLeadsData) {
-    const uid = String(l.assignedTo || '');
-    if (statsMap[uid] && statsMap[uid].user.role === 'sales') {
-      if (isToday(l.createdAt) || isToday(l.updatedAt)) {
-        if (['ready_to_shipment', 'dispatch', 'dispatched'].includes(l.status)) {
-          const lKey = getCleanIdStr(l._id);
-          if (lKey && !globalBookedSet.has(lKey)) {
-            globalBookedSet.add(lKey);
-            statsMap[uid].readyToShipmentCount++;
-          }
-        }
-      }
-    }
-  }
 
   const ofdRegex = /^(out_for_delivery|ofd|undelivered|undelivered_attempt_failure|ndr)$/i;
   const rtoRegex = /^(rto|rto_verification|rto_delivered|rto_in_transit|rra)$/i;
@@ -960,7 +1120,6 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
 
   for (const k in statsMap) {
     if (statsMap[k]._assignedLeadTaskSet) {
-      statsMap[k].tasksAssigned = statsMap[k]._assignedLeadTaskSet.size;
       delete statsMap[k]._assignedLeadTaskSet;
     }
     delete statsMap[k]._intSet;
@@ -1265,6 +1424,14 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
 
   const { getKPIs: getOpsMonthKPIs } = await import('../ops-dashboard/opsDashboard.service.js');
 
+  const fetchOrderList = (model, filter) => {
+    let q = model.find(filter).select('_id lead_id awb_code order_id status created_by createdAt status_updated_at delivered_at sub_total total');
+    if (needsLeadFilter) {
+      q = q.populate('lead_id', 'assignedTo department status pending_reorder_source');
+    }
+    return q.lean();
+  };
+
   const [orderBreakdownSR, deliveredBreakdownSR, blSR, orderBreakdownSM, deliveredBreakdownSM, blSM, opsMonthData, smxInTransitCount, smxOfdCount] = await Promise.all([
     Order.aggregate([
       { $match: allOrderFilter },
@@ -1272,16 +1439,16 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
       { $lookup: { from: 'leads', localField: 'lead_id', foreignField: '_id', as: 'leadDoc' } },
       { $group: { _id: { $cond: [ { $or: [ { $ifNull: ['$source_order_id', false] }, { $eq: [{ $arrayElemAt: ['$leadDoc.status', 0] }, 'old'] } ] }, 'old', 'new' ] }, count: { $sum: 1 } } }
     ]),
-    Order.find(deliveredFilter).select('_id lead_id awb_code order_id status created_by createdAt status_updated_at delivered_at sub_total total').populate('lead_id', 'assignedTo department status pending_reorder_source').lean(),
-    Order.find(backlogFilter).select('_id lead_id awb_code order_id status created_by createdAt status_updated_at delivered_at sub_total total').populate('lead_id', 'assignedTo department status pending_reorder_source').lean(),
+    fetchOrderList(Order, deliveredFilter),
+    fetchOrderList(Order, backlogFilter),
     ShipmaxxOrder.aggregate([
       { $match: allOrderFilterSM },
       ...leadMatchStage,
       { $lookup: { from: 'leads', localField: 'lead_id', foreignField: '_id', as: 'leadDoc' } },
       { $group: { _id: { $cond: [ { $or: [ { $ifNull: ['$source_order_id', false] }, { $eq: [{ $arrayElemAt: ['$leadDoc.status', 0] }, 'old'] } ] }, 'old', 'new' ] }, count: { $sum: 1 } } }
     ]),
-    ShipmaxxOrder.find(deliveredFilterSM).select('_id lead_id awb_code order_id status created_by createdAt status_updated_at delivered_at sub_total total').populate('lead_id', 'assignedTo department status pending_reorder_source').lean(),
-    ShipmaxxOrder.find(backlogFilter).select('_id lead_id awb_code order_id status created_by createdAt status_updated_at delivered_at sub_total total').populate('lead_id', 'assignedTo department status pending_reorder_source').lean(),
+    fetchOrderList(ShipmaxxOrder, deliveredFilterSM),
+    fetchOrderList(ShipmaxxOrder, backlogFilter),
     getOpsMonthKPIs({ preset: 'month', staffId: (userRole === 'sales' && userId) ? String(userId) : undefined }).catch(() => null),
     ShipmaxxOrder.countDocuments({ status: { $in: ['IN_TRANSIT', 'IN TRANSIT', 'INT', 'in_transit'] } }),
     ShipmaxxOrder.countDocuments({ status: { $in: ['OUT_FOR_DELIVERY', 'OUT FOR DELIVERY', 'OFD', 'out_for_delivery'] } })
@@ -1344,11 +1511,12 @@ export const getDashboardStats = async (userRole, userId, targetDate, from, to, 
   let oldDeliveredCount = 0;
   
   if (allDeliveredOrders.length > 0) {
-    const dLeadIds = allDeliveredOrders.map(o => o.lead_id ? (o.lead_id._id ? o.lead_id._id : o.lead_id) : null).filter(Boolean);
+    const rawLeadIds = allDeliveredOrders.map(o => o.lead_id ? (o.lead_id._id ? o.lead_id._id : o.lead_id) : null).filter(Boolean);
+    const dLeadIds = Array.from(new Set(rawLeadIds.map(String)));
     const [allPastOrders, allPastSmOrders, oldLeads] = await Promise.all([
-      Order.find({ lead_id: { $in: dLeadIds } }).select('_id lead_id createdAt').lean(),
-      ShipmaxxOrder.find({ lead_id: { $in: dLeadIds } }).select('_id lead_id createdAt').lean(),
-      Lead.find({ _id: { $in: dLeadIds }, $or: [{ status: 'old' }, { pending_reorder_source: { $exists: true, $ne: null } }] }).distinct('_id')
+      dLeadIds.length ? Order.find({ lead_id: { $in: dLeadIds } }).select('_id lead_id createdAt').lean() : [],
+      dLeadIds.length ? ShipmaxxOrder.find({ lead_id: { $in: dLeadIds } }).select('_id lead_id createdAt').lean() : [],
+      dLeadIds.length ? Lead.find({ _id: { $in: dLeadIds }, $or: [{ status: 'old' }, { pending_reorder_source: { $exists: true, $ne: null } }] }).distinct('_id') : []
     ]);
     const oldLeadsSet = new Set(oldLeads.map(id => String(id)));
     const combinedPast = [...allPastOrders, ...allPastSmOrders].sort((a,b) => new Date(a.createdAt) - new Date(b.createdAt));
@@ -2145,5 +2313,329 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
   const totalRto = staffList.reduce((s, x) => s + x.rto, 0) + unassignedRto;
 
   return { staff: staffList, unassignedDelivered, unassignedRto, totalDelivered, totalRto };
+};
+
+export const mapStandardStatus = (rawStatus) => {
+  if (!rawStatus) return 'pending';
+  const s = String(rawStatus).toLowerCase();
+  if (['cnp'].includes(s)) return 'cnp';
+  if (['call_again', 'follow_up', 'overdue'].includes(s)) return 'call_again';
+  if (['verified', 'completed', 'verification', 'ready_to_shipment', 'dispatch', 'dispatched'].includes(s)) return 'verified';
+  if (['not_interested', 'cancel_call', 'closed_lost', 'cancelled'].includes(s)) return 'not_interested';
+  return 'pending';
+};
+
+export const getEmployeePerformanceMatrix = async ({ viewMode = 'daily', month, year, mode = 'assigned', department, from, to }) => {
+  const User = (await import('../user/user.model.js')).default;
+  const Task = (await import('../task/task.model.js')).default;
+
+  const now = new Date();
+  const reqMonth = month !== undefined && month !== null && month !== '' ? Number(month) : now.getMonth();
+  const reqYear = year !== undefined && year !== null && year !== '' ? Number(year) : now.getFullYear();
+
+  const IST_OFFSET = 5.5 * 60 * 60 * 1000;
+
+  const staffQuery = { role: { $in: ['sales', 'support'] }, isDeleted: false };
+  if (department) staffQuery.department = department;
+  const staffList = await User.find(staffQuery).select('_id name role department').sort({ name: 1 }).lean();
+
+  let startDate, endDate;
+  if (from && to && viewMode !== 'monthly' && from !== 'all' && to !== 'all') {
+    startDate = new Date(`${from}T00:00:00.000+05:30`);
+    endDate = new Date(`${to}T23:59:59.999+05:30`);
+  } else if (viewMode === 'monthly') {
+    startDate = new Date(Date.UTC(reqYear, reqMonth - 5, 1) - IST_OFFSET);
+    endDate = new Date(Date.UTC(reqYear, reqMonth + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
+  } else {
+    startDate = new Date(Date.UTC(reqYear, reqMonth, 1) - IST_OFFSET);
+    endDate = new Date(Date.UTC(reqYear, reqMonth + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
+  }
+
+  const taskQuery = {
+    isDeleted: false,
+    assignedTo: { $in: staffList.map(s => s._id) }
+  };
+  if (department) taskQuery.department = department;
+
+  if (mode === 'activity') {
+    taskQuery.status = { $ne: 'pending' };
+    taskQuery.updatedAt = { $gte: startDate, $lte: endDate };
+  } else {
+    taskQuery.createdAt = { $gte: startDate, $lte: endDate };
+  }
+
+  const tasks = await Task.find(taskQuery).select('_id assignedTo status createdAt updatedAt last_action_at next_call_at cnp_attempts').lean();
+
+  const columns = [];
+  if (viewMode === 'daily') {
+    const daysInMonth = new Date(reqYear, reqMonth + 1, 0).getDate();
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dt = new Date(reqYear, reqMonth, d);
+      const dayStr = `${reqYear}-${String(reqMonth + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      const weekday = dt.toLocaleDateString('en-US', { weekday: 'short' });
+      columns.push({ key: dayStr, label: `${d}`, sublabel: weekday, date: dayStr });
+    }
+  } else if (viewMode === 'weekly') {
+    let current = new Date(startDate.getTime() + IST_OFFSET);
+    let weekIndex = 1;
+    while (current <= new Date(endDate.getTime() + IST_OFFSET)) {
+      const wStart = new Date(current);
+      const wEnd = new Date(current);
+      wEnd.setDate(wEnd.getDate() + 6);
+      const startStr = wStart.toISOString().slice(0, 10);
+      const endStr = wEnd.toISOString().slice(0, 10);
+      columns.push({
+        key: `W${weekIndex}_${startStr}`,
+        label: `Week ${weekIndex}`,
+        sublabel: `${wStart.getDate()}/${wStart.getMonth()+1} - ${wEnd.getDate()}/${wEnd.getMonth()+1}`,
+        startStr,
+        endStr
+      });
+      weekIndex++;
+      current.setDate(current.getDate() + 7);
+    }
+  } else if (viewMode === 'monthly') {
+    for (let m = 5; m >= 0; m--) {
+      const dt = new Date(reqYear, reqMonth - m, 1);
+      const mKey = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}`;
+      const mLabel = dt.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
+      columns.push({ key: mKey, label: mLabel, sublabel: '' });
+    }
+  }
+
+  const matrixMap = {};
+  staffList.forEach(s => {
+    const sId = String(s._id);
+    matrixMap[sId] = {
+      staff: s,
+      cells: {},
+      total: 0,
+      statusCounts: { pending: 0, cnp: 0, call_again: 0, verified: 0, not_interested: 0 }
+    };
+    columns.forEach(col => {
+      matrixMap[sId].cells[col.key] = {
+        count: 0,
+        pending: 0, cnp: 0, call_again: 0, verified: 0, not_interested: 0
+      };
+    });
+  });
+
+  tasks.forEach(t => {
+    const sId = String(t.assignedTo);
+    if (!matrixMap[sId]) return;
+
+    const targetDateObj = mode === 'activity' ? new Date(t.last_action_at || t.updatedAt) : new Date(t.createdAt);
+    const istDate = new Date(targetDateObj.getTime() + IST_OFFSET);
+    const dateStr = istDate.toISOString().slice(0, 10);
+    const stdStatus = mapStandardStatus(t.status);
+
+    let colKey = null;
+    if (viewMode === 'daily') {
+      colKey = dateStr;
+    } else if (viewMode === 'weekly') {
+      const matchCol = columns.find(c => dateStr >= c.startStr && dateStr <= c.endStr);
+      if (matchCol) colKey = matchCol.key;
+    } else if (viewMode === 'monthly') {
+      colKey = `${istDate.getFullYear()}-${String(istDate.getMonth() + 1).padStart(2, '0')}`;
+    }
+
+    if (colKey && matrixMap[sId].cells[colKey]) {
+      matrixMap[sId].cells[colKey].count++;
+      matrixMap[sId].cells[colKey][stdStatus]++;
+      matrixMap[sId].total++;
+      matrixMap[sId].statusCounts[stdStatus]++;
+    }
+  });
+
+  return { columns, staffMatrix: Object.values(matrixMap) };
+};
+
+export const getStaffDetailKPIs = async ({ staffId, month, year, from, to, department }) => {
+  const User = (await import('../user/user.model.js')).default;
+  const Task = (await import('../task/task.model.js')).default;
+
+  const now = new Date();
+  const staff = await User.findById(staffId).select('_id name role department').lean();
+  if (!staff) throw new Error('Staff user not found');
+
+  const IST_OFFSET = 5.5 * 60 * 60 * 1000;
+  let startDate = from && from !== 'all' ? new Date(`${from}T00:00:00.000+05:30`) : new Date(Date.UTC(now.getFullYear(), now.getMonth(), 1) - IST_OFFSET);
+  let endDate = to && to !== 'all' ? new Date(`${to}T23:59:59.999+05:30`) : new Date(Date.UTC(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
+
+  const query = { assignedTo: staffId, isDeleted: false };
+  if (department) query.department = department;
+
+  const allTasks = await Task.find(query).lean();
+
+  let pending0to1 = 0, pending2to3 = 0, pending3plus = 0;
+  let overdueCount = 0, cnpReviewCount = 0;
+  const dailyAssignedMap = {}, dailyCompletedMap = {};
+  const activeDaysSet = new Set();
+
+  allTasks.forEach(t => {
+    const stdStatus = mapStandardStatus(t.status);
+    const createdAt = new Date(t.createdAt);
+    const createdDateStr = new Date(createdAt.getTime() + IST_OFFSET).toISOString().slice(0, 10);
+    
+    if (stdStatus === 'pending') {
+      const ageDays = (now.getTime() - createdAt.getTime()) / (1000 * 60 * 60 * 24);
+      if (ageDays <= 1) pending0to1++;
+      else if (ageDays <= 3) pending2to3++;
+      else pending3plus++;
+    }
+
+    if (stdStatus === 'call_again' && t.next_call_at && new Date(t.next_call_at) < now) {
+      overdueCount++;
+    }
+
+    if ((t.cnp_attempts || 0) >= 3 || (stdStatus === 'cnp' && (t.notes || []).length >= 3)) {
+      cnpReviewCount++;
+    }
+
+    if (createdAt >= startDate && createdAt <= endDate) {
+      dailyAssignedMap[createdDateStr] = (dailyAssignedMap[createdDateStr] || 0) + 1;
+    }
+    if (t.last_action_at || (stdStatus !== 'pending' && t.updatedAt)) {
+      const actionDate = new Date(t.last_action_at || t.updatedAt);
+      const actionDateStr = new Date(actionDate.getTime() + IST_OFFSET).toISOString().slice(0, 10);
+      if (actionDate >= startDate && actionDate <= endDate) {
+        dailyCompletedMap[actionDateStr] = (dailyCompletedMap[actionDateStr] || 0) + 1;
+        activeDaysSet.add(actionDateStr);
+      }
+    }
+  });
+
+  const totalDays = Math.max(1, Math.ceil((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24))) || 30;
+  const daysWorked = activeDaysSet.size;
+  const zeroActionDays = Math.max(0, totalDays - daysWorked);
+
+  return {
+    staff,
+    aging: { pending0to1, pending2to3, pending3plus },
+    overdueCount,
+    cnpReviewCount,
+    dailyTrend: Object.keys(dailyAssignedMap).map(d => ({ date: d, assigned: dailyAssignedMap[d] || 0, completed: dailyCompletedMap[d] || 0 })),
+    daysWorked,
+    zeroActionDays
+  };
+};
+
+export const getTaskDrilldown = async ({ staffId, status, bucket, date, from, to, department }) => {
+  const Task = (await import('../task/task.model.js')).default;
+  const Verification = (await import('../verification/verification.model.js')).default;
+
+  const query = { isDeleted: false };
+  if (staffId) query.assignedTo = staffId;
+  if (department) query.department = department;
+
+  if (status) {
+    const rawStatuses = [];
+    if (status === 'pending') rawStatuses.push('pending', 'new', 'old', 'scheduled', 'task');
+    else if (status === 'cnp') rawStatuses.push('cnp');
+    else if (status === 'call_again') rawStatuses.push('call_again', 'follow_up', 'overdue');
+    else if (status === 'verified') rawStatuses.push('verified', 'completed', 'verification', 'ready_to_shipment', 'dispatch', 'dispatched');
+    else if (status === 'not_interested') rawStatuses.push('not_interested', 'cancel_call', 'closed_lost', 'cancelled');
+
+    if (rawStatuses.length > 0) query.status = { $in: rawStatuses };
+  }
+
+  let dStart, dEnd;
+  if (date) {
+    dStart = new Date(`${date}T00:00:00.000+05:30`);
+    dEnd = new Date(`${date}T23:59:59.999+05:30`);
+    query.createdAt = { $gte: dStart, $lte: dEnd };
+  } else if (from && to && from !== 'all' && to !== 'all') {
+    dStart = new Date(`${from}T00:00:00.000+05:30`);
+    dEnd = new Date(`${to}T23:59:59.999+05:30`);
+    query.createdAt = { $gte: dStart, $lte: dEnd };
+  }
+
+  if (status === 'verified') {
+    const verQuery = { isDeleted: { $ne: true } };
+    if (staffId) verQuery.assignedTo = staffId;
+    if (department) verQuery.department = department;
+    if (dStart && dEnd) {
+      verQuery.createdAt = { $gte: dStart, $lte: dEnd };
+    }
+
+    const [verifications, tasks] = await Promise.all([
+      Verification.find(verQuery)
+        .populate('lead', 'name phone city status')
+        .populate('assignedTo', 'name role')
+        .sort({ createdAt: -1 })
+        .limit(200)
+        .lean(),
+      Task.find(query)
+        .populate('lead', 'name phone city status')
+        .populate('assignedTo', 'name role')
+        .sort({ createdAt: -1 })
+        .limit(200)
+        .lean()
+    ]);
+
+    const items = [];
+    const seenLeadIds = new Set();
+
+    verifications.forEach(v => {
+      const lId = String(v.lead?._id || v.lead || v._id);
+      seenLeadIds.add(lId);
+      items.push({
+        _id: v._id,
+        title: v.title || 'Verification Order',
+        leadName: v.lead?.name || 'Customer',
+        phone: v.lead?.phone || 'N/A',
+        status: mapStandardStatus(v.status),
+        rawStatus: v.status,
+        staffName: v.assignedTo?.name || 'Unassigned',
+        assignedDate: v.createdAt,
+        lastActionAt: v.updatedAt || v.createdAt,
+        nextCallAt: null,
+        cnpAttempts: 0
+      });
+    });
+
+    tasks.forEach(t => {
+      const lId = String(t.lead?._id || t.lead || t._id);
+      if (!seenLeadIds.has(lId)) {
+        seenLeadIds.add(lId);
+        items.push({
+          _id: t._id,
+          title: t.title || 'Follow-up Task',
+          leadName: t.lead?.name || 'Unknown Lead',
+          phone: t.phone || t.lead?.phone || 'N/A',
+          status: mapStandardStatus(t.status),
+          rawStatus: t.status,
+          staffName: t.assignedTo?.name || 'Unassigned',
+          assignedDate: t.createdAt,
+          lastActionAt: t.last_action_at || t.updatedAt,
+          nextCallAt: t.next_call_at || null,
+          cnpAttempts: t.cnp_attempts || 0
+        });
+      }
+    });
+
+    return items;
+  }
+
+  const tasks = await Task.find(query)
+    .populate('lead', 'name phone city status')
+    .populate('assignedTo', 'name role')
+    .sort({ createdAt: -1 })
+    .limit(200)
+    .lean();
+
+  return tasks.map(t => ({
+    _id: t._id,
+    title: t.title || 'Follow-up Task',
+    leadName: t.lead?.name || 'Unknown Lead',
+    phone: t.phone || t.lead?.phone || 'N/A',
+    status: mapStandardStatus(t.status),
+    rawStatus: t.status,
+    staffName: t.assignedTo?.name || 'Unassigned',
+    assignedDate: t.createdAt,
+    lastActionAt: t.last_action_at || t.updatedAt,
+    nextCallAt: t.next_call_at || null,
+    cnpAttempts: t.cnp_attempts || 0
+  }));
 };
 

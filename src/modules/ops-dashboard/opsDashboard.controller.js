@@ -38,6 +38,24 @@ export const getLeaderboard = catchAsync(async (req, res) => res.json(new ApiRes
 export const getShipments   = catchAsync(async (req, res) => res.json(new ApiResponse(200, await svc.getShipments(extractParams(req)),   'Shipments fetched')));
 export const getAlerts      = catchAsync(async (req, res) => res.json(new ApiResponse(200, await svc.getAlerts(extractParams(req)),      'Alerts fetched')));
 
+const staffBreakdownCache = new Map();
+const SB_CACHE_TTL = 60000; // 60 seconds memory cache
+
+export const getStaffBreakdown = catchAsync(async (req, res) => {
+  const params = extractParams(req);
+  const cacheKey = `sb_${params.preset}_${params.from}_${params.to}_${params.staffId || 'all'}`;
+  const isRefresh = req.query.refresh === 'true' || req.query.refresh === true;
+  if (!isRefresh) {
+    const cached = staffBreakdownCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp < SB_CACHE_TTL)) {
+      return res.json(new ApiResponse(200, cached.data, 'Staff breakdown fetched'));
+    }
+  }
+  const data = await svc.getStaffBreakdown(params);
+  staffBreakdownCache.set(cacheKey, { data, timestamp: Date.now() });
+  res.json(new ApiResponse(200, data, 'Staff breakdown fetched'));
+});
+
 export const submitRtoVerification = catchAsync(async (req, res) => {
   const result = await svc.submitRtoVerification({ ...req.body, userId: req.user?._id });
   res.json(new ApiResponse(200, result, 'RTO verification saved successfully'));

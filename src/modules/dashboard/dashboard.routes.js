@@ -9,15 +9,15 @@ import { cache } from '../../utils/cache.js';
 const router = express.Router();
 
 router.get('/debug', dashboardController.debugDeliveries);
-router.get('/stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(300), dashboardController.getStats);
-router.get('/revenue-chart', auth('admin', 'manager'), departmentFilter, cacheMiddleware(300), dashboardController.getRevenueChart);
-router.get('/staff-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(300), dashboardController.getStaffStats);
+router.get('/stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getStats);
+router.get('/revenue-chart', auth('admin', 'manager'), departmentFilter, cacheMiddleware(120), dashboardController.getRevenueChart);
+router.get('/staff-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getStaffStats);
 router.post('/staff-target', auth('admin', 'manager', 'sales', 'support', 'logistics'), dashboardController.setStaffTarget);
-router.get('/target-history', auth('admin', 'manager', 'sales', 'support', 'logistics'), cacheMiddleware(300), dashboardController.getTargetHistory);
-router.get('/staff-verifications', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(300), dashboardController.getStaffVerifications);
-router.get('/staff-today-lists', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(300), dashboardController.getStaffTodayLists);
-router.get('/staff-monthly-chart', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(300), dashboardController.getStaffMonthlyChart);
-router.get('/all-staff-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(300), dashboardController.getAllStaffStats);
+router.get('/target-history', auth('admin', 'manager', 'sales', 'support', 'logistics'), cacheMiddleware(60), dashboardController.getTargetHistory);
+router.get('/staff-verifications', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getStaffVerifications);
+router.get('/staff-today-lists', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getStaffTodayLists);
+router.get('/staff-monthly-chart', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(120), dashboardController.getStaffMonthlyChart);
+router.get('/all-staff-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getAllStaffStats);
 router.get('/staff-commission', auth('admin', 'manager', 'sales', 'support', 'logistics'), cacheMiddleware(300), dashboardController.getStaffCommission);
 router.get('/all-staff-commissions', auth('admin', 'manager'), cacheMiddleware(300), dashboardController.getAllStaffCommissions);
 router.post('/save-commission-override', auth('admin', 'manager'), dashboardController.saveCommissionOverride);
@@ -25,6 +25,9 @@ router.get('/unassigned-orders', auth('admin', 'manager'), cacheMiddleware(300),
 router.get('/staff-delivery-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), cacheMiddleware(300), dashboardController.getStaffDeliveryStats);
 router.get('/my-delivery-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), cacheMiddleware(300), dashboardController.getMyDeliveryStats);
 router.post('/assign-order', auth('admin', 'manager'), dashboardController.assignOrder);
+router.get('/employee-performance-matrix', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getEmployeePerformanceMatrix);
+router.get('/staff-detail-kpis', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getStaffDetailKPIs);
+router.get('/task-drilldown', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getTaskDrilldown);
 
 router.get('/cache-stats', auth('admin', 'manager'), (req, res) => {
   const memory = process.memoryUsage();

@@ -7,21 +7,24 @@ const router = express.Router();
 
 // Any authenticated user can read ops-dashboard data
 const opsAuth = auth();
-const cache = cacheMiddleware(120); // 2 minute cache for instant loads
+// Real-time operational endpoints — no stale caching so changes reflect immediately
+router.get('/kpis',        opsAuth, c.getKPIs);
+router.get('/funnel',      opsAuth, c.getFunnel);
+router.get('/shipments',   opsAuth, c.getShipments);
+router.get('/trend',       opsAuth, c.getTrend);
+router.get('/alerts',      opsAuth, c.getAlerts);
+router.get('/staff-breakdown', opsAuth, cacheMiddleware(60), c.getStaffBreakdown);
 
-router.get('/kpis',        opsAuth, cache, c.getKPIs);
-router.get('/trend',       opsAuth, cache, c.getTrend);
-router.get('/funnel',      opsAuth, cache, c.getFunnel);
-router.get('/rto-reasons', opsAuth, cache, c.getRtoReasons);
-router.get('/aging',       opsAuth, cache, c.getAging);
-router.get('/leaderboard', opsAuth, cache, c.getLeaderboard);
-router.get('/shipments',   opsAuth, cache, c.getShipments);
-router.get('/alerts',      opsAuth, cache, c.getAlerts);
+// Analytical summaries
+const cacheShort = cacheMiddleware(15);
+router.get('/rto-reasons', opsAuth, cacheShort, c.getRtoReasons);
+router.get('/aging',       opsAuth, cacheShort, c.getAging);
+router.get('/leaderboard', opsAuth, cacheShort, c.getLeaderboard);
 
 router.post('/rto-verification', opsAuth, c.submitRtoVerification);
 router.post('/send-interakt-messages', opsAuth, c.sendInteraktMessages);
 
 router.post('/invoice-history', opsAuth, c.createInvoiceHistory);
-router.get('/invoice-history',  opsAuth, cache, c.getInvoiceHistory);
+router.get('/invoice-history',  opsAuth, cacheShort, c.getInvoiceHistory);
 
 export default router;

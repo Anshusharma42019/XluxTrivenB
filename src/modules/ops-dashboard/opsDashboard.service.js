@@ -1,9 +1,13 @@
 import mongoose from 'mongoose';
+import User from '../user/user.model.js';
+import { Lead } from '../lead/lead.model.js';
+import Task from '../task/task.model.js';
 import { Order } from '../shiprocket/models/order.model.js';
 import { ShipmaxxOrder } from '../shipmaxx/models/shipmaxxOrder.model.js';
 import { Return } from '../shiprocket/models/return.model.js';
 import { ShipmaxxRtoOrder } from '../shipmaxx/models/shipmaxxRtoOrder.model.js';
 import Verification from '../verification/verification.model.js';
+import ReadyToShipment from '../readytoshipment/readytoshipment.model.js';
 import { NdrNote } from '../shiprocket/models/ndrNote.model.js';
 import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
 import { InvoiceHistory } from './invoiceHistory.model.js';
@@ -22,7 +26,13 @@ function buildDateRange(preset, from, to) {
     const yest = new Date(istNow.getTime() - 86400000);
     return { start: new Date(`${yest.toISOString().slice(0, 10)}T00:00:00.000+05:30`), end: new Date(`${yest.toISOString().slice(0, 10)}T23:59:59.999+05:30`) };
   }
-  if (preset === 'last7' || preset === 'weekly') return { start: new Date(now.getTime() - 7 * 86400000), end: now };
+  if (preset === 'last7' || preset === 'weekly') {
+    const d7 = new Date(istNow.getTime() - 6 * 86400000);
+    return {
+      start: new Date(`${d7.toISOString().slice(0, 10)}T00:00:00.000+05:30`),
+      end: new Date(`${istNow.toISOString().slice(0, 10)}T23:59:59.999+05:30`)
+    };
+  }
   if (preset === 'month' || preset === 'mtd')    return { start: new Date(Date.UTC(y, m, 1) - IST), end: now };
   if (preset === 'last_month') {
     const startLast = new Date(Date.UTC(y, m - 1, 1) - IST);
@@ -49,6 +59,19 @@ function buildPrevRange(start, end) {
 async function getStaffScope(staffId) {
   if (!staffId) return null; // null = no scope (admin/manager)
   const id = new mongoose.Types.ObjectId(staffId);
+  const user = await mongoose.model('User').findById(id).select('role').lean();
+  const isSales = user?.role === 'sales';
+
+  if (isSales) {
+    const leads = await mongoose.model('Lead').find({ assignedTo: id }, { _id: 1 }).lean();
+    const verifications = await mongoose.model('Verification').find({ $or: [{ verifiedBy: id }, { assignedTo: id }] }, { _id: 1 }).lean();
+    return {
+      isSales: true,
+      leadIds: leads.map(l => l._id),
+      verificationIds: verifications.map(v => v._id)
+    };
+  }
+
   const verifications = await mongoose.model('Verification').find({ $or: [{ verifiedBy: id }, { assignedTo: id }] }, { lead: 1, _id: 1 }).lean();
   const leads = await mongoose.model('Lead').find({ assignedTo: id }, { _id: 1 }).lean();
 
@@ -57,6 +80,7 @@ async function getStaffScope(staffId) {
   leads.forEach(l => { if (l._id) leadIdsSet.add(String(l._id)); });
 
   return {
+    isSales: false,
     leadIds: Array.from(leadIdsSet).map(idStr => new mongoose.Types.ObjectId(idStr)),
     verificationIds: verifications.map(v => v._id).filter(Boolean)
   };
@@ -73,41 +97,36 @@ async function buildOrderFilter(start, end, { hub, courier, awb, state, staffId,
   if (hub)     f.pickup_location = { $regex: hub,     $options: 'i' };
   if (state)   f.billing_state   = { $regex: state,   $options: 'i' };
 
-  // Staff scoping: match orders via lead_id (primary), or created_by / verified_by (fallback)
+  // Staff scoping: match orders via primary staff fields (task_created_by, verified_by, lead_id, verification_id, created_by)
   if (staffId) {
     const id = new mongoose.Types.ObjectId(staffId);
-    
-    // Find AWBs for any NDR notes created by this user
-    const ndrNotes = await mongoose.model('NdrNote').find({ createdBy: id }).select('awb_number').lean();
-    const ndrAwbs = ndrNotes.map(n => n.awb_number).filter(Boolean);
-
-    // Find Orders for any Followups assigned to this user
-    const [srF, smF] = await Promise.all([
-      mongoose.model('Followup').find({ staff: id }).select('order_id').lean(),
-      mongoose.model('ShipmaxxFollowup').find({ staff: id }).select('order_id').lean()
-    ]);
-    const followupOrderIds = [...srF.map(f => f.order_id), ...smF.map(f => f.order_id)].filter(Boolean);
-
-    const orClauses = [
-      { created_by: id },
-      { verified_by: id }, // Support's re-orders have verified_by: supportId, and we need them to count!
-      { 'comments.createdBy': id }
-    ];
-    
-    if (staffScope?.leadIds?.length > 0) {
-      orClauses.push({ lead_id: { $in: staffScope.leadIds }, source_order_id: null });
+    if (staffScope?.isSales) {
+      const orClauses = [
+        { task_created_by: id, source_order_id: null },
+        { created_by: id, source_order_id: null },
+        { verified_by: id, source_order_id: null }
+      ];
+      if (staffScope?.leadIds?.length > 0) {
+        orClauses.push({ lead_id: { $in: staffScope.leadIds }, source_order_id: null });
+      }
+      if (staffScope?.verificationIds?.length > 0) {
+        orClauses.push({ verification_id: { $in: staffScope.verificationIds }, source_order_id: null });
+      }
+      f.$or = orClauses;
+    } else {
+      const orClauses = [
+        { task_created_by: id },
+        { verified_by: id },
+        { created_by: id }
+      ];
+      if (staffScope?.leadIds?.length > 0) {
+        orClauses.push({ lead_id: { $in: staffScope.leadIds } });
+      }
+      if (staffScope?.verificationIds?.length > 0) {
+        orClauses.push({ verification_id: { $in: staffScope.verificationIds } });
+      }
+      f.$or = orClauses;
     }
-    if (staffScope?.verificationIds?.length > 0) {
-      orClauses.push({ verification_id: { $in: staffScope.verificationIds }, source_order_id: null });
-    }
-    if (ndrAwbs.length > 0) {
-      orClauses.push({ awb_code: { $in: ndrAwbs } });
-    }
-    if (followupOrderIds.length > 0) {
-      orClauses.push({ _id: { $in: followupOrderIds } });
-      orClauses.push({ order_id: { $in: followupOrderIds.map(String) } }); // For ShipmaxxOrder string order_id
-    }
-    f.$or = orClauses;
   }
   return f;
 }
@@ -135,7 +154,8 @@ function classifyStatus(s = '') {
   // ── RTO (returned / initiated / delivered back) ────────────────────────────
   if (
     v === 'RTO' || v === 'RTO_INITIATED' ||
-    v === 'RTO_DELIVERED' || v === 'RTO_NDR' || v === 'RTO_UNDELIVERED'
+    v === 'RTO_DELIVERED' || v === 'RTO_NDR' || v === 'RTO_UNDELIVERED' ||
+    v === 'RTO_106_T'
   ) return 'rto';
 
   // ── Out for Delivery ───────────────────────────────────────────────────────
@@ -144,12 +164,26 @@ function classifyStatus(s = '') {
   // ── Undelivered / NDR ──────────────────────────────────────────────────────
   if (
     v === 'UND' || v.includes('UNDELIVERED') || v === 'NDR' ||
-    v === 'DEX' ||                  // Delivery exception
+    v === 'DEX' || v === 'DELIVERY_EXCEPTION' ||
     v === 'PCN'                     // Pickup cancelled / failed attempt
   ) return 'undelivered';
 
   // ── Canceled ───────────────────────────────────────────────────────────────
   if (v === 'CANCELED' || v === 'CANCELLED' || v === 'SHIPMENT_CANCELLED' || v === 'SC') return 'canceled';
+
+  // ── Pickup Pending / Manifested (NEW, OUT_FOR_PICKUP, etc.) ────────────────
+  if (
+    v === 'NEW' || v === 'OUT_FOR_PICKUP' || v === 'PICKUP_SCHEDULED' ||
+    v === 'MANIFESTED' || v === 'PICKUP_FAILED' || v === 'READY_TO_SHIP' ||
+    v === 'SHIPMENT_BOOKED' || v === 'BOOKED'
+  ) return 'pickup_pending';
+
+  // ── In Transit ─────────────────────────────────────────────────────────────
+  if (
+    v === 'IN_TRANSIT' || v === 'INTRANSIT' || v === 'IN TRANSIT' ||
+    v === 'INT' || v === 'SHIPPED' || v === 'REACHED_AT_DESTINATION_HUB' ||
+    v === 'RAD' || v === '226_T'
+  ) return 'in_transit';
 
   return 'other';
 }
@@ -243,14 +277,47 @@ async function fetchOrderStats(filter) {
 }
 
 
+function isOrderForSupport(o) {
+  const isOld = Boolean(o.source_order_id);
+  if (isOld) {
+    // Re-order (2nd+ kit): Prioritize Support
+    const candidateRoles = [
+      o.verified_by?.role,
+      o.verification_id?.assignedTo?.role,
+      o.lead_id?.assignedTo?.role,
+      o.created_by?.role,
+      o.task_created_by?.role
+    ].filter(Boolean);
+    return candidateRoles.includes('support') || !candidateRoles.includes('sales');
+  } else {
+    // New order (1st kit): Prioritize Sales who generated/created/verified it
+    const candidateRoles = [
+      o.task_created_by?.role,
+      o.created_by?.role,
+      o.verified_by?.role,
+      o.verification_id?.assignedTo?.role,
+      o.lead_id?.assignedTo?.role
+    ].filter(Boolean);
+    const hasSales = candidateRoles.includes('sales');
+    if (hasSales) return false;
+    return candidateRoles.includes('support');
+  }
+}
+
 function calcKPIs(orders, startPeriod) {
-  let delivered = 0, ofd = 0, undelivered = 0, rto = 0, rtoIntersite = 0, inTransit = 0, deliveredRevenue = 0, interaktReplies = 0;
+  let delivered = 0, ofd = 0, undelivered = 0, rto = 0, rtoIntersite = 0, inTransit = 0, pickupPending = 0;
+  let deliveredRevenue = 0, interaktReplies = 0;
   let replyReattempt = 0, replyDawa = 0;
   let firstAttemptDelivered = 0, knownAttemptDelivered = 0, totalTat = 0, tatCount = 0;
   let salesDelivered = 0, supportDelivered = 0;
   let totalSales = 0, totalSupport = 0;
 
   for (const o of orders) {
+    const cat = classifyStatus(o.status);
+    if (cat === 'delivered' && startPeriod && o.delivered_at && new Date(o.delivered_at) < startPeriod) {
+      continue;
+    }
+
     if (o.interakt_reply_text && String(o.interakt_reply_text).trim()) {
       const replyStr = String(o.interakt_reply_text).toLowerCase();
       const isReattempt = replyStr.includes('reattempt');
@@ -262,28 +329,16 @@ function calcKPIs(orders, startPeriod) {
       }
     }
 
-    let staffRole = '';
-    const isOld = Boolean(o.source_order_id);
-    if (isOld) {
-      staffRole = o.verified_by?.role || o.verification_id?.assignedTo?.role || o.lead_id?.assignedTo?.role || o.created_by?.role || '';
-    } else {
-      // Prioritize Task Creator (who sent it to Verification) for new orders
-      staffRole = o.task_created_by?.role || o.verified_by?.role || o.verification_id?.assignedTo?.role || o.lead_id?.assignedTo?.role || o.created_by?.role || '';
-    }
-    
-    // An order is classified as Support if:
-    // 1. It is explicitly created/verified by a Support team member (role === 'support'), OR
-    // 2. It is a re-order (source_order_id set / isOld) and NOT explicitly created by Sales team.
-    const isSupportOrder = (staffRole === 'support') || (isOld && staffRole !== 'sales');
+    const isSupportOrder = isOrderForSupport(o);
 
     if (isSupportOrder) totalSupport++;
     else totalSales++;
 
-    const cat = classifyStatus(o.status);
+    if (cat === 'canceled') {
+      continue; // Exclude canceled shipments from active status stats (In Transit, etc)
+    }
+
     if (cat === 'delivered') {
-      if (startPeriod && o.delivered_at && new Date(o.delivered_at) < startPeriod) {
-        continue;
-      }
       delivered++;
       deliveredRevenue += (Number(o.sub_total) || Number(o.total) || 0);
       
@@ -299,18 +354,19 @@ function calcKPIs(orders, startPeriod) {
         const days = (new Date(o.delivered_at) - new Date(o.createdAt)) / 86400000;
         if (days >= 0 && days <= 60) { totalTat += days; tatCount++; }
       }
-    } else if (cat === 'ofd')         { ofd++; }
-    else if (cat === 'undelivered')   { undelivered++; }
-    else if (cat === 'rto_intersite') { rtoIntersite++; }
-    else if (cat === 'rto')           { rto++; }
-    else                              { inTransit++; }
+    } else if (cat === 'ofd')            { ofd++; }
+    else if (cat === 'undelivered')      { undelivered++; }
+    else if (cat === 'rto_intersite')    { rtoIntersite++; }
+    else if (cat === 'rto')              { rto++; }
+    else if (cat === 'pickup_pending')   { pickupPending++; }
+    else if (cat === 'in_transit')       { inTransit++; }
   }
 
-  const total   = delivered + ofd + undelivered + rto + rtoIntersite + inTransit;
+  const total   = totalSales + totalSupport;
   const ndrRate = total                > 0 ? +((undelivered / total)                         * 100).toFixed(1) : 0;
   const fadr    = knownAttemptDelivered > 0 ? +((firstAttemptDelivered / knownAttemptDelivered) * 100).toFixed(1) : 0;
   const avgTat  = tatCount             > 0 ? +(totalTat / tatCount).toFixed(1) : 0;
-  return { delivered, ofd, undelivered, rto, rtoIntersite, inTransit, ndrRate, fadr, avgTat, total, deliveredRevenue, salesDelivered, supportDelivered, totalSales, totalSupport, interaktReplies, replyReattempt, replyDawa };
+  return { delivered, ofd, undelivered, rto, rtoIntersite, inTransit, pickupPending, ndrRate, fadr, avgTat, total, deliveredRevenue, salesDelivered, supportDelivered, totalSales, totalSupport, interaktReplies, replyReattempt, replyDawa };
 }
 
 function pctChange(curr, prev) {
@@ -328,17 +384,22 @@ async function getLeadLookup() {
     return _leadCacheData;
   }
   const { Lead } = await import('../lead/lead.model.js');
-  const allLeads = await Lead.find({ isDeleted: { $ne: true } })
-    .select('name phone address pincode assignedTo')
-    .lean();
+  const [allLeads, allVers] = await Promise.all([
+    Lead.find({ isDeleted: { $ne: true } }).select('name phone address pincode assignedTo').lean(),
+    Verification.find().select('title name phone lead assignedTo verifiedBy').populate('lead', 'name phone assignedTo').lean()
+  ]);
 
   const byPhone = {};
   const byName  = {};
   const byPin   = {};
+  const verByPhone = {};
+  const verByName  = {};
   const pinCount = {};
 
   for (const l of allLeads) {
     if (l.phone) {
+      const matches = String(l.phone).match(/\d{10}/g) || [];
+      for (const m of matches) byPhone[m] = l;
       const clean = String(l.phone).replace(/\D/g, '');
       if (clean.length >= 10) byPhone[clean.slice(-10)] = l;
       byPhone[clean] = l;
@@ -351,7 +412,21 @@ async function getLeadLookup() {
     if (pinCount[pin] > 1) delete byPin[pin];
   }
 
-  _leadCacheData = { allLeads, byPhone, byName, byPin };
+  for (const v of allVers) {
+    const phones = [v.lead?.phone, v.phone, v.billing_phone].filter(Boolean);
+    for (const p of phones) {
+      const matches = String(p).match(/\d{10}/g) || [];
+      for (const m of matches) verByPhone[m] = v;
+      const clean = String(p).replace(/\D/g, '');
+      if (clean.length >= 10) verByPhone[clean.slice(-10)] = v;
+    }
+    const names = [v.lead?.name, v.title, v.customer_name].filter(Boolean);
+    for (const n of names) {
+      verByName[n.toLowerCase().trim()] = v;
+    }
+  }
+
+  _leadCacheData = { allLeads, byPhone, byName, byPin, verByPhone, verByName };
   _leadCacheAt   = Date.now();
   return _leadCacheData;
 }
@@ -362,51 +437,81 @@ async function autoLinkOrders() {
     const unlinkedSm = await ShipmaxxOrder.findOne({ $or: [{ lead_id: null }, { verified_by: null }] }).select('_id').lean();
     if (!unlinkedSr && !unlinkedSm) return; // nothing to do
 
-    const { byPhone, byName, byPin } = await getLeadLookup();
+    const { byPhone, byName, byPin, verByPhone, verByName } = await getLeadLookup();
 
     const models = [
       { name: 'Shiprocket Order', model: Order },
       { name: 'Shipmaxx Order',   model: ShipmaxxOrder }
     ];
 
-    // ── Step 1: match unlinked orders to leads (batch max 25 per cycle) ─────
+    // ── Step 1: match unlinked orders to leads & verifications ──────────────
     for (const { model } of models) {
-      const unlinked = await model.find({ lead_id: null })
-        .select('_id billing_customer_name billing_phone billing_pincode raw_response')
-        .limit(25)
+      const unlinked = await model.find({ $or: [{ lead_id: null }, { verified_by: null }] })
+        .select('_id billing_customer_name billing_phone billing_pincode customer_name phone customer_phone raw_response verification_id verified_by lead_id')
+        .limit(150)
         .lean();
       if (unlinked.length === 0) continue;
 
       const bulkOps = [];
       for (const o of unlinked) {
-        const phone        = o.billing_phone || o.raw_response?.customer_phone || o.raw_response?.phone;
-        const customerName = o.billing_customer_name || o.raw_response?.customer_name || o.raw_response?.name;
+        const phone        = o.customer_phone || o.phone || o.billing_phone || o.raw_response?.customer_phone || o.raw_response?.phone;
+        const customerName = o.customer_name || o.billing_customer_name || o.raw_response?.customer_name || o.raw_response?.name;
         const pincode      = o.billing_pincode || o.raw_response?.customer_pincode || o.raw_response?.billing_zip;
 
         let matchedLead = null;
+        let matchedVer  = null;
 
         if (phone) {
-          const cleanPhone = String(phone).replace(/\D/g, '');
-          if (cleanPhone.length >= 10) matchedLead = byPhone[cleanPhone.slice(-10)];
-          if (!matchedLead) matchedLead = byPhone[cleanPhone];
+          const matches = String(phone).match(/\d{10}/g) || [];
+          for (const m of matches) {
+            if (byPhone[m]) { matchedLead = byPhone[m]; break; }
+            if (verByPhone[m]) { matchedVer = verByPhone[m]; break; }
+          }
+          if (!matchedLead && !matchedVer) {
+            const cleanPhone = String(phone).replace(/\D/g, '');
+            if (cleanPhone.length >= 10) {
+              matchedLead = byPhone[cleanPhone.slice(-10)];
+              matchedVer  = verByPhone[cleanPhone.slice(-10)];
+            }
+            if (!matchedLead && !matchedVer) {
+              matchedLead = byPhone[cleanPhone];
+              matchedVer  = verByPhone[cleanPhone];
+            }
+          }
         }
-        if (!matchedLead && customerName) {
+        if (!matchedLead && !matchedVer && customerName) {
           const lowerName = customerName.toLowerCase().trim();
           matchedLead = byName[lowerName];
+          matchedVer  = verByName[lowerName];
         }
-        if (!matchedLead && pincode) {
+        if (!matchedLead && !matchedVer && pincode) {
           const pin = String(pincode).trim();
           if (pin.length === 6) matchedLead = byPin[pin];
         }
 
-        if (matchedLead) {
-          bulkOps.push({ updateOne: { filter: { _id: o._id }, update: { $set: { lead_id: matchedLead._id } } } });
+        const updateSet = {};
+        if (matchedVer) {
+          if (!o.verification_id && matchedVer._id) updateSet.verification_id = matchedVer._id;
+          if (!o.verified_by) {
+            const vb = matchedVer.verifiedBy?._id || matchedVer.verifiedBy || matchedVer.assignedTo?._id || matchedVer.assignedTo;
+            if (vb) updateSet.verified_by = vb;
+          }
+          if (!o.lead_id && (matchedVer.lead?._id || matchedVer.lead)) {
+            updateSet.lead_id = matchedVer.lead._id || matchedVer.lead;
+          }
+        }
+        if (!o.lead_id && !updateSet.lead_id && matchedLead) {
+          updateSet.lead_id = matchedLead._id;
+        }
+
+        if (Object.keys(updateSet).length > 0) {
+          bulkOps.push({ updateOne: { filter: { _id: o._id }, update: { $set: updateSet } } });
         }
       }
       if (bulkOps.length > 0) await model.bulkWrite(bulkOps).catch(() => {});
     }
 
-    // ── Step 2: link staff details in BATCH (max 50 per cycle) ───────────────
+    // ── Step 2: link staff details in BATCH ──────────────────────────────────
     for (const { model } of models) {
       const orders = await model.find({
         lead_id: { $ne: null },
@@ -415,16 +520,19 @@ async function autoLinkOrders() {
           { verification_id: null },
           { task_created_by: null }
         ]
-      }).select('_id lead_id').limit(50).lean();
+      }).select('_id lead_id').limit(100).lean();
       if (orders.length === 0) continue;
 
       const leadIds = Array.from(new Set(orders.map(o => String(o.lead_id)).filter(Boolean)));
       if (leadIds.length === 0) continue;
 
-      const verifications = await Verification.find({ lead: { $in: leadIds } })
-        .populate('task', 'createdBy')
-        .sort({ createdAt: -1 })
-        .lean();
+      const [verifications, leads] = await Promise.all([
+        Verification.find({ lead: { $in: leadIds } })
+          .populate('task', 'createdBy')
+          .sort({ createdAt: -1 })
+          .lean(),
+        Lead.find({ _id: { $in: leadIds } }).select('_id assignedTo').lean()
+      ]);
 
       const verifMap = new Map();
       verifications.forEach(v => {
@@ -433,18 +541,27 @@ async function autoLinkOrders() {
         }
       });
 
+      const leadMap = new Map();
+      leads.forEach(l => {
+        if (l._id && !leadMap.has(String(l._id))) {
+          leadMap.set(String(l._id), l);
+        }
+      });
+
       const bulkOps = [];
       for (const o of orders) {
         const verif = verifMap.get(String(o.lead_id));
-        if (verif) {
+        const lead  = leadMap.get(String(o.lead_id));
+        const staff = verif?.verifiedBy || verif?.assignedTo || lead?.assignedTo || null;
+        if (staff || verif?._id) {
           bulkOps.push({
             updateOne: {
               filter: { _id: o._id },
               update: {
                 $set: {
-                  verified_by:     verif.verifiedBy || verif.assignedTo || null,
-                  verification_id: verif._id,
-                  task_created_by: verif.task?.createdBy || null,
+                  verified_by:     staff,
+                  verification_id: verif?._id || null,
+                  task_created_by: verif?.task?.createdBy || null,
                 }
               }
             }
@@ -476,17 +593,30 @@ export async function getKPIs(params) {
 
   const verF    = { createdAt: { $gte: start, $lte: end } };
   const verFPrv = { createdAt: { $gte: ps,    $lte: pe  } };
+  const rtsF    = { createdAt: { $gte: start, $lte: end } };
+  const rtsFPrv = { createdAt: { $gte: ps,    $lte: pe  } };
+
   if (staffId) {
     const id = new mongoose.Types.ObjectId(staffId);
-    verF.$or    = [{ verifiedBy: id }, { assignedTo: id }];
-    verFPrv.$or = [{ verifiedBy: id }, { assignedTo: id }];
+    verF.$and = [
+      { createdAt: { $gte: start, $lte: end } },
+      { $or: [{ verifiedBy: id }, { assignedTo: id }] }
+    ];
+    verFPrv.$and = [
+      { createdAt: { $gte: ps, $lte: pe } },
+      { $or: [{ verifiedBy: id }, { assignedTo: id }] }
+    ];
+    rtsF.assignedTo = id;
+    rtsFPrv.assignedTo = id;
   }
 
-  const [orders, prevOrders, verifications, prevVerifications] = await Promise.all([
+  const [orders, prevOrders, verifications, prevVerifications, rtsRecords, prevRtsRecords] = await Promise.all([
     fetchOrderStats(f),
     fetchOrderStats(fPrv),
     Verification.find(verF).populate('verifiedBy', 'role').populate('assignedTo', 'role').lean(),
-    Verification.find(verFPrv).populate('verifiedBy', 'role').populate('assignedTo', 'role').lean()
+    Verification.find(verFPrv).populate('verifiedBy', 'role').populate('assignedTo', 'role').lean(),
+    ReadyToShipment.find(rtsF).populate('assignedTo', 'role').lean(),
+    ReadyToShipment.find(rtsFPrv).populate('assignedTo', 'role').lean(),
   ]);
 
   let verifiedSales = 0;
@@ -496,7 +626,8 @@ export async function getKPIs(params) {
     if (role === 'support') verifiedSupport++;
     else verifiedSales++;
   }
-  const verified = verifications.length;
+
+  const verified = verifiedSales + verifiedSupport;
 
   let prevVerifiedSales = 0;
   let prevVerifiedSupport = 0;
@@ -505,7 +636,7 @@ export async function getKPIs(params) {
     if (role === 'support') prevVerifiedSupport++;
     else prevVerifiedSales++;
   }
-  const prevVerified = prevVerifications.length;
+  const prevVerified = prevVerifiedSales + prevVerifiedSupport;
 
   // Backlog fetches (Orders created BEFORE start, but had activity THIS period)
   const projBl = { status: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1, interakt_reply_text: 1, interakt_reply_at: 1, task_created_by: 1 };
@@ -584,15 +715,17 @@ export async function getKPIs(params) {
   const totalShipments = curr.total;
   const prevTotalShipments = prev.total;
 
-  // Actual total delivered this period = cohort delivered (3) + backlog delivered (1) = 4
-  const totalDelivered    = curr.delivered + (backlogDel.delivered || 0);
+  // Total delivered completed during this period (cohort + backlog delivered)
+  const totalDelivered    = staffScope?.isSales
+    ? (curr.salesDelivered + (backlogDel.salesDelivered || 0))
+    : (curr.delivered + (backlogDel.delivered || 0));
   const totalSalesDeliv   = curr.salesDelivered + (backlogDel.salesDelivered || 0);
   const totalSupportDeliv = curr.supportDelivered + (backlogDel.supportDelivered || 0);
   const totalRevenue      = curr.deliveredRevenue + (backlogDel.deliveredRevenue || 0);
 
-  // Delivery rate = total delivered / total cohort shipments
+  // Delivery rate = total delivered in period / total shipments in period
   const deliveryRate = totalShipments > 0
-    ? Math.round((totalDelivered / totalShipments) * 100) : 0;
+    ? Math.min(100, Math.round((totalDelivered / totalShipments) * 100)) : 0;
 
   // RTO rate = rto / (total_delivered + rto + rtoIntersite)
   const rtoBase = totalDelivered + curr.rto + curr.rtoIntersite;
@@ -608,12 +741,12 @@ export async function getKPIs(params) {
       verified:         { value: verified,              change: pctChange(verified,             prevVerified)                 },
       verifiedSales:    { value: verifiedSales,         change: pctChange(verifiedSales,        prevVerifiedSales)            },
       verifiedSupport:  { value: verifiedSupport,       change: pctChange(verifiedSupport,      prevVerifiedSupport)          },
+      pickupPending:    { value: curr.pickupPending,    change: pctChange(curr.pickupPending,   prev.pickupPending)           },
       inTransit:        { value: curr.inTransit,        change: pctChange(curr.inTransit,       prev.inTransit)               },
       ofd:              { value: curr.ofd,              change: pctChange(curr.ofd,             prev.ofd)                     },
-      // Total delivered completed during this period (cohort + backlog delivered)
       delivered:        { value: totalDelivered,        change: pctChange(totalDelivered,       prev.delivered)               },
-      salesDelivered:   { value: totalSalesDeliv,       change: pctChange(totalSalesDeliv,     prev.salesDelivered)          },
-      supportDelivered: { value: totalSupportDeliv,     change: pctChange(totalSupportDeliv,   prev.supportDelivered)        },
+      salesDelivered:   { value: totalSalesDeliv,       change: pctChange(totalSalesDeliv,      prev.salesDelivered)          },
+      supportDelivered: { value: totalSupportDeliv,     change: pctChange(totalSupportDeliv,    prev.supportDelivered)        },
       // Rates
       deliveredRate:    { value: deliveryRate,          change: 0 },
       rtoRate:          { value: rtoRate,               change: 0 },
@@ -621,7 +754,8 @@ export async function getKPIs(params) {
       undelivered:      { value: curr.undelivered,      change: pctChange(curr.undelivered,     prev.undelivered)             },
       rto:              { value: curr.rto,              change: pctChange(curr.rto,             prev.rto)                     },
       rtoIntersite:     { value: curr.rtoIntersite,     change: pctChange(curr.rtoIntersite,    prev.rtoIntersite)            },
-      // Backlog KPIs — old orders still active this period
+      // Backlog KPIs — old orders active/delivered this period
+      oldDelivered:     { value: staffScope?.isSales ? (backlogDel.salesDelivered || 0) : (backlogDel.delivered || 0), change: 0 },
       blOfd:            { value: backlog.ofd,           change: 0 },
       blUndelivered:    { value: backlog.undelivered,   change: 0 },
       blRto:            { value: backlog.rto,           change: 0 },
@@ -895,76 +1029,85 @@ export async function getShipments(params) {
     }
   } else if (status && status !== 'totalShipments') {
     if (['totalSales', 'totalSupport', 'salesDelivered', 'supportDelivered'].includes(status)) {
-      const User = (await import('../user/user.model.js')).default;
-      const salesUsers = await User.find({ role: 'sales' }, '_id').lean();
-      const supportUsers = await User.find({ role: 'support' }, '_id').lean();
-      const salesUserIds = salesUsers.map(u => u._id);
-      const supportUserIds = supportUsers.map(u => u._id);
+      const allCohort = await fetchOrderStats(baseFilter);
+      let allOrdersToCheck = [...allCohort];
 
-      baseFilter.$and = baseFilter.$and || [];
-      if (status.includes('Sales') || status.includes('sales')) {
-        baseFilter.$and.push({
-          $or: [
-            { task_created_by: { $in: salesUserIds } },
-            { verified_by: { $in: salesUserIds } },
-            { created_by: { $in: salesUserIds } },
-            {
-              source_order_id: null,
-              task_created_by: { $nin: supportUserIds },
-              verified_by: { $nin: supportUserIds },
-              created_by: { $nin: supportUserIds }
-            }
-          ]
-        });
-      } else {
-        baseFilter.$and.push({
-          $or: [
-            { source_order_id: { $ne: null } },
-            { task_created_by: { $in: supportUserIds } },
-            { verified_by: { $in: supportUserIds } },
-            { created_by: { $in: supportUserIds } }
-          ]
-        });
-      }
-
-      if (status.includes('Delivered')) {
-        baseFilter.status = { $regex: '^delivered$|^del$', $options: 'i' };
-        const roleCondition = baseFilter.$and.pop();
+      if (['supportDelivered', 'salesDelivered'].includes(status)) {
         delete baseFilter.createdAt;
-        const deliveredTimeFilter = { $or: [{ delivered_at: { $gte: start, $lte: end } }, { $and: [ { status_updated_at: { $gte: start, $lte: end } }, { $or: [ { delivered_at: null }, { $expr: { $eq: ["$delivered_at", "$createdAt"] } } ] } ] }] };
-        const cohortDeliveredFilter = { 
+        const baseF = await buildOrderFilter(new Date(0), end, { hub, courier, awb, state, staffId, staffScope });
+        const backlogDeliveredFilter = {
           $and: [
-            { createdAt: { $gte: start, $lte: end } },
+            baseF,
+            { createdAt: { $lt: start } },
+            { status: { $in: ['DELIVERED', 'DEL'] } },
             {
               $or: [
-                { delivered_at: { $gte: start } },
-                { delivered_at: { $exists: false } },
-                { delivered_at: null }
+                { delivered_at: { $gte: start, $lte: end } },
+                {
+                  $and: [
+                    { status_updated_at: { $gte: start, $lte: end } },
+                    {
+                      $or: [
+                        { delivered_at: null },
+                        { $expr: { $eq: ["$delivered_at", "$createdAt"] } }
+                      ]
+                    }
+                  ]
+                }
               ]
             }
           ]
         };
-        baseFilter.$and.push({
-          $or: [
-            { $and: [ cohortDeliveredFilter, roleCondition ] },
-            { $and: [ { createdAt: { $lt: start } }, deliveredTimeFilter, roleCondition ] }
-          ]
-        });
+        const projBl = { status: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1, task_created_by: 1 };
+        const [blSr, blSm] = await Promise.all([
+          Order.find(backlogDeliveredFilter, projBl).lean(),
+          ShipmaxxOrder.find(backlogDeliveredFilter, projBl).lean()
+        ]);
+        await Promise.all([attachRolesToOrders(blSr), attachRolesToOrders(blSm)]);
+        allOrdersToCheck.push(...blSr, ...blSm);
       }
+
+      const targetIds = [];
+      for (const o of allOrdersToCheck) {
+        const isSupportOrder = isOrderForSupport(o);
+        const cat = classifyStatus(o.status);
+
+        if (cat === 'delivered' && start && o.delivered_at && new Date(o.delivered_at) < start) {
+          continue;
+        }
+
+        if (status === 'totalSupport' && isSupportOrder) {
+          targetIds.push(o._id);
+        } else if (status === 'totalSales' && !isSupportOrder) {
+          targetIds.push(o._id);
+        } else if (status === 'supportDelivered' && isSupportOrder && cat === 'delivered') {
+          targetIds.push(o._id);
+        } else if (status === 'salesDelivered' && !isSupportOrder && cat === 'delivered') {
+          targetIds.push(o._id);
+        }
+      }
+      baseFilter._id = { $in: targetIds };
+    } else if (status === 'oldDelivered') {
+      baseFilter.status = { $regex: '^delivered$|^del$', $options: 'i' };
+      delete baseFilter.createdAt;
+      const deliveredTimeFilter = { $or: [{ delivered_at: { $gte: start, $lte: end } }, { $and: [ { status_updated_at: { $gte: start, $lte: end } }, { $or: [ { delivered_at: null }, { $expr: { $eq: ["$delivered_at", "$createdAt"] } } ] } ] }] };
+      baseFilter.$and = baseFilter.$and || [];
+      baseFilter.$and.push(
+        { createdAt: { $lt: start } },
+        deliveredTimeFilter
+      );
     } else {
       const statusRegex = { 
+        pickupPending: '^new$|^out_for_pickup$|^pickup_scheduled$|^manifested$|^pickup_failed$|^ready_to_ship$|^shipment_booked$|^booked$',
+        inTransit: '^in_transit$|^intransit$|^in transit$|^int$|^shipped$|^reached_at_destination_hub$|^rad$|^226_t$',
         delivered: '^delivered$|^del$', 
         ofd: '^ofd$|^out_for_delivery$|^out for delivery$', 
-        undelivered: '^und$|undelivered|^ndr$|^dex$|^pcn$', 
-        rto: '^rto$|^rto_initiated$|^rto_delivered$|^rto_ndr$|^rto_undelivered$',
+        undelivered: '^und$|undelivered|^ndr$|^dex$|^pcn$|^delivery_exception$|^lost$', 
+        rto: '^rto$|^rto_initiated$|^rto_delivered$|^rto_ndr$|^rto_undelivered$|^rto_106_t$',
         rtoIntersite: '^rto_in_transit$|^rto_intransit$|^rto in transit$|^rra$|^rto_ofd$'
       };
       
-      if (status === 'inTransit') {
-        baseFilter.status = { $not: { $regex: '^delivered$|^del$|^ofd$|^out_for_delivery$|^out for delivery$|^und$|undelivered|^ndr$|^dex$|^pcn$|^rto$|^rto_initiated$|^rto_delivered$|^rto_ndr$|^rto_undelivered$|^rto_in_transit$|^rto_intransit$|^rto in transit$|^rra$|^rto_ofd$|^canceled$|^cancelled$|^shipment_cancelled$|^sc$', $options: 'i' } };
-      } else {
-        baseFilter.status = { $regex: statusRegex[status] || status, $options: 'i' };
-      }
+      baseFilter.status = { $regex: statusRegex[status] || status, $options: 'i' };
 
       if (status === 'delivered') {
         delete baseFilter.createdAt;
@@ -1021,10 +1164,9 @@ export async function getShipments(params) {
     const supportUserIds = supportUsers.map(u => u._id);
 
     if (status === 'verifiedSales') {
-      verF.$or = [
-        { verifiedBy: { $in: salesUserIds } },
-        { assignedTo: { $in: salesUserIds } },
-        { verifiedBy: null, assignedTo: { $nin: supportUserIds } }
+      verF.$and = [
+        { verifiedBy: { $nin: supportUserIds } },
+        { assignedTo: { $nin: supportUserIds } }
       ];
     } else if (status === 'verifiedSupport') {
       verF.$or = [
@@ -1317,4 +1459,61 @@ export async function getInvoiceHistory(params) {
     pages: Math.ceil(total / limit)
   };
 }
+
+export async function getStaffBreakdown(params = {}) {
+  const { preset, from, to } = params;
+  const User = mongoose.model('User');
+  const salesStaff = await User.find({ role: 'sales', isDeleted: false }).select('_id name role').sort({ name: 1 }).lean();
+  const supportStaff = await User.find({ role: 'support', isDeleted: false }).select('_id name role').sort({ name: 1 }).lean();
+
+  const { getAllStaffStats } = await import('../dashboard/dashboard.service.js');
+  const targetDate = (from && from !== 'undefined') ? from : new Date().toISOString().split('T')[0];
+  const crmRes = await getAllStaffStats(targetDate, from, to, preset || 'today');
+  const crmStatsList = crmRes?.staffStats || [];
+  const crmMap = {};
+  crmStatsList.forEach(item => {
+    if (item.user?._id) {
+      crmMap[String(item.user._id)] = item;
+    }
+  });
+
+  const allStaff = [...salesStaff, ...supportStaff];
+  const staffResults = await Promise.all(
+    allStaff.map(async (u) => {
+      const uId = String(u._id);
+      const res = await getKPIs({ preset: preset || 'month', from, to, staffId: uId });
+      const k = res.kpis || {};
+      const rtoNdr = (k.undelivered?.value || 0) + (k.rto?.value || 0) + (k.rtoIntersite?.value || 0);
+
+      const crmItem = crmMap[uId] || {};
+      return {
+        id: uId,
+        name: u.name,
+        role: u.role,
+        // CRM breakdown fields
+        leads: crmItem.leadsAdded || 0,
+        tasks: crmItem.tasksAssigned || 0,
+        pendingTasks: crmItem.pendingTasks || 0,
+        afterCheckoutLeads: crmItem.afterCheckoutLeads || 0,
+        afterCheckoutTasks: crmItem.afterCheckoutTasks || 0,
+        cnp: crmItem.todayCnp || 0,
+        callAgain: crmItem.todayCallAgain || 0,
+        notInterested: crmItem.todayNotInterested || 0,
+        verified: Math.max(crmItem.todayVerifications || 0, crmItem.verifiedCount || 0, k.verified?.value || 0),
+        // Shipment breakdown fields
+        totalShipments: k.totalShipments?.value || 0,
+        delivered: k.delivered?.value || 0,
+        inTransit: k.inTransit?.value || 0,
+        ofd: k.ofd?.value || 0,
+        rtoNdr: rtoNdr
+      };
+    })
+  );
+
+  return {
+    sales: staffResults.filter(s => s.role === 'sales'),
+    support: staffResults.filter(s => s.role === 'support')
+  };
+}
+
 
