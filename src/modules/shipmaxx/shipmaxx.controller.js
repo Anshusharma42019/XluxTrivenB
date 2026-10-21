@@ -3198,6 +3198,15 @@ export const shipmaxxWebhook = catchAsync(async (req, res) => {
   if (phone && !existing?.billing_phone) update.billing_phone = phone;
   if (name && !existing?.billing_customer_name) update.billing_customer_name = name;
 
+  const courierReason = p.reason || p.ndr_reason || p.remarks || p.comment || p.attempt_reason || p.description || '';
+  if (courierReason) {
+    update.courier_reason = courierReason;
+  }
+  const actionBy = p.action_by || p.actionBy || p.courier || p.carrier || '';
+  if (actionBy) {
+    update.courier_action_by = actionBy;
+  }
+
   // Attempt & NDR mapping matching logic
   let finalStatus = status;
   const ndrKw = ['EXCEPTION', 'REFUSED', 'NOT AVAILABLE', 'INCOMPLETE', 'ACTION TAKEN', 'ATTEMPT FAILURE', 'ADDRESS'];
@@ -3270,21 +3279,254 @@ export const shipmaxxWebhook = catchAsync(async (req, res) => {
   }
 });
 
+// ── NDR Period Statistics ───────────────────────────────────────────────────
+export async function getShipmaxxPeriodStats(from, to, month, year) {
+  const IST_OFFSET = 5.5 * 60 * 60 * 1000;
+  let startDate = null;
+  let endDate = null;
+
+  if (from || to) {
+    if (from) startDate = new Date(from);
+    if (to) {
+      endDate = new Date(to);
+      endDate.setHours(23, 59, 59, 999);
+    }
+  } else if (month !== undefined && month !== null && !isNaN(Number(month))) {
+    const m = Number(month);
+    const y = Number(year) || new Date().getFullYear();
+    startDate = new Date(Date.UTC(y, m, 1) - IST_OFFSET);
+    endDate = new Date(Date.UTC(y, m + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
+  } else {
+    // Current month by default
+    const nowIst = new Date(Date.now() + IST_OFFSET);
+    const m = nowIst.getUTCMonth();
+    const y = nowIst.getUTCFullYear();
+    startDate = new Date(Date.UTC(y, m, 1) - IST_OFFSET);
+    endDate = new Date(Date.UTC(y, m + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
+  }
+
+  const match = {};
+  if (startDate || endDate) {
+    match.createdAt = {};
+    if (startDate) match.createdAt.$gte = startDate;
+    if (endDate) match.createdAt.$lte = endDate;
+  }
+
+  // Count delivered orders strictly by delivery date (delivered_at) within the period
+  const deliveredMatch = { 
+    status: { $regex: /^delivered$/i },
+    ...(startDate || endDate ? {
+      delivered_at: {
+        ...(startDate && { $gte: startDate }),
+        ...(endDate && { $lte: endDate })
+      }
+    } : {})
+  };
+
+  const [totalInitiated, statusBreakdown, deptOrders, deliveredCount] = await Promise.all([
+    Order.countDocuments(match),
+    Order.aggregate([
+      { $match: match },
+      { $group: { _id: '$status', count: { $sum: 1 } } }
+    ]),
+    Order.find(match).select('lead_id order_items').populate('lead_id', 'department').lean(),
+    Order.countDocuments(deliveredMatch)
+  ]);
+
+  let rto = 0;
+  let ndr = 0;
+  let inTransit = 0;
+
+  for (const item of statusBreakdown) {
+    const s = String(item._id || '').toUpperCase();
+    if (s.includes('RTO') || s.includes('RRA')) {
+      rto += item.count;
+    } else if (s.includes('UNDELIVERED') || s.includes('EXCEPTION') || s.includes('NDR')) {
+      ndr += item.count;
+    } else if (!s.includes('DELIVERED')) {
+      inTransit += item.count;
+    }
+  }
+
+  const delivered = deliveredCount;
+
+  let migraineCount = 0;
+  let pilesCount = 0;
+  for (const o of deptOrders) {
+    let dept = o.lead_id?.department;
+    if (!dept) {
+      const raw = JSON.stringify(o.order_items || []).toLowerCase();
+      dept = raw.includes('piles') ? 'piles' : 'migraine';
+    }
+    if (dept === 'piles') pilesCount++;
+    else migraineCount++;
+  }
+
+  return {
+    totalInitiated,
+    delivered,
+    rto,
+    ndr,
+    inTransit,
+    deliveryRate: totalInitiated > 0 ? ((delivered / totalInitiated) * 100).toFixed(1) + '%' : '0%',
+    rtoRate: totalInitiated > 0 ? ((rto / totalInitiated) * 100).toFixed(1) + '%' : '0%',
+    departments: {
+      all: totalInitiated,
+      migraine: migraineCount,
+      piles: pilesCount
+    }
+  };
+}
+
+export const getNdrStats = catchAsync(async (req, res) => {
+  const { from, to, month, year } = req.query;
+  const stats = await getShipmaxxPeriodStats(from, to, month, year);
+  res.json(new ApiResponse(200, stats, 'Shipmaxx NDR statistics fetched'));
+});
+
 // ── NDR ───────────────────────────────────────────────────────────────────────
 export const getNdrList = catchAsync(async (req, res) => {
+  const { from, to, month, year, view, page = 1, limit = 100 } = req.query;
+  const summary = await getShipmaxxPeriodStats(from, to, month, year);
+
+  // If user requests RTO, Delivered, or All Initiated shipments directly in the table
+  if (view === 'rto' || view === 'delivered' || view === 'all') {
+    let match = {};
+    if (from || to) {
+      const dateRange = {};
+      if (from) dateRange.$gte = new Date(from);
+      if (to) {
+        const toDate = new Date(to);
+        toDate.setHours(23, 59, 59, 999);
+        dateRange.$lte = toDate;
+      }
+      match.createdAt = dateRange;
+    }
+
+    if (view === 'rto') {
+      match.status = { $regex: /rto|rra/i };
+    } else if (view === 'delivered') {
+      match = { 
+        status: { $regex: /^delivered$/i },
+        ...(from || to ? {
+          delivered_at: {
+            ...(from && { $gte: new Date(from) }),
+            ...(to && { $lte: new Date(new Date(to).setHours(23, 59, 59, 999)) })
+          }
+        } : {})
+      };
+    }
+
+    const orders = await Order.find(match)
+      .sort({ createdAt: -1 })
+      .skip((Number(page) - 1) * Number(limit))
+      .limit(Number(limit))
+      .populate('comments.createdBy', 'name role')
+      .populate('lead_id', 'name phone department')
+      .lean();
+
+    const formatted = orders.map(o => {
+      const staffComment = o.comments?.length > 0 ? o.comments[o.comments.length - 1] : null;
+      const deliveryBoyReason = o.courier_reason || o.problem || o.notes || (o.status?.includes('RTO') ? 'Return to Origin' : 'Delivered Successfully');
+
+      let dept = o.lead_id?.department;
+      if (!dept) {
+        const raw = JSON.stringify(o.order_items || []).toLowerCase();
+        dept = raw.includes('piles') ? 'piles' : 'migraine';
+      }
+
+      return {
+        awb_code: o.awb_code || '—',
+        channel_order_id: o.order_id || '—',
+        order_id: o.order_id || '—',
+        shipment_id: o._id,
+        customer_name: o.lead_id?.name || o.billing_customer_name || '—',
+        customer_phone: o.lead_id?.phone || o.billing_phone || '',
+        courier_name: o.courier_name || 'ShipMaxx Courier',
+        action_by: o.courier_name || '',
+        status: o.status || 'NEW',
+        reason: deliveryBoyReason,
+        delivery_boy_reason: deliveryBoyReason,
+        staff_remark: staffComment?.text || null,
+        staff_remark_by: staffComment?.createdBy?.name || null,
+        attempts: o.delivery_attempt || 1,
+        ndr_raised_at: o.delivered_at || o.createdAt,
+        payment_method: o.payment_method,
+        address: o.billing_address,
+        pincode: o.billing_pincode,
+        department: dept,
+        can_retry: false,
+        can_rto: false,
+      };
+    });
+
+    return res.json(new ApiResponse(200, { data: formatted, total: formatted.length, summary }, 'Orders fetched successfully'));
+  }
+
+  let liveShipments = null;
   try {
     const response = await smx.getNdrList(req.query);
-    const list = response?.data?.data || response?.data || response || [];
+    const list = response?.shipments || response?.data?.shipments || response?.data || response?.items || [];
     if (Array.isArray(list) && list.length > 0) {
-      return res.json(new ApiResponse(200, response, 'NDR list fetched from Shipmaxx API'));
+      liveShipments = list;
     }
   } catch (err) {
     console.warn('[ShipMaxx API NDR Fetch Failed, falling back to local DB]:', err.message);
   }
 
+  if (liveShipments && liveShipments.length > 0) {
+    summary.ndr = liveShipments.length;
+    const awbs = liveShipments.map(s => s.awb).filter(Boolean);
+    const localOrders = awbs.length > 0
+      ? await Order.find({ awb_code: { $in: awbs } })
+          .select('awb_code order_id billing_phone billing_customer_name department order_items problem notes comments courier_reason')
+          .populate('comments.createdBy', 'name role')
+          .lean()
+      : [];
+    const localMap = new Map();
+    for (const lo of localOrders) {
+      if (lo.awb_code) localMap.set(lo.awb_code, lo);
+    }
+
+    const formatted = liveShipments.map(s => {
+      const lo = localMap.get(s.awb);
+      const dept = lo ? detectOrderDepartment(lo) : (s.products?.[0]?.name?.toLowerCase().includes('piles') ? 'piles' : 'migraine');
+      const staffComment = lo?.comments?.length > 0 ? lo.comments[lo.comments.length - 1] : null;
+      const deliveryReason = s.reason || s.attemptStatus || lo?.courier_reason || 'Delivery Attempt Failed';
+
+      return {
+        awb_code: s.awb,
+        channel_order_id: s.orderId || lo?.order_id || '—',
+        order_id: s.orderId || lo?.order_id || '—',
+        shipment_id: s.id || lo?._id,
+        customer_name: s.customer?.name || lo?.billing_customer_name || '—',
+        customer_phone: s.customer?.phone || lo?.billing_phone || '',
+        courier_name: s.courier || s.actionBy || (lo ? guessCourierByAwb(lo.awb_code) : ''),
+        action_by: s.actionBy || s.courier || '',
+        status: s.status || s.attemptStatus || 'UNDELIVERED',
+        // DELIVERY BOY / COURIER REASON:
+        reason: deliveryReason,
+        delivery_boy_reason: deliveryReason,
+        staff_remark: staffComment?.text || null,
+        staff_remark_by: staffComment?.createdBy?.name || null,
+        attempts: Number(s.attemptNumber) || (s.attempts_used ?? 1),
+        ndr_raised_at: s.ndrRaisedDate || (s.attemptDate ? `${s.attemptDate} ${s.attemptTime || ''}`.trim() : null),
+        payment_method: s.paymentMethod,
+        address: s.customer?.address,
+        pincode: s.customer?.pincode,
+        city: s.customer?.city,
+        state: s.customer?.state,
+        department: dept,
+        can_retry: s.can_retry,
+        can_rto: s.can_rto,
+      };
+    });
+
+    return res.json(new ApiResponse(200, { data: formatted, total: formatted.length, summary }, 'NDR list fetched from Shipmaxx API'));
+  }
+
   // Fallback to local MongoDB NDR records
-  const { from, to, page = 1, limit = 100 } = req.query;
-  const match = { platform: 'shipmaxx', status: /UNDELIVERED|NDR|EXCEPTION/i };
+  const match = { status: /UNDELIVERED|NDR|EXCEPTION/i };
   if (from || to) {
     match.status_updated_at = {};
     if (from) match.status_updated_at.$gte = new Date(from);
@@ -3299,26 +3541,38 @@ export const getNdrList = catchAsync(async (req, res) => {
     .sort({ createdAt: -1, status_updated_at: -1, _id: -1 })
     .skip((Number(page) - 1) * Number(limit))
     .limit(Number(limit))
+    .populate('comments.createdBy', 'name role')
     .lean();
 
-  const formatted = orders.map(o => ({
-    awb_code: o.awb_code,
-    channel_order_id: o.order_id,
-    order_id: o.order_id,
-    shipment_id: o._id,
-    customer_name: o.billing_customer_name,
-    customer_phone: o.billing_phone,
-    courier_name: o.courier_name,
-    status: o.status,
-    reason: o.comments?.[0]?.text || 'Undelivered Attempt Failure',
-    attempts: o.status?.includes('1ST') ? 1 : o.status?.includes('2ND') ? 2 : o.status?.includes('3RD') ? 3 : 1,
-    ndr_raised_at: o.status_updated_at || o.createdAt,
-    payment_method: o.payment_method,
-    address: o.billing_address,
-    pincode: o.billing_pincode
-  }));
+  const formatted = orders.map(o => {
+    const staffComment = o.comments?.length > 0 ? o.comments[o.comments.length - 1] : null;
+    const deliveryBoyReason = o.courier_reason || o.problem || o.notes || 'Delivery Attempt Failed';
 
-  res.json(new ApiResponse(200, { data: formatted, total: formatted.length }, 'NDR list fetched from database'));
+    return {
+      awb_code: o.awb_code,
+      channel_order_id: o.order_id,
+      order_id: o.order_id,
+      shipment_id: o._id,
+      customer_name: o.billing_customer_name,
+      customer_phone: o.billing_phone,
+      courier_name: o.courier_name || guessCourierByAwb(o.awb_code),
+      action_by: o.courier_action_by || o.courier_name || '',
+      status: o.status,
+      // DELIVERY BOY REASON:
+      reason: deliveryBoyReason,
+      delivery_boy_reason: deliveryBoyReason,
+      staff_remark: staffComment?.text || null,
+      staff_remark_by: staffComment?.createdBy?.name || null,
+      attempts: o.status?.includes('1ST') ? 1 : o.status?.includes('2ND') ? 2 : o.status?.includes('3RD') ? 3 : (o.delivery_attempt || 1),
+      ndr_raised_at: o.status_updated_at || o.createdAt,
+      payment_method: o.payment_method,
+      address: o.billing_address,
+      pincode: o.billing_pincode,
+      department: detectOrderDepartment(o)
+    };
+  });
+
+  res.json(new ApiResponse(200, { data: formatted, total: formatted.length, summary }, 'NDR list fetched from database'));
 });
 
 export const ndrAction = catchAsync(async (req, res) => {

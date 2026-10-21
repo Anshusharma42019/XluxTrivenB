@@ -43,10 +43,10 @@ const getRevenueChart = catchAsync(async (req, res) => {
 });
 
 const getStaffStats = catchAsync(async (req, res) => {
-  const { date, staffId, from, to, department } = req.query;
+  const { date, staffId, from, to, department, preset } = req.query;
   const targetId = (req.user.role === 'manager' || req.user.role === 'admin') && staffId ? staffId : req.user._id;
   const userDepts = ['sales', 'support', 'logistics'].includes(req.user.role) ? req.userDepartments : (department ? [department] : []);
-  const data = await dashboardService.getStaffStats(targetId, date, from, to, userDepts);
+  const data = await dashboardService.getStaffStats(targetId, date, from, to, userDepts, preset);
   res.json(new ApiResponse(httpStatus.OK, data, 'Staff stats fetched'));
 });
 
@@ -77,17 +77,22 @@ const getStaffVerifications = catchAsync(async (req, res) => {
 const getStaffTodayLists = catchAsync(async (req, res) => {
   const { date, staffId, from, to, preset, department, refresh } = req.query;
   const userDepts = ['sales', 'support', 'logistics'].includes(req.user.role) ? req.userDepartments : (department ? [department] : []);
+  const effectiveStaffId = (req.user.role === 'admin' || req.user.role === 'manager') && staffId ? staffId : req.user._id;
   
-  const cacheKey = `todayLists_${req.user.role}_${req.user._id}_${date}_${staffId}_${from}_${to}_${preset}_${userDepts.join(',')}`;
-  const data = await withCache(cacheKey, () => dashboardService.getStaffTodayLists(req.user.role, req.user._id, date, staffId, from, to, preset, userDepts), refresh === 'true' || refresh === true);
+  const cacheKey = `todayLists_${req.user.role}_${effectiveStaffId}_${date}_${from}_${to}_${preset}_${userDepts.join(',')}`;
+  const data = await withCache(cacheKey, () => dashboardService.getStaffTodayLists(req.user.role, req.user._id, date, effectiveStaffId, from, to, preset, userDepts), refresh === 'true' || refresh === true);
   
   res.json(new ApiResponse(httpStatus.OK, data, 'Staff today lists fetched'));
 });
 
 const getStaffMonthlyChart = catchAsync(async (req, res) => {
-  const targetId = (req.user.role === 'admin' || req.user.role === 'manager') ? null : req.user._id;
+  const targetId = req.query.staffId || ((req.user.role === 'admin' || req.user.role === 'manager') ? null : req.user._id);
   
   const cacheKey = `monthlyChart_${targetId}`;
+  if (req.query.refresh === 'true') {
+    const data = await dashboardService.getStaffMonthlyChart(targetId);
+    return res.json(new ApiResponse(httpStatus.OK, data, 'Monthly chart fetched'));
+  }
   const data = await withCache(cacheKey, () => dashboardService.getStaffMonthlyChart(targetId));
   
   res.json(new ApiResponse(httpStatus.OK, data, 'Monthly chart fetched'));
@@ -133,14 +138,19 @@ const assignOrder = catchAsync(async (req, res) => {
 
 const getStaffDeliveryStatsHandler = catchAsync(async (req, res) => {
   const { month, year, userId, from, to, preset } = req.query;
-  const targetId = (req.user.role === 'admin' || req.user.role === 'manager') ? (userId || null) : req.user._id;
+  const targetId = (req.user.role === 'admin' || req.user.role === 'manager') 
+    ? (userId && userId !== 'all' ? userId : null) 
+    : req.user._id;
   const data = await getStaffDeliveryStats(Number(month), Number(year), targetId, from, to, preset);
   res.json(new ApiResponse(httpStatus.OK, data, 'Staff delivery stats fetched'));
 });
 
 const getMyDeliveryStats = catchAsync(async (req, res) => {
-  const { month, year } = req.query;
-  const data = await getStaffDeliveryStats(Number(month), Number(year), req.user._id);
+  const { month, year, userId } = req.query;
+  const targetId = (req.user.role === 'admin' || req.user.role === 'manager')
+    ? (userId && userId !== 'all' ? userId : null)
+    : req.user._id;
+  const data = await getStaffDeliveryStats(Number(month), Number(year), targetId);
   res.json(new ApiResponse(httpStatus.OK, data, 'My delivery stats fetched'));
 });
 

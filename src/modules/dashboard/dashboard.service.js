@@ -12,31 +12,25 @@ import mongoose from 'mongoose';
 const todayDateStr = () => new Date().toISOString().slice(0, 10);
 const SUB_TOTAL_AMOUNT = { $convert: { input: '$sub_total', to: 'double', onError: 0, onNull: 0 } };
 
-export const getStaffStats = async (userId, targetDate, from, to, userDepartments = []) => {
+export const getStaffStats = async (userId, targetDate, from, to, userDepartments = [], preset = null) => {
   const IST_OFFSET = 5.5 * 60 * 60 * 1000;
-  let start, end;
-  const target = targetDate ? new Date(targetDate) : new Date();
-
-  const isAllTime = from === 'all' || to === 'all';
-  if (isAllTime) {
-    start = new Date(Date.UTC(target.getFullYear(), target.getMonth(), target.getDate()) - IST_OFFSET);
-    end = new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1);
-  } else if (from && to) {
-    start = new Date(`${from}T00:00:00.000+05:30`);
-    end = new Date(`${to}T23:59:59.999+05:30`);
-  } else {
-    start = new Date(Date.UTC(target.getFullYear(), target.getMonth(), target.getDate()) - IST_OFFSET);
-    end = new Date(start.getTime() + 24 * 60 * 60 * 1000 - 1);
-  }
+  const range = buildStatsDateRange(preset, from, to);
+  const isAllTime = range.isAllTime;
+  const start = range.start;
+  const end = range.end;
+  let target = targetDate ? new Date(targetDate) : (start || new Date());
+  if (isNaN(target.getTime())) target = new Date();
   
   const monthStart = new Date(Date.UTC(target.getFullYear(), target.getMonth(), 1) - IST_OFFSET);
   const uid = new mongoose.Types.ObjectId(userId);
   const dateStr = target.toISOString().slice(0, 10);
 
-  const filter = { assignedTo: uid };
-  if (userDepartments && userDepartments.length > 0) {
-    filter.department = { $in: userDepartments };
-  }
+  const deptFilter = (userDepartments && userDepartments.length > 0) ? { department: { $in: userDepartments } } : {};
+  const verifFilter = { $or: [{ assignedTo: uid }, { verifiedBy: uid }], ...deptFilter };
+  const taskFilter = { $or: [{ assignedTo: uid }, { createdBy: uid }], ...deptFilter };
+  const leadFilter = { $or: [{ assignedTo: uid }, { createdBy: uid }], ...deptFilter };
+  const callAgainFilter = { $or: [{ assignedTo: uid }, { createdBy: uid }], ...deptFilter };
+  const cnpFilter = { $or: [{ assignedTo: uid }, { changedBy: String(uid) }], ...deptFilter };
 
   const dateFilter = isAllTime ? {} : { createdAt: { $gte: start, $lte: end } };
   const updateDateFilter = isAllTime ? {} : { updatedAt: { $gte: start, $lte: end } };
@@ -56,18 +50,18 @@ export const getStaffStats = async (userId, targetDate, from, to, userDepartment
     todayClosedLost,
     todayVerifications
   ] = await Promise.all([
-    Verification.countDocuments({ ...filter, ...monthDateFilter }),
-    Task.countDocuments({ ...filter, status: 'pending', isDeleted: false }),
+    Verification.countDocuments({ ...verifFilter, isDeleted: false, ...monthDateFilter }),
+    Task.countDocuments({ ...taskFilter, status: 'pending', isDeleted: false }),
     StaffTarget.findOne({ user: uid, date: dateStr }),
-    Cnp.countDocuments({ ...filter, ...updateDateFilter }),
-    CallAgain.countDocuments({ ...filter, ...updateDateFilter }),
-    Task.countDocuments({ ...filter, status: 'interested', isDeleted: false, ...updateDateFilter }),
-    Task.countDocuments({ ...filter, status: 'cancel_call', isDeleted: false, ...updateDateFilter }),
-    Lead.countDocuments({ ...filter, ...dateFilter }),
-    Verification.countDocuments({ ...filter, status: 'verified', isDeleted: false, ...updateDateFilter }),
-    Verification.countDocuments({ ...filter, status: 'on_hold', ...updateDateFilter }),
-    Lead.countDocuments({ ...filter, status: 'closed_lost', ...updateDateFilter }),
-    Verification.countDocuments({ ...filter, ...dateFilter }),
+    Cnp.countDocuments({ ...cnpFilter, isDeleted: false, ...updateDateFilter }),
+    CallAgain.countDocuments({ ...callAgainFilter, isDeleted: false, ...updateDateFilter }),
+    Task.countDocuments({ ...taskFilter, status: 'interested', isDeleted: false, ...updateDateFilter }),
+    Task.countDocuments({ ...taskFilter, status: 'cancel_call', isDeleted: false, ...updateDateFilter }),
+    Lead.countDocuments({ ...leadFilter, isDeleted: false, ...dateFilter }),
+    Verification.countDocuments({ ...verifFilter, status: 'verified', isDeleted: false, ...updateDateFilter }),
+    Verification.countDocuments({ ...verifFilter, status: 'on_hold', isDeleted: false, ...updateDateFilter }),
+    Lead.countDocuments({ ...leadFilter, status: 'closed_lost', isDeleted: false, ...updateDateFilter }),
+    Verification.countDocuments({ ...verifFilter, isDeleted: false, ...dateFilter }),
   ]);
 
   const { Order } = await import('../shiprocket/models/order.model.js');
@@ -247,85 +241,187 @@ export const getStaffTodayLists = async (userRole, userId, targetDate, targetSta
   const start = range.start;
   const end = range.end;
 
-  const filter = isAllTime ? {} : { createdAt: { $gte: start, $lte: end } };
-  const updateFilter = isAllTime ? {} : { updatedAt: { $gte: start, $lte: end } };
-  const taskFilter = { isDeleted: false, ...(isAllTime ? {} : { updatedAt: { $gte: start, $lte: end } }) };
-
   let sid = null;
   const staffIdToUse = targetStaffId || userId;
   if (staffIdToUse && mongoose.Types.ObjectId.isValid(String(staffIdToUse))) {
     sid = new mongoose.Types.ObjectId(String(staffIdToUse));
   }
 
-  if (sid) {
-    filter.assignedTo = sid;
-    updateFilter.assignedTo = sid;
-    taskFilter.assignedTo = sid;
-  }
-  
-  if (userDepartments && userDepartments.length > 0) {
-    filter.department = { $in: userDepartments };
-    updateFilter.department = { $in: userDepartments };
-    taskFilter.department = { $in: userDepartments };
-  }
+  const deptFilter = (userDepartments && userDepartments.length > 0) ? { department: { $in: userDepartments } } : {};
+  const timeUpdate = isAllTime ? {} : { updatedAt: { $gte: start, $lte: end } };
+  const timeCreate = isAllTime ? {} : { createdAt: { $gte: start, $lte: end } };
 
-  const { Order } = await import('../shiprocket/models/order.model.js');
-  const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
+  // Strict self-ownership queries: only show what the staff member did/is assigned to
+  const cnpQuery = { isDeleted: false, ...deptFilter, ...timeUpdate };
+  if (sid) cnpQuery.$or = [{ assignedTo: sid }, { changedBy: String(sid) }];
+
+  const callAgainQuery = { isDeleted: false, ...deptFilter, ...timeUpdate };
+  if (sid) callAgainQuery.$or = [{ assignedTo: sid }, { createdBy: sid }];
+
+  const interestedTaskQuery = { isDeleted: false, status: 'interested', ...deptFilter, ...timeUpdate };
+  if (sid) interestedTaskQuery.$or = [{ assignedTo: sid }, { createdBy: sid }];
+
+  const interestedLeadQuery = { isDeleted: false, status: 'interested', ...deptFilter, ...timeUpdate };
+  if (sid) interestedLeadQuery.$or = [{ assignedTo: sid }, { createdBy: sid }];
+
+  const cancelTaskQuery = { isDeleted: false, status: 'cancel_call', ...deptFilter, ...timeUpdate };
+  if (sid) cancelTaskQuery.$or = [{ assignedTo: sid }, { createdBy: sid }];
+
+  const onHoldVerifQuery = { isDeleted: false, status: 'on_hold', ...deptFilter, ...timeUpdate };
+  if (sid) onHoldVerifQuery.$or = [{ assignedTo: sid }, { verifiedBy: sid }];
+
+  const onHoldLeadQuery = { isDeleted: false, status: 'on_hold', ...deptFilter, ...timeUpdate };
+  if (sid) onHoldLeadQuery.$or = [{ assignedTo: sid }, { createdBy: sid }];
+
+  const verifQuery = { isDeleted: false, ...deptFilter, ...timeCreate };
+  if (sid) verifQuery.$or = [{ assignedTo: sid }, { verifiedBy: sid }];
+
   const Lead = (await import('../lead/lead.model.js')).default;
   const Task = (await import('../task/task.model.js')).default;
 
-  const orderDateFilter = isAllTime ? {} : { createdAt: { $gte: start, $lte: end } };
-
-  const [cnpList, callAgainList, interestedList, notInterestedList, onHoldList, verificationList, taskList, staffStatsRes] = await Promise.all([
-    Cnp.find(updateFilter)
-      .populate('lead', 'name phone').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(100).lean(),
-    CallAgain.find(updateFilter)
-      .populate('lead', 'name phone').populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(100).lean(),
-    Task.find({ ...taskFilter, status: 'interested' })
-      .populate('lead', 'name phone').sort({ updatedAt: -1 }).limit(100).lean(),
-    Task.find({ ...taskFilter, status: 'cancel_call' })
-      .populate('lead', 'name phone').sort({ updatedAt: -1 }).limit(100).lean(),
-    Verification.find({ ...updateFilter, status: 'on_hold' })
-      .populate('lead', 'name phone').sort({ updatedAt: -1 }).limit(100).lean(),
-    Verification.find({ ...filter })
-      .populate('lead', 'name phone status').sort({ createdAt: -1 }).limit(100).lean(),
-    Task.find({ ...taskFilter })
-      .populate('lead', 'name phone').sort({ updatedAt: -1 }).limit(100).lean(),
-    sid ? getAllStaffStats(targetDate, from, to, preset) : Promise.resolve(null),
+  const [
+    cnpList,
+    callAgainList,
+    rawInterestedTasks,
+    rawInterestedLeads,
+    notInterestedList,
+    rawOnHoldVerifs,
+    rawOnHoldLeads,
+    verificationList,
+  ] = await Promise.all([
+    Cnp.find(cnpQuery)
+      .select('lead assignedTo status updatedAt department')
+      .populate('lead', 'name phone problem cityVillage state department')
+      .populate('assignedTo', 'name')
+      .sort({ updatedAt: -1 })
+      .limit(100)
+      .lean(),
+    CallAgain.find(callAgainQuery)
+      .select('lead assignedTo status updatedAt reminderAt department')
+      .populate('lead', 'name phone problem cityVillage state department')
+      .populate('assignedTo', 'name')
+      .sort({ updatedAt: -1 })
+      .limit(100)
+      .lean(),
+    Task.find(interestedTaskQuery)
+      .select('lead title problem cityVillage state department status updatedAt assignedTo')
+      .populate('lead', 'name phone problem cityVillage state department')
+      .sort({ updatedAt: -1 })
+      .limit(100)
+      .lean(),
+    Lead.find(interestedLeadQuery)
+      .select('name phone problem cityVillage state department status updatedAt assignedTo')
+      .sort({ updatedAt: -1 })
+      .limit(100)
+      .lean(),
+    Task.find(cancelTaskQuery)
+      .select('lead title problem cityVillage state department status updatedAt')
+      .populate('lead', 'name phone')
+      .sort({ updatedAt: -1 })
+      .limit(100)
+      .lean(),
+    Verification.find(onHoldVerifQuery)
+      .select('lead name phone problem cityVillage state department status updatedAt createdAt assignedTo verifiedBy')
+      .populate('lead', 'name phone problem cityVillage state department')
+      .sort({ updatedAt: -1 })
+      .limit(100)
+      .lean(),
+    Lead.find(onHoldLeadQuery)
+      .select('name phone problem cityVillage state department status updatedAt createdAt assignedTo')
+      .sort({ updatedAt: -1 })
+      .limit(100)
+      .lean(),
+    Verification.find(verifQuery)
+      .select('lead name phone problem cityVillage state department status createdAt assignedTo verifiedBy')
+      .populate('lead', 'name phone status')
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean(),
   ]);
 
-  let bookedOrders = [];
-  if (sid && staffStatsRes && staffStatsRes.staffStats) {
-    const foundStaff = staffStatsRes.staffStats.find(s => String(s.user._id) === String(sid));
-    if (foundStaff && foundStaff.bookedOrders) {
-      bookedOrders = foundStaff.bookedOrders;
-    }
+  // Combine & deduplicate Interested queue strictly respecting date filter
+  const seenInterested = new Set();
+  const interestedList = [];
+  for (const item of [...rawInterestedTasks, ...rawInterestedLeads]) {
+    const leadId = item.lead?._id ? String(item.lead._id) : (item.lead ? String(item.lead) : (item._id ? String(item._id) : null));
+    const phone = item.phone || item.lead?.phone;
+    const key = leadId || phone;
+    if (key && seenInterested.has(key)) continue;
+    if (key) seenInterested.add(key);
+    interestedList.push(item);
   }
 
-  return { cnpList, callAgainList, interestedList, notInterestedList, onHoldList, verificationList, taskList, bookedOrders };
+  // Combine & deduplicate On Hold queue strictly respecting date filter
+  const seenOnHold = new Set();
+  const onHoldList = [];
+  for (const item of [...rawOnHoldVerifs, ...rawOnHoldLeads]) {
+    const leadId = item.lead?._id ? String(item.lead._id) : (item.lead ? String(item.lead) : (item._id ? String(item._id) : null));
+    const phone = item.phone || item.lead?.phone;
+    const key = leadId || phone;
+    if (key && seenOnHold.has(key)) continue;
+    if (key) seenOnHold.add(key);
+    onHoldList.push(item);
+  }
+
+  return { cnpList, callAgainList, interestedList, notInterestedList, onHoldList, verificationList, taskList: [], bookedOrders: [] };
 };
 
 export const getStaffMonthlyChart = async (userId) => {
   const IST_OFFSET = 5.5 * 60 * 60 * 1000;
   const nowIST = new Date(Date.now() + IST_OFFSET);
-  const monthStart = new Date(Date.UTC(nowIST.getUTCFullYear(), nowIST.getUTCMonth(), 1) - IST_OFFSET);
+  const y = nowIST.getUTCFullYear();
+  const m = nowIST.getUTCMonth();
+  const daysInMonth = new Date(y, m + 1, 0).getDate();
+  const monthStart = new Date(Date.UTC(y, m, 1) - IST_OFFSET);
+  const monthEnd = new Date(Date.UTC(y, m + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
 
-  const match = { createdAt: { $gte: monthStart } };
+  const match = { createdAt: { $gte: monthStart, $lte: monthEnd } };
   if (userId) {
     match.assignedTo = new mongoose.Types.ObjectId(userId);
   }
 
-  const data = await Verification.aggregate([
-    { $match: match },
-    { $group: { _id: { $dayOfMonth: '$createdAt' }, count: { $sum: 1 } } },
-    { $sort: { '_id': 1 } },
+  const startDateStr = `${y}-${String(m + 1).padStart(2, '0')}-01`;
+  const endDateStr = `${y}-${String(m + 1).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
+
+  const ReadyToShipment = (await import('../readytoshipment/readytoshipment.model.js')).default;
+
+  const [data, targets, rtsData] = await Promise.all([
+    Verification.aggregate([
+      { $match: match },
+      { $group: { _id: { $dayOfMonth: { date: '$createdAt', timezone: '+05:30' } }, count: { $sum: 1 } } },
+      { $sort: { '_id': 1 } },
+    ]),
+    userId ? StaffTarget.find({
+      user: new mongoose.Types.ObjectId(userId),
+      date: { $gte: startDateStr, $lte: endDateStr }
+    }).lean() : Promise.resolve([]),
+    ReadyToShipment.aggregate([
+      { $match: match },
+      { $group: { _id: { $dayOfMonth: { date: '$createdAt', timezone: '+05:30' } }, count: { $sum: 1 } } },
+      { $sort: { '_id': 1 } },
+    ])
   ]);
 
-  const daysInMonth = new Date(nowIST.getUTCFullYear(), nowIST.getUTCMonth() + 1, 0).getDate();
+  const targetMap = {};
+  targets.forEach(t => {
+    const dayNum = parseInt(t.date.split('-')[2], 10);
+    targetMap[dayNum] = t.target;
+  });
+
+  const rtsMap = {};
+  (rtsData || []).forEach(r => {
+    rtsMap[r._id] = r.count;
+  });
+
   return Array.from({ length: daysInMonth }, (_, i) => {
     const day = i + 1;
     const found = data.find(d => d._id === day);
-    return { day, count: found?.count || 0 };
+    return {
+      day,
+      count: found?.count || 0,
+      readyToShip: rtsMap[day] || 0,
+      target: targetMap[day] || 0
+    };
   });
 };
 
@@ -1829,6 +1925,8 @@ export const getAllStaffCommissions = async (month, year) => {
 
   const SUB_TOTAL_AMOUNT = (o) => Number(o.sub_total) || Number(o.total) || 0;
 
+  const { phoneToSales } = await getPhoneToSalesAgentMap(Order, ShipmaxxOrder, Lead, statsMap, allDeliveredOrders);
+
   const processOrder = (o) => {
     let uid = null;
     let isReorder = false;
@@ -1836,13 +1934,27 @@ export const getAllStaffCommissions = async (month, year) => {
     const tId = o.task_created_by ? String(o.task_created_by._id || o.task_created_by) : null;
     const vId = o.verified_by ? String(o.verified_by._id || o.verified_by) : null;
     const cId = o.created_by ? String(o.created_by._id || o.created_by) : null;
+    const phone = (o.billing_phone || (o.lead_id && (typeof o.lead_id === 'object' ? o.lead_id.phone : '')))?.replace(/\D/g, '').slice(-10);
 
     if (o.source_order_id) {
       uid = vId || cId;
       isReorder = true;
     } else {
-      const lIdAssignedTo = o.lead_id && typeof o.lead_id === 'object' ? String(o.lead_id.assignedTo) : null;
-      uid = tId || vId || lIdAssignedTo || cId;
+      const candidates = [tId, vId, cId].filter(Boolean);
+      for (const cand of candidates) {
+        if (statsMap[cand]) {
+          if (statsMap[cand].user.role === 'support' && phone && phoneToSales[phone]) {
+            uid = phoneToSales[phone];
+          } else {
+            uid = cand;
+          }
+          break;
+        }
+      }
+      if (!uid) {
+        const lIdAssignedTo = o.lead_id && typeof o.lead_id === 'object' ? String(o.lead_id.assignedTo) : null;
+        uid = lIdAssignedTo || (phone && phoneToSales[phone]) || null;
+      }
       if (o.lead_id && typeof o.lead_id === 'object' && o.lead_id.status === 'old') {
         isReorder = true;
       }
@@ -1898,7 +2010,31 @@ export const getAllStaffCommissions = async (month, year) => {
 
 export const getStaffCommission = async (userId, month, year) => {
   const all = await getAllStaffCommissions(month, year);
-  const staffData = all.staff.find(s => String(s.user._id) === String(userId));
+  let staffData = all.staff.find(s => String(s.user._id) === String(userId));
+  const delStats = await getStaffDeliveryStats(month, year, userId);
+  if (delStats) {
+    const revenueCommission = delStats.newCommissionTotal ?? 0;
+    const reorderCommission = delStats.oldCommissionTotal ?? 0;
+    const totalCommission = staffData?.override?.manualCommission ?? (delStats.totalCommission ?? (revenueCommission + reorderCommission));
+    const basePay = staffData?.basePay ?? 0;
+    const totalPay = (staffData?.override?.manualCommission !== undefined && staffData?.override?.manualBasePay !== undefined)
+      ? staffData.totalPay
+      : (basePay + totalCommission);
+
+    staffData = {
+      ...(staffData || {}),
+      user: staffData?.user || { _id: userId },
+      commissionRate: staffData?.commissionRate ?? 10,
+      totalDeliveries: delStats.delivered ?? (staffData?.totalDeliveries || 0),
+      newDeliveries: delStats.newDelivered ?? 0,
+      oldDeliveries: delStats.oldDelivered ?? 0,
+      revenueCommission,
+      reorderCommission,
+      totalCommission,
+      basePay,
+      totalPay
+    };
+  }
   return staffData || { totalPay: 0, basePay: 0, totalCommission: 0, totalRevenue: 0 };
 };
 
@@ -2037,7 +2173,28 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
     reorderSettings = { reorder_commission_amount: 0, reorder_commission_percent: 0, commission_type: 'flat' };
   }
 
-  const { isAllTime, start: monthStart, end: monthEnd } = buildStatsDateRange(preset, from, to);
+  let monthStart, monthEnd, isAllTime = false;
+  const IST_OFFSET = 5.5 * 60 * 60 * 1000;
+
+  if (preset || from || to) {
+    const range = buildStatsDateRange(preset, from, to);
+    isAllTime = range.isAllTime;
+    monthStart = range.start;
+    monthEnd = range.end;
+  } else {
+    const nowIst = new Date(Date.now() + IST_OFFSET);
+    const m = (month !== null && month !== undefined && !isNaN(Number(month)))
+      ? Number(month)
+      : nowIst.getUTCMonth();
+    const y = (year !== null && year !== undefined && !isNaN(Number(year)))
+      ? Number(year)
+      : nowIst.getUTCFullYear();
+
+    monthStart = new Date(Date.UTC(y, m, 1) - IST_OFFSET);
+    monthEnd = new Date(Date.UTC(y, m + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
+  }
+
+  const isPersonal = Boolean(filterUserId && filterUserId !== 'all');
 
   const allUsers = await User.find({ role: { $in: ['sales', 'support'] }, isDeleted: false })
     .select('_id name role commissionRate').lean();
@@ -2047,19 +2204,46 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
     statsMap[String(u._id)] = { user: u, delivered: 0, newDelivered: 0, oldDelivered: 0, supportOldDelivered: 0, rto: 0 };
   }
 
-  // RTO lookback: 45 days (1 month 15 days) from the end of the period
-  const rtoLookbackStart = isAllTime ? null : new Date(monthEnd.getTime() - 45 * 24 * 60 * 60 * 1000);
+  // Filter RTO & Ready to Ship strictly within the selected month (no 45-day lookback)
   const rtoTimeFilter = isAllTime ? {} : {
-    createdAt: { $gte: rtoLookbackStart, $lte: monthEnd }
+    createdAt: { $gte: monthStart, $lte: monthEnd }
   };
 
-  const [synchronizedDelivered, rtoOrdersSM, rtoOrdersSR] = await Promise.all([
+  const ReadyToShipment = (await import('../readytoshipment/readytoshipment.model.js')).default;
+  const rtsTimeFilter = isAllTime ? {} : {
+    createdAt: { $gte: monthStart, $lte: monthEnd }
+  };
+  if (isPersonal) {
+    rtsTimeFilter.assignedTo = new mongoose.Types.ObjectId(filterUserId);
+  }
+
+  const [synchronizedDelivered, rtoOrdersSM, rtoOrdersSR, rtsDocs] = await Promise.all([
     getSynchronizedDeliveredOrders(monthStart, monthEnd, Order, ShipmaxxOrder, false),
     ShipmaxxOrder.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
       .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by awb_code order_id').lean(),
     Order.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
       .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by awb_code order_id').lean(),
+    ReadyToShipment.find(rtsTimeFilter)
+      .populate('lead', 'name phone')
+      .populate('assignedTo', 'name')
+      .sort({ createdAt: -1 })
+      .lean()
   ]);
+
+  const readyToShipOrders = (rtsDocs || []).map(r => ({
+    _id: r._id,
+    order_id: r.task || r._id,
+    name: r.lead?.name || r.name || r.title || 'Customer',
+    phone: r.lead?.phone || '—',
+    awb: '—',
+    courier: 'Ready to Dispatch',
+    amount: r.price || 0,
+    status: r.sentToShiprocket ? 'Dispatched' : 'Ready to Ship',
+    date: r.createdAt,
+    city: r.cityVillage || '',
+    state: r.state || '',
+    staff_name: r.assignedTo?.name || null,
+  }));
 
   const allOrders = [
     ...synchronizedDelivered.map(o => ({ ...o, type: 'delivered' })),
@@ -2068,8 +2252,25 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
   ];
 
   if (allOrders.length === 0) {
-    if (filterUserId) return { delivered: 0, newDelivered: 0, oldDelivered: 0, supportOldDelivered: 0, rto: 0, deliveredOrders: [], newDeliveredOrders: [], oldDeliveredOrders: [], rtoOrders: [] };
-    return { staff: [], unassignedDelivered: 0, unassignedRto: 0, totalDelivered: 0, totalRto: 0 };
+    return {
+      delivered: 0,
+      newDelivered: 0,
+      oldDelivered: 0,
+      supportOldDelivered: 0,
+      rto: 0,
+      readyToShip: readyToShipOrders.length,
+      deliveredOrders: [],
+      newDeliveredOrders: [],
+      oldDeliveredOrders: [],
+      rtoOrders: [],
+      readyToShipOrders,
+      staff: [],
+      unassignedDelivered: 0,
+      unassignedRto: 0,
+      totalDelivered: 0,
+      totalRto: 0,
+      totalReadyToShip: readyToShipOrders.length,
+    };
   }
 
   const allLeadIds = [...new Set(allOrders.map(o => o.lead_id).filter(Boolean).map(String))];
@@ -2147,16 +2348,17 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
     if (!handled) unassignedDelivered++;
   }
 
-  // If personal request — return only this user's stats + order lists
-  if (filterUserId) {
-    const me = statsMap[String(filterUserId)];
-    if (!me) return { delivered: 0, newDelivered: 0, oldDelivered: 0, supportOldDelivered: 0, rto: 0, deliveredOrders: [], newDeliveredOrders: [], oldDeliveredOrders: [], rtoOrders: [] };
+  // Support personal staff view or full company admin view
+  const me = isPersonal ? statsMap[String(filterUserId)] : null;
+  if (isPersonal && !me) {
+    return { delivered: 0, newDelivered: 0, oldDelivered: 0, supportOldDelivered: 0, rto: 0, deliveredOrders: [], newDeliveredOrders: [], oldDeliveredOrders: [], rtoOrders: [], staff: [] };
+  }
 
-    const myDeliveredIds = new Set();
-    const myNewDeliveredIds = new Set();
-    const myOldDeliveredIds = new Set();
-    const myRtoIds = new Set();
-    const strUserId = String(filterUserId);
+  const myDeliveredIds = new Set();
+  const myNewDeliveredIds = new Set();
+  const myOldDeliveredIds = new Set();
+  const myRtoIds = new Set();
+  const strUserId = isPersonal ? String(filterUserId) : null;
 
     for (const o of allOrders) {
       const lId = o.lead_id ? String(o.lead_id) : null;
@@ -2171,7 +2373,7 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
         let uid = lUid;
         if (!uid && cId && statsMap[cId] && statsMap[cId].user.role === 'sales') uid = cId;
         
-        if (uid === strUserId) myRtoIds.add(String(o._id));
+        if (!isPersonal || uid === strUserId) myRtoIds.add(String(o._id));
         continue;
       }
 
@@ -2182,7 +2384,11 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
         const candidates = [tId, leadOwner, vId, cId].filter(Boolean);
         for (const cand of candidates) {
           if (statsMap[cand]) {
-            if (cand === strUserId) {
+            if (!isPersonal) {
+              myDeliveredIds.add(String(o._id));
+              if (statsMap[cand].user.role === 'support') myOldDeliveredIds.add(String(o._id));
+              else myNewDeliveredIds.add(String(o._id));
+            } else if (cand === strUserId) {
               myDeliveredIds.add(String(o._id));
               if (me.user.role === 'support') myOldDeliveredIds.add(String(o._id));
               else myNewDeliveredIds.add(String(o._id));
@@ -2194,7 +2400,10 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
           }
         }
       } else {
-        if (me.user.role === 'support') {
+        if (!isPersonal) {
+          myDeliveredIds.add(String(o._id));
+          myOldDeliveredIds.add(String(o._id));
+        } else if (me.user.role === 'support') {
           const supportCand = [vId, cId, leadOwner].filter(Boolean);
           for (const cand of supportCand) {
             if (statsMap[cand] && statsMap[cand].user.role === 'support') {
@@ -2217,20 +2426,110 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
     // Fetch full details for these orders
     const allIds = [...myDeliveredIds, ...myRtoIds];
     const ReorderCommission = (await import('../commission/reorderCommission.model.js')).default;
-    const commissions = await ReorderCommission.find({ order_id: { $in: allIds }, staff_id: strUserId }).lean();
+    const commissions = strUserId
+      ? await ReorderCommission.find({ order_id: { $in: allIds }, staff_id: strUserId }).lean()
+      : await ReorderCommission.find({ order_id: { $in: allIds } }).lean();
     const commissionMap = {};
     for (const c of commissions) commissionMap[String(c.order_id)] = c.commission_amount;
 
+    const [Return, ShipmaxxReturn, NdrNote] = await Promise.all([
+      import('../shiprocket/models/return.model.js').then(m => m.default).catch(() => null),
+      import('../shipmaxx/models/shipmaxxReturn.model.js').then(m => m.default).catch(() => null),
+      import('../shiprocket/models/ndrNote.model.js').then(m => m.NdrNote).catch(() => null),
+    ]);
+
     const [smFull, srFull] = await Promise.all([
       ShipmaxxOrder.find({ _id: { $in: allIds } })
-        .select('_id billing_customer_name billing_phone awb_code sub_total total status delivered_at createdAt lead_id')
-        .populate('lead_id', 'name phone')
+        .select('_id billing_customer_name billing_phone awb_code sub_total total status delivered_at createdAt lead_id problem notes comments courier_name courier_reason courier_action_by created_by verified_by task_created_by')
+        .populate('lead_id', 'name phone assignedTo')
+        .populate('comments.createdBy', 'name role employeeId')
+        .populate('created_by', 'name role employeeId')
+        .populate('verified_by', 'name role employeeId')
         .lean(),
       Order.find({ _id: { $in: allIds } })
-        .select('_id billing_customer_name billing_phone awb_code sub_total total status delivered_at createdAt lead_id')
-        .populate('lead_id', 'name phone')
+        .select('_id billing_customer_name billing_phone awb_code sub_total total status delivered_at createdAt lead_id problem notes comments courier_name courier_reason courier_action_by created_by verified_by task_created_by')
+        .populate('lead_id', 'name phone assignedTo')
+        .populate('comments.createdBy', 'name role employeeId')
+        .populate('created_by', 'name role employeeId')
+        .populate('verified_by', 'name role employeeId')
         .lean(),
     ]);
+
+    // Build RTO lookup maps across awb_code
+    const rtoAwbs = [...smFull, ...srFull]
+      .filter(o => myRtoIds.has(String(o._id)) && o.awb_code)
+      .map(o => o.awb_code);
+
+    const rtoMap = {};
+    const ndrNotesMap = {};
+    const courierReasonMap = {};
+
+    for (const o of [...smFull, ...srFull]) {
+      if (o.awb_code && o.courier_reason) {
+        courierReasonMap[o.awb_code] = o.courier_reason;
+      }
+    }
+
+    if (rtoAwbs.length > 0) {
+      const [srReturns, smReturns, ndrNotes] = await Promise.all([
+        Return ? Return.find({ awb_code: { $in: rtoAwbs } }).select('awb_code return_reason').lean() : [],
+        ShipmaxxReturn ? ShipmaxxReturn.find({ awb_code: { $in: rtoAwbs } }).select('awb_code return_reason').lean() : [],
+        NdrNote ? NdrNote.find({ awb_number: { $in: rtoAwbs } }).select('awb_number reason createdBy createdAt').populate('createdBy', 'name role employeeId').lean() : [],
+      ]);
+      for (const r of srReturns) { if (r.awb_code && r.return_reason) rtoMap[r.awb_code] = r.return_reason; }
+      for (const r of smReturns) { if (r.awb_code && r.return_reason) rtoMap[r.awb_code] = r.return_reason; }
+      for (const n of ndrNotes) { 
+        if (n.awb_number && n.reason) {
+          rtoMap[n.awb_number] = n.reason;
+          ndrNotesMap[n.awb_number] = n;
+        }
+      }
+
+      // Fetch tracking history for any missing courier reasons and cache in DB
+      const missingAwbs = rtoAwbs.filter(awb => {
+        const existing = courierReasonMap[awb];
+        return !existing || /no client instructions/i.test(existing);
+      }).slice(0, 40);
+      if (missingAwbs.length > 0) {
+        try {
+          const smx = await import('../shipmaxx/shipmaxx.service.js');
+          await Promise.allSettled(missingAwbs.map(async (awb) => {
+            try {
+              const track = await smx.trackShipment(awb);
+              const hist = track?.history || [];
+              const undelivered = hist.filter(h => {
+                const s = (h.system_status_name || h.status_name || h.status || '').toLowerCase();
+                const d = (h.description || '').toLowerCase();
+                const transitNoise = /bag|facility|trip|vehicle|manifest|booked|weight captured|picked up|out for pickup|pickup scheduled|departed|arrived|received at origin|no client instructions/i;
+                if (transitNoise.test(d)) return false;
+                if (d === 'out for delivery') return false;
+                return s.includes('undelivered') || s.includes('exception') || s.includes('rto') || s.includes('failed') || d.includes('cancellation') || d.includes('refus') || d.includes('unavailable');
+              });
+              if (undelivered.length > 0) {
+                const d = undelivered[0].description;
+                const loc = undelivered[0].location ? ` (${undelivered[0].location})` : '';
+                const fullDbReason = d + loc;
+                courierReasonMap[awb] = fullDbReason;
+                ShipmaxxOrder.updateOne({ awb_code: awb }, { $set: { courier_reason: fullDbReason } }).exec().catch(() => {});
+              }
+            } catch (_) {}
+          }));
+        } catch (_) {}
+      }
+    }
+
+    const normalizeRtoReason = (raw) => {
+      if (!raw) return 'Delivery Attempt Failed';
+      const v = String(raw).trim().toLowerCase();
+      if (/refus|reject|cancel|mana|nahi lena|wapas|denied/i.test(v)) return 'Customer Refused';
+      if (/unreachable|no.?answer|not.?reachable|phone|switch|busy|coverage|contact|unavailable|absent/i.test(v)) return 'Customer Unreachable';
+      if (/address|wrong.?add|incorrect.?add|not.?found|landmark|incomplete|location/i.test(v)) return 'Address Issue';
+      if (/cash|money|cod|paisa/i.test(v)) return 'COD / Cash Unavailable';
+      if (/reschedule|tomorrow|next.?week|out.?of.?station|later|delay|time/i.test(v)) return 'Customer Rescheduled';
+      if (/damage|broken|leak/i.test(v)) return 'Damaged in Transit';
+      if (/fake|otp|no.?attempt|maximum attempt/i.test(v)) return 'Courier / Delivery Issue';
+      return raw.length > 35 ? raw.slice(0, 32) + '...' : raw;
+    };
 
     const formatOrder = (o) => {
       let comm = commissionMap[String(o._id)];
@@ -2240,14 +2539,14 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
         comm = 0;
         const amt = Number(o.sub_total) || Number(o.total) || 0;
         if (myNewDeliveredIds.has(String(o._id))) {
-          if (me.user.role === 'support') {
+          if (me?.user?.role === 'support') {
             comm = 50;
           } else {
-            comm = Math.round(amt * ((me.user.commissionRate ?? 5) / 100));
+            comm = Math.round(amt * ((me?.user?.commissionRate ?? 5) / 100));
           }
         } else if (myOldDeliveredIds.has(String(o._id))) {
           // Dynamic calculation for Repeat / Re-Ver
-          const isOriginal = (me.user.role === 'sales'); 
+          const isOriginal = (me?.user?.role === 'sales'); 
           
           const slab = (reorderSettings.price_slabs || []).find(s =>
             amt >= s.min_price && (s.max_price === null || s.max_price === undefined || amt <= s.max_price)
@@ -2262,16 +2561,109 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
           }
         }
       }
+
+      const isRto = myRtoIds.has(String(o._id));
+      let deliveryBoyReason = null;
+      let rtoReason = null;
+      let logisticsRemark = null;
+      let logisticsAddedBy = null;
+      let logisticsAddedRole = null;
+      let logisticsAddedAt = null;
+      let adminRemark = null;
+      let adminAddedBy = null;
+      let adminAddedRole = null;
+      let adminAddedAt = null;
+      const allRemarks = [];
+
+      if (isRto) {
+        // Collect comment history with author info
+        const validComments = (o.comments || []).filter(c => c && c.text && String(c.text).trim());
+        for (const c of validComments) {
+          allRemarks.push({
+            text: c.text,
+            section: c.section || '',
+            addedBy: c.createdBy?.name || 'Staff',
+            role: c.createdBy?.role || '',
+            date: c.createdAt || null,
+          });
+        }
+
+        // 1. Delivery Boy / Courier Exception Reason (Field reason)
+        deliveryBoyReason = courierReasonMap[o.awb_code] || 
+                            o.courier_reason || 
+                            (o.awb_code && rtoMap[o.awb_code]) || 
+                            (o.awb_code && ndrNotesMap[o.awb_code]?.reason) || 
+                            o.problem || 
+                            o.notes || 
+                            null;
+
+        if (!deliveryBoyReason) {
+          deliveryBoyReason = 'Consignee Unavailable / Refused';
+        }
+
+        // RTO category normalized strictly from delivery boy / courier exception reason
+        rtoReason = normalizeRtoReason(deliveryBoyReason);
+
+        // 2. Logistics Team Note (Added by Logistics team member during NDR / call)
+        const logComment = [...validComments].reverse().find(c => 
+          c.createdBy?.role === 'logistics' || 
+          ['UNDELIVERED', 'OUT_FOR_DELIVERY', 'NDR', 'SHIPMAXX', 'shipmaxx'].includes(c.section) ||
+          (c.createdBy?.role && !['admin', 'sales'].includes(c.createdBy.role))
+        );
+        if (logComment) {
+          logisticsRemark = logComment.text;
+          logisticsAddedBy = logComment.createdBy?.name || 'Logistics Team';
+          logisticsAddedRole = logComment.createdBy?.role || 'logistics';
+          logisticsAddedAt = logComment.createdAt;
+        }
+
+        // 3. Admin / Verification Note (Added by Admin or Verifier)
+        const admComment = [...validComments].reverse().find(c => 
+          c.createdBy?.role === 'admin' || 
+          c.section === 'rto_verification'
+        );
+        if (admComment) {
+          adminRemark = admComment.text;
+          adminAddedBy = admComment.createdBy?.name || 'Admin';
+          adminAddedRole = admComment.createdBy?.role || 'admin';
+          adminAddedAt = admComment.createdAt;
+        }
+      }
       
       return {
         _id: o._id,
         name: o.lead_id?.name || o.billing_customer_name || '—',
         phone: o.lead_id?.phone || o.billing_phone || '—',
         awb: o.awb_code || '—',
+        courier: o.courier_name || '—',
         amount: Number(o.sub_total) || Number(o.total) || 0,
         status: o.status,
         date: o.delivered_at || o.createdAt,
-        commission: comm
+        commission: comm,
+        delivery_boy_reason: deliveryBoyReason,
+        rto_reason: rtoReason,
+        logistics_remark: logisticsRemark,
+        logistics_added_by: logisticsAddedBy,
+        logistics_added_role: logisticsAddedRole,
+        logistics_added_at: logisticsAddedAt,
+        admin_remark: adminRemark,
+        admin_added_by: adminAddedBy,
+        admin_added_role: adminAddedRole,
+        admin_added_at: adminAddedAt,
+        // Legacy fallbacks for compatibility
+        rto_remark: logisticsRemark || adminRemark || deliveryBoyReason,
+        rto_added_by: logisticsAddedBy || adminAddedBy || 'Courier Partner',
+        rto_added_role: logisticsAddedRole || adminAddedRole || '',
+        rto_added_at: logisticsAddedAt || adminAddedAt || null,
+        rto_remarks_history: allRemarks,
+        verified_by_name: o.verified_by?.name || null,
+        created_by_name: o.created_by?.name || null,
+        staff_name: (o.lead_id?.assignedTo && statsMap[String(o.lead_id.assignedTo)]?.user?.name) ||
+                    (o.lead_id && leadAssignMap[String(o.lead_id?._id || o.lead_id)] && statsMap[leadAssignMap[String(o.lead_id?._id || o.lead_id)]]?.user?.name) ||
+                    (o.created_by?._id && statsMap[String(o.created_by._id)]?.user?.name) ||
+                    o.verified_by?.name ||
+                    o.created_by?.name ||
+                    null,
       };
     };
 
@@ -2289,31 +2681,38 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
     const oldCommissionTotal = oldDeliveredOrders.reduce((sum, o) => sum + (o.commission || 0), 0);
     const totalCommission = deliveredOrders.reduce((sum, o) => sum + (o.commission || 0), 0);
 
+    const staffList = Object.values(statsMap)
+      .filter(s => s.delivered > 0 || s.rto > 0)
+      .sort((a, b) => (b.delivered + b.rto) - (a.delivered + a.rto));
+
+    const totalDelivered = staffList.reduce((s, x) => s + x.delivered, 0) + unassignedDelivered;
+    const totalRto = staffList.reduce((s, x) => s + x.rto, 0) + unassignedRto;
+    const totalNewDelivered = staffList.reduce((s, x) => s + (x.newDelivered || 0), 0);
+    const totalOldDelivered = staffList.reduce((s, x) => s + (x.oldDelivered || 0), 0);
+
     return { 
-      delivered: me.delivered, 
-      newDelivered: me.newDelivered,
-      oldDelivered: me.oldDelivered,
-      supportOldDelivered: me.supportOldDelivered,
-      rto: me.rto, 
+      delivered: isPersonal ? me.delivered : totalDelivered, 
+      newDelivered: isPersonal ? me.newDelivered : totalNewDelivered,
+      oldDelivered: isPersonal ? me.oldDelivered : totalOldDelivered,
+      supportOldDelivered: isPersonal ? me.supportOldDelivered : 0,
+      rto: isPersonal ? me.rto : totalRto, 
+      readyToShip: readyToShipOrders.length,
       deliveredOrders, 
       newDeliveredOrders,
       oldDeliveredOrders,
       rtoOrders,
+      readyToShipOrders,
       newCommissionTotal,
       oldCommissionTotal,
-      totalCommission
+      totalCommission,
+      staff: staffList,
+      unassignedDelivered,
+      unassignedRto,
+      totalDelivered,
+      totalRto,
+      totalReadyToShip: readyToShipOrders.length
     };
-  }
-
-  const staffList = Object.values(statsMap)
-    .filter(s => s.delivered > 0 || s.rto > 0)
-    .sort((a, b) => (b.delivered + b.rto) - (a.delivered + a.rto));
-
-  const totalDelivered = staffList.reduce((s, x) => s + x.delivered, 0) + unassignedDelivered;
-  const totalRto = staffList.reduce((s, x) => s + x.rto, 0) + unassignedRto;
-
-  return { staff: staffList, unassignedDelivered, unassignedRto, totalDelivered, totalRto };
-};
+  };
 
 export const mapStandardStatus = (rawStatus) => {
   if (!rawStatus) return 'pending';

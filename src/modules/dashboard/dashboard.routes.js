@@ -18,12 +18,12 @@ router.get('/staff-verifications', auth('admin', 'manager', 'sales', 'support', 
 router.get('/staff-today-lists', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getStaffTodayLists);
 router.get('/staff-monthly-chart', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(120), dashboardController.getStaffMonthlyChart);
 router.get('/all-staff-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getAllStaffStats);
-router.get('/staff-commission', auth('admin', 'manager', 'sales', 'support', 'logistics'), cacheMiddleware(300), dashboardController.getStaffCommission);
+router.get('/staff-commission', auth('admin', 'manager', 'sales', 'support', 'logistics'), cacheMiddleware(15), dashboardController.getStaffCommission);
 router.get('/all-staff-commissions', auth('admin', 'manager'), cacheMiddleware(300), dashboardController.getAllStaffCommissions);
 router.post('/save-commission-override', auth('admin', 'manager'), dashboardController.saveCommissionOverride);
 router.get('/unassigned-orders', auth('admin', 'manager'), cacheMiddleware(300), dashboardController.getUnassignedOrders);
-router.get('/staff-delivery-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), cacheMiddleware(300), dashboardController.getStaffDeliveryStats);
-router.get('/my-delivery-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), cacheMiddleware(300), dashboardController.getMyDeliveryStats);
+router.get('/staff-delivery-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), cacheMiddleware(15), dashboardController.getStaffDeliveryStats);
+router.get('/my-delivery-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), cacheMiddleware(15), dashboardController.getMyDeliveryStats);
 router.post('/assign-order', auth('admin', 'manager'), dashboardController.assignOrder);
 router.get('/employee-performance-matrix', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getEmployeePerformanceMatrix);
 router.get('/staff-detail-kpis', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getStaffDetailKPIs);

@@ -433,6 +433,7 @@ router.post('/warehouses/create', auth(), c.createWarehouse);
 router.get('/invoice/:order_id', auth(), c.getInvoice);
 
 // ── NDR & NDR Notes ───────────────────────────────────────────────────────────
+router.get('/ndr/stats', auth(), c.getNdrStats);
 router.get('/ndr', auth(), c.getNdrList);
 router.post('/ndr/action', auth(), c.ndrAction);
 router.post('/ndr/:ndr_id/action', auth(), c.ndrAction);

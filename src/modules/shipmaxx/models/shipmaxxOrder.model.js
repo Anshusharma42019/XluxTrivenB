@@ -61,6 +61,8 @@ const shipmaxxOrderSchema = new mongoose.Schema({
   auto_followups_set: { type: Boolean, default: false },
   problem: { type: String, default: '' },
   notes: { type: String, default: '' },
+  courier_reason: { type: String, default: '' },
+  courier_action_by: { type: String, default: '' },
   comments: [{
     text: { type: String, required: true },
     type: { type: String, enum: ['general', 'followup'], default: 'general' },
