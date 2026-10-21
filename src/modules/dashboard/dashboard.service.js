@@ -1097,11 +1097,21 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
 
   const rtoStatusList = ['rto', 'RTO', 'rra', 'RRA', 'rto_verification', 'RTO_VERIFICATION', 'rto_delivered', 'RTO_DELIVERED', 'rto_in_transit', 'RTO_IN_TRANSIT'];
   const [rtoOrdersSM, rtoOrdersSR] = await Promise.all([
-    ShipmaxxOrder.find({ status: { $in: rtoStatusList }, ...rtoTimeFilter })
+    ShipmaxxOrder.find({
+      status: { $in: rtoStatusList },
+      rto_verification_action: { $ne: 'send_to_verification' },
+      sent_to_verification: { $ne: true },
+      ...rtoTimeFilter
+    })
       .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by')
       .populate('lead_id', 'assignedTo')
       .lean(),
-    Order.find({ status: { $in: rtoStatusList }, ...rtoTimeFilter })
+    Order.find({
+      status: { $in: rtoStatusList },
+      rto_verification_action: { $ne: 'send_to_verification' },
+      sent_to_verification: { $ne: true },
+      ...rtoTimeFilter
+    })
       .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by')
       .populate('lead_id', 'assignedTo')
       .lean()
@@ -2219,9 +2229,19 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
 
   const [synchronizedDelivered, rtoOrdersSM, rtoOrdersSR, rtsDocs] = await Promise.all([
     getSynchronizedDeliveredOrders(monthStart, monthEnd, Order, ShipmaxxOrder, false),
-    ShipmaxxOrder.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
+    ShipmaxxOrder.find({
+      status: { $regex: /^(rto|rra)/i },
+      rto_verification_action: { $ne: 'send_to_verification' },
+      sent_to_verification: { $ne: true },
+      ...rtoTimeFilter
+    })
       .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by awb_code order_id').lean(),
-    Order.find({ status: { $regex: /^(rto|rra)/i }, ...rtoTimeFilter })
+    Order.find({
+      status: { $regex: /^(rto|rra)/i },
+      rto_verification_action: { $ne: 'send_to_verification' },
+      sent_to_verification: { $ne: true },
+      ...rtoTimeFilter
+    })
       .select('_id lead_id createdAt source_order_id task_created_by verified_by created_by awb_code order_id').lean(),
     ReadyToShipment.find(rtsTimeFilter)
       .populate('lead', 'name phone')
@@ -2440,14 +2460,14 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
 
     const [smFull, srFull] = await Promise.all([
       ShipmaxxOrder.find({ _id: { $in: allIds } })
-        .select('_id billing_customer_name billing_phone awb_code sub_total total status delivered_at createdAt lead_id problem notes comments courier_name courier_reason courier_action_by created_by verified_by task_created_by')
+        .select('_id platform order_id billing_customer_name billing_phone awb_code sub_total total status delivered_at createdAt lead_id problem notes comments courier_name courier_reason courier_action_by created_by verified_by task_created_by')
         .populate('lead_id', 'name phone assignedTo')
         .populate('comments.createdBy', 'name role employeeId')
         .populate('created_by', 'name role employeeId')
         .populate('verified_by', 'name role employeeId')
         .lean(),
       Order.find({ _id: { $in: allIds } })
-        .select('_id billing_customer_name billing_phone awb_code sub_total total status delivered_at createdAt lead_id problem notes comments courier_name courier_reason courier_action_by created_by verified_by task_created_by')
+        .select('_id platform order_id billing_customer_name billing_phone awb_code sub_total total status delivered_at createdAt lead_id problem notes comments courier_name courier_reason courier_action_by created_by verified_by task_created_by')
         .populate('lead_id', 'name phone assignedTo')
         .populate('comments.createdBy', 'name role employeeId')
         .populate('created_by', 'name role employeeId')
@@ -2632,6 +2652,8 @@ export const getStaffDeliveryStats = async (month, year, filterUserId = null, fr
       
       return {
         _id: o._id,
+        order_id: o.order_id || o._id,
+        platform: o.platform || 'shipmaxx',
         name: o.lead_id?.name || o.billing_customer_name || '—',
         phone: o.lead_id?.phone || o.billing_phone || '—',
         awb: o.awb_code || '—',

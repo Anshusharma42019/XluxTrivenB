@@ -7,6 +7,8 @@ import { getStaffDeliveryStats } from './dashboard.service.js';
 const cache = new Map();
 const CACHE_TTL = 60000; // 60 seconds memory cache (automatically purged on data changes)
 
+export const clearDashboardCache = () => cache.clear();
+
 const withCache = async (key, fetchFn, bypass = false) => {
   if (!bypass) {
     const cached = cache.get(key);

@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import catchAsync from '../../utils/catchAsync.js';
 import ApiResponse from '../../utils/ApiResponse.js';
 import smx from './shipmaxx.service.js';
@@ -2872,7 +2873,13 @@ export const searchOrderByPhone = catchAsync(async (req, res) => {
 export const sendToVerification = catchAsync(async (req, res) => {
   const { id } = req.params;
   const { source, notes, problem, medicine, price } = req.body || {};
-  const order = await Order.findOne({ _id: id, platform: 'shipmaxx' }).populate('lead_id');
+  let order = null;
+  if (mongoose.Types.ObjectId.isValid(id)) {
+    order = await Order.findById(id).populate('lead_id');
+  }
+  if (!order) {
+    order = await Order.findOne({ $or: [{ order_id: String(id) }, { awb_code: String(id) }] }).populate('lead_id');
+  }
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
 
   let lead = order.lead_id;
@@ -2893,7 +2900,7 @@ export const sendToVerification = catchAsync(async (req, res) => {
         createdBy: req.user._id,
       });
     }
-    await Order.findByIdAndUpdate(id, { lead_id: lead._id });
+    await Order.findByIdAndUpdate(order._id, { lead_id: lead._id });
   }
 
   // Ensure Lead name matches order customer name if lead name is generic/missing
@@ -2970,10 +2977,11 @@ export const sendToVerification = catchAsync(async (req, res) => {
     updatePayload.rto_verification_action = 'send_to_verification';
   }
   if (notes) {
-    await Order.findByIdAndUpdate(id, { $push: { comments: { text: `[Verification ${isAddon ? 'Add-on' : 'Re-order'}] ${notes}`, type: 'general', createdBy: req.user._id } } });
+    await Order.findByIdAndUpdate(order._id, { $push: { comments: { text: `[Verification ${isAddon ? 'Add-on' : 'Re-order'}] ${notes}`, type: 'general', createdBy: req.user._id } } });
   }
-  await Order.findByIdAndUpdate(id, updatePayload);
-  await Lead.findByIdAndUpdate(lead._id, { $set: { pending_reorder_source: id, pending_reorder_staff: req.user._id } });
+  await Order.findByIdAndUpdate(order._id, updatePayload);
+  import('../dashboard/dashboard.controller.js').then(m => m.clearDashboardCache && m.clearDashboardCache()).catch(() => {});
+  await Lead.findByIdAndUpdate(lead._id, { $set: { pending_reorder_source: order._id, pending_reorder_staff: req.user._id } });
 
   // ── Commission Chain: Lock submitter ID for this Shipmaxx repeat order ───────────
   // This is step 4 of the commission workflow: the moment a repeat order is submitted

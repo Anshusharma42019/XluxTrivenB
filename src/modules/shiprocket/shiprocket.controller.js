@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import catchAsync from '../../utils/catchAsync.js';
 import ApiResponse from '../../utils/ApiResponse.js';
 import sr from './shiprocket.service.js';
@@ -2352,7 +2353,13 @@ export const webhook = catchAsync(async (req, res) => {
 export const sendToVerification = catchAsync(async (req, res) => {
   const { id } = req.params;
   const { source, notes, problem, medicine, price } = req.body || {};
-  const order = await Order.findById(id).populate('lead_id');
+  let order = null;
+  if (mongoose.Types.ObjectId.isValid(id)) {
+    order = await Order.findById(id).populate('lead_id');
+  }
+  if (!order) {
+    order = await Order.findOne({ $or: [{ order_id: String(id) }, { awb_code: String(id) }] }).populate('lead_id');
+  }
   if (!order) return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
 
   let lead = order.lead_id;
@@ -2447,11 +2454,12 @@ export const sendToVerification = catchAsync(async (req, res) => {
   if (source === 'rto') {
     updatePayload.rto_verification_action = 'send_to_verification';
   }
-  await Order.findByIdAndUpdate(id, updatePayload);
+  await Order.findByIdAndUpdate(order._id, updatePayload);
+  import('../dashboard/dashboard.controller.js').then(m => m.clearDashboardCache && m.clearDashboardCache()).catch(() => {});
   // Store source_order_id on lead so new order created from this verification can be linked back
-  await Lead.findByIdAndUpdate(lead._id, { $set: { pending_reorder_source: id, pending_reorder_staff: req.user._id } });
+  await Lead.findByIdAndUpdate(lead._id, { $set: { pending_reorder_source: order._id, pending_reorder_staff: req.user._id } });
   await logOrderActivity({
-    orderId: id,
+    orderId: order._id,
     actor: req.user?._id,
     type: 'verification_sent',
     title: 'Verification Sent',

@@ -75,7 +75,7 @@ const shipmaxxOrderSchema = new mongoose.Schema({
   source_order_id: { type: mongoose.Schema.Types.ObjectId, ref: 'ShipmaxxOrder', default: null },
   reorder_commission_generated: { type: Boolean, default: false },
   
-  rto_verification_action: { type: String, enum: ['wants_again', 'no_need'], default: null },
+  rto_verification_action: { type: String, enum: ['wants_again', 'no_need', 'send_to_verification'], default: null },
   interakt_reply_text: { type: String, default: null, index: true },
   interakt_reply_at: { type: Date, default: null },
   interakt_reply_read: { type: Boolean, default: false },

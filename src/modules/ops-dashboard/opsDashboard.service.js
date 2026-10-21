@@ -256,7 +256,7 @@ async function attachRolesToOrders(orders) {
  * Backlog activity (orders created in previous months) are fetched separately.
  */
 async function fetchOrderStats(filter) {
-  const proj = { status: 1, delivery_attempt: 1, delivered_at: 1, createdAt: 1, sub_total: 1, total: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1, interakt_reply_text: 1, interakt_reply_at: 1, task_created_by: 1 };
+  const proj = { status: 1, delivery_attempt: 1, delivered_at: 1, createdAt: 1, sub_total: 1, total: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1, interakt_reply_text: 1, interakt_reply_at: 1, task_created_by: 1, rto_verification_action: 1, sent_to_verification: 1 };
   const [sr, sm] = await Promise.all([
     Order.find(filter, proj).lean(),
     ShipmaxxOrder.find(filter, proj).lean(),
@@ -356,8 +356,8 @@ function calcKPIs(orders, startPeriod) {
       }
     } else if (cat === 'ofd')            { ofd++; }
     else if (cat === 'undelivered')      { undelivered++; }
-    else if (cat === 'rto_intersite')    { rtoIntersite++; }
-    else if (cat === 'rto')              { rto++; }
+    else if (cat === 'rto_intersite')    { if (o.rto_verification_action !== 'send_to_verification') rtoIntersite++; }
+    else if (cat === 'rto')              { if (o.rto_verification_action !== 'send_to_verification') rto++; }
     else if (cat === 'pickup_pending')   { pickupPending++; }
     else if (cat === 'in_transit')       { inTransit++; }
   }
@@ -639,7 +639,7 @@ export async function getKPIs(params) {
   const prevVerified = prevVerifiedSales + prevVerifiedSupport;
 
   // Backlog fetches (Orders created BEFORE start, but had activity THIS period)
-  const projBl = { status: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1, interakt_reply_text: 1, interakt_reply_at: 1, task_created_by: 1 };
+  const projBl = { status: 1, awb_code: 1, order_id: 1, lead_id: 1, verified_by: 1, verification_id: 1, created_by: 1, source_order_id: 1, interakt_reply_text: 1, interakt_reply_at: 1, task_created_by: 1, rto_verification_action: 1, sent_to_verification: 1 };
   const populates = [
     { path: 'lead_id', select: 'assignedTo', populate: { path: 'assignedTo', select: 'role' } },
     { path: 'verified_by', select: 'role' },
@@ -839,7 +839,7 @@ export async function getRtoReasons(params) {
   const { start, end } = buildDateRange(preset, from, to);
   const staffScope = await getStaffScope(staffId);
 
-  const f = { createdAt: { $gte: start, $lte: end } };
+  const f = { createdAt: { $gte: start, $lte: end }, rto_verification_action: { $ne: 'send_to_verification' } };
   if (hub)     f.pickup_location = { $regex: hub,     $options: 'i' };
   if (courier) f.courier_name    = { $regex: courier, $options: 'i' };
   if (state)   f.billing_state   = { $regex: state,   $options: 'i' };
@@ -907,7 +907,7 @@ export async function getAging(params) {
 
   const ofdFilter = { ...base, status: { $regex: 'out.?for.?delivery|^ofd', $options: 'i' }, status_updated_at: { $lte: new Date(now.getTime() - 2 * 86400000) } };
   const undFilter = { ...base, status: { $regex: '^undelivered|^ndr',        $options: 'i' }, delivery_attempt: { $gte: 3 } };
-  const rtoFilter = { ...base, status: { $regex: 'rto.?in.?transit|rto.?intersite', $options: 'i' }, status_updated_at: { $lte: new Date(now.getTime() - 5 * 86400000) } };
+  const rtoFilter = { ...base, status: { $regex: 'rto.?in.?transit|rto.?intersite', $options: 'i' }, status_updated_at: { $lte: new Date(now.getTime() - 5 * 86400000) }, rto_verification_action: { $ne: 'send_to_verification' } };
 
   const [ofdSR, ofdSM, undSR, undSM, rtoSR, rtoSM] = await Promise.all([
     Order.find(ofdFilter, proj).populate(populates).sort({ status_updated_at: 1 }).limit(150).lean(),
@@ -1013,6 +1013,9 @@ export async function getShipments(params) {
       { status: { $regex: targetStatusRegex, $options: 'i' } },
       { status_updated_at: { $gte: start, $lte: end } }
     ];
+    if (status === 'blRto' || status === 'blRtoIntersite') {
+      andClauses.push({ rto_verification_action: { $ne: 'send_to_verification' } });
+    }
     if (baseOr) andClauses.push({ $or: baseOr });
     
     baseFilter.$and = andClauses;
@@ -1108,6 +1111,10 @@ export async function getShipments(params) {
       };
       
       baseFilter.status = { $regex: statusRegex[status] || status, $options: 'i' };
+
+      if (status === 'rto' || status === 'rtoIntersite') {
+        baseFilter.rto_verification_action = { $ne: 'send_to_verification' };
+      }
 
       if (status === 'delivered') {
         delete baseFilter.createdAt;
@@ -1292,6 +1299,11 @@ export async function submitRtoVerification({ order_id, platform, action, commen
   const update = {};
   if (action) {
     update.$set = { rto_verification_action: action };
+    if (action === 'send_to_verification') {
+      update.$set.sent_to_verification = true;
+      update.$set.sent_to_verification_at = new Date();
+      if (userId) update.$set.sent_to_verification_by = userId;
+    }
   }
   if (comment && String(comment).trim()) {
     update.$push = {
@@ -1328,6 +1340,7 @@ export async function submitRtoVerification({ order_id, platform, action, commen
   }
 
   if (!order) throw new Error('Shipment order not found');
+  import('../dashboard/dashboard.controller.js').then(m => m.clearDashboardCache && m.clearDashboardCache()).catch(() => {});
   return order;
 }
 
