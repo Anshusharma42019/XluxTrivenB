@@ -3,6 +3,7 @@ import catchAsync from '../../utils/catchAsync.js';
 import ApiResponse from '../../utils/ApiResponse.js';
 import * as dashboardService from './dashboard.service.js';
 import { getStaffDeliveryStats } from './dashboard.service.js';
+import supportDashboardService from './supportDashboard.service.js';
 
 const cache = new Map();
 const CACHE_TTL = 60000; // 60 seconds memory cache (automatically purged on data changes)
@@ -88,9 +89,11 @@ const getStaffTodayLists = catchAsync(async (req, res) => {
 });
 
 const getStaffMonthlyChart = catchAsync(async (req, res) => {
-  const targetId = req.query.staffId || ((req.user.role === 'admin' || req.user.role === 'manager') ? null : req.user._id);
+  const targetId = (req.query.staffId && req.query.staffId !== 'all') 
+    ? req.query.staffId 
+    : ((req.user.role === 'admin' || req.user.role === 'manager') ? null : req.user._id);
   
-  const cacheKey = `monthlyChart_${targetId}`;
+  const cacheKey = `monthlyChart_${targetId || 'all'}`;
   if (req.query.refresh === 'true') {
     const data = await dashboardService.getStaffMonthlyChart(targetId);
     return res.json(new ApiResponse(httpStatus.OK, data, 'Monthly chart fetched'));
@@ -110,8 +113,11 @@ const getAllStaffStats = catchAsync(async (req, res) => {
 });
 
 const getStaffCommission = catchAsync(async (req, res) => {
-  const { month, year } = req.query;
-  const data = await dashboardService.getStaffCommission(req.user._id, Number(month), Number(year));
+  const { month, year, staffId } = req.query;
+  const targetId = (req.user.role === 'admin' || req.user.role === 'manager')
+    ? (staffId && staffId !== 'all' ? staffId : null) 
+    : req.user._id;
+  const data = await dashboardService.getStaffCommission(targetId, Number(month), Number(year));
   res.json(new ApiResponse(httpStatus.OK, data, 'Staff commission fetched'));
 });
 
@@ -171,10 +177,27 @@ const getTaskDrilldown = catchAsync(async (req, res) => {
   res.json(new ApiResponse(httpStatus.OK, data, 'Task drilldown fetched'));
 });
 
+const getSupportDashboardStats = catchAsync(async (req, res) => {
+  const { month, year, from, to, preset, department, staffId, targetRate } = req.query;
+  const data = await supportDashboardService.getSupportDashboardStats({
+    month: month !== undefined && month !== '' ? Number(month) : null,
+    year: year !== undefined && year !== '' ? Number(year) : null,
+    from,
+    to,
+    preset,
+    department,
+    staffId,
+    targetRate: targetRate !== undefined && targetRate !== '' ? Number(targetRate) : null,
+    user: req.user
+  });
+  res.json(new ApiResponse(httpStatus.OK, data, 'Support dashboard stats fetched successfully'));
+});
+
 export default { 
   debugDeliveries, getStats, getRevenueChart, getStaffStats, setStaffTarget, 
   getTargetHistory, getStaffVerifications, getStaffTodayLists, getStaffMonthlyChart, 
   getAllStaffStats, getStaffCommission, getAllStaffCommissions, saveCommissionOverride, 
   getUnassignedOrders, assignOrder, getStaffDeliveryStats: getStaffDeliveryStatsHandler, 
-  getMyDeliveryStats, getEmployeePerformanceMatrix, getStaffDetailKPIs, getTaskDrilldown 
+  getMyDeliveryStats, getEmployeePerformanceMatrix, getStaffDetailKPIs, getTaskDrilldown,
+  getSupportDashboardStats
 };

@@ -28,6 +28,7 @@ router.post('/assign-order', auth('admin', 'manager'), dashboardController.assig
 router.get('/employee-performance-matrix', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getEmployeePerformanceMatrix);
 router.get('/staff-detail-kpis', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getStaffDetailKPIs);
 router.get('/task-drilldown', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(60), dashboardController.getTaskDrilldown);
+router.get('/support-stats', auth('admin', 'manager', 'sales', 'support', 'logistics'), departmentFilter, cacheMiddleware(15), dashboardController.getSupportDashboardStats);
 
 router.get('/cache-stats', auth('admin', 'manager'), (req, res) => {
   const memory = process.memoryUsage();

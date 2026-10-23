@@ -129,6 +129,19 @@ export const getStaffStats = async (userId, targetDate, from, to, userDepartment
 
 export const setStaffTarget = async (userId, target, date) => {
   const targetDate = date || todayDateStr();
+  if (userId === 'all') {
+    const User = (await import('../user/user.model.js')).default;
+    const supportUsers = await User.find({ role: 'support', isDeleted: false }).select('_id').lean();
+    for (const s of supportUsers) {
+      await StaffTarget.findOneAndUpdate(
+        { user: s._id, date: targetDate },
+        { $set: { target: Number(target) } },
+        { upsert: true, new: true }
+      );
+    }
+    return { todayTarget: Number(target) * (supportUsers.length || 1), date: targetDate, allStaff: true };
+  }
+
   let doc = await StaffTarget.findOne({ user: userId, date: targetDate });
   if (doc) {
     if (Number(target) < doc.target) {
@@ -376,8 +389,11 @@ export const getStaffMonthlyChart = async (userId) => {
   const monthEnd = new Date(Date.UTC(y, m + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
 
   const match = { createdAt: { $gte: monthStart, $lte: monthEnd } };
-  if (userId) {
-    match.assignedTo = new mongoose.Types.ObjectId(userId);
+  const rtsMatch = { createdAt: { $gte: monthStart, $lte: monthEnd } };
+  if (userId && userId !== 'all') {
+    const uid = new mongoose.Types.ObjectId(userId);
+    match.$or = [{ assignedTo: uid }, { verifiedBy: uid }, { createdBy: uid }];
+    rtsMatch.$or = [{ assignedTo: uid }, { createdBy: uid }, { verifiedBy: uid }];
   }
 
   const startDateStr = `${y}-${String(m + 1).padStart(2, '0')}-01`;
@@ -391,22 +407,32 @@ export const getStaffMonthlyChart = async (userId) => {
       { $group: { _id: { $dayOfMonth: { date: '$createdAt', timezone: '+05:30' } }, count: { $sum: 1 } } },
       { $sort: { '_id': 1 } },
     ]),
-    userId ? StaffTarget.find({
+    (userId && userId !== 'all') ? StaffTarget.find({
       user: new mongoose.Types.ObjectId(userId),
       date: { $gte: startDateStr, $lte: endDateStr }
-    }).lean() : Promise.resolve([]),
+    }).lean() : StaffTarget.aggregate([
+      { $match: { date: { $gte: startDateStr, $lte: endDateStr } } },
+      { $group: { _id: '$date', target: { $sum: '$target' } } }
+    ]),
     ReadyToShipment.aggregate([
-      { $match: match },
+      { $match: rtsMatch },
       { $group: { _id: { $dayOfMonth: { date: '$createdAt', timezone: '+05:30' } }, count: { $sum: 1 } } },
       { $sort: { '_id': 1 } },
     ])
   ]);
 
   const targetMap = {};
-  targets.forEach(t => {
-    const dayNum = parseInt(t.date.split('-')[2], 10);
-    targetMap[dayNum] = t.target;
-  });
+  if (userId && userId !== 'all') {
+    (targets || []).forEach(t => {
+      const dayNum = parseInt(t.date.split('-')[2], 10);
+      targetMap[dayNum] = t.target;
+    });
+  } else {
+    (targets || []).forEach(t => {
+      const dayNum = parseInt((t._id || '').split('-')[2], 10);
+      if (!isNaN(dayNum)) targetMap[dayNum] = t.target;
+    });
+  }
 
   const rtsMap = {};
   (rtsData || []).forEach(r => {
@@ -1895,6 +1921,8 @@ export const getAllStaffCommissions = async (month, year) => {
       user: u,
       attendance: { present: 0, absent: 0, half_day: 0, late: 0 },
       totalDeliveries: 0,
+      newDeliveries: 0,
+      oldDeliveries: 0,
       totalRevenue: 0,
       revenueCommission: 0,
       commissionRate: u.commissionRate ?? 5,
@@ -1909,10 +1937,12 @@ export const getAllStaffCommissions = async (month, year) => {
     };
   }
 
-  const [allAttendances, allOverrides, allReorders, allDeliveredOrders] = await Promise.all([
+  const CommissionRecord = (await import('../commission/commissionRecord.model.js')).default;
+  const [allAttendances, allOverrides, allReorders, allCommissionRecords, allDeliveredOrders] = await Promise.all([
     Attendance.find({ date: { $gte: monthStart, $lte: monthEnd }, isDeleted: false }).select('user status').lean(),
     CommissionOverride.find({ month, year }).lean(),
     ReorderCommission.find({ month, year }).lean(),
+    CommissionRecord.find({ commission_role: 'reorder', entry_type: 'credit', createdAt: { $gte: monthStart, $lte: monthEnd } }).lean(),
     getSynchronizedDeliveredOrders(monthStart, monthEnd, Order, ShipmaxxOrder, true)
   ]);
 
@@ -1931,6 +1961,13 @@ export const getAllStaffCommissions = async (month, year) => {
   for (const r of allReorders) {
     const uid = String(r.staff_id || r.user);
     if (statsMap[uid]) statsMap[uid].reorderCommission += (r.commission_amount || 0);
+  }
+
+  for (const cr of (allCommissionRecords || [])) {
+    const uid = String(cr.staff_id || cr.user);
+    if (statsMap[uid]) {
+      statsMap[uid].reorderCommission += (Number(cr.commission_amount) || 0);
+    }
   }
 
   const SUB_TOTAL_AMOUNT = (o) => Number(o.sub_total) || Number(o.total) || 0;
@@ -1972,7 +2009,10 @@ export const getAllStaffCommissions = async (month, year) => {
 
     if (uid && statsMap[uid]) {
       statsMap[uid].totalDeliveries++;
-      if (!isReorder) {
+      if (isReorder) {
+        statsMap[uid].oldDeliveries++;
+      } else {
+        statsMap[uid].newDeliveries++;
         statsMap[uid].totalRevenue += SUB_TOTAL_AMOUNT(o);
       }
     }
@@ -1995,7 +2035,7 @@ export const getAllStaffCommissions = async (month, year) => {
     s.basePay = s.override?.manualBasePay ?? Math.round((s.user.baseSalary || 0) * (s.workingDays / s.billableDays));
     
     s.revenueCommission = s.user.role === 'support'
-      ? s.totalDeliveries * 50
+      ? (s.newDeliveries || 0) * 50
       : Math.round(s.totalRevenue * ((s.user.commissionRate ?? 5) / 100));
       
     s.totalCommission = s.override?.manualCommission ?? (s.revenueCommission + s.reorderCommission);
@@ -2020,11 +2060,34 @@ export const getAllStaffCommissions = async (month, year) => {
 
 export const getStaffCommission = async (userId, month, year) => {
   const all = await getAllStaffCommissions(month, year);
+  if (!userId || userId === 'all') {
+    const totalDeliveries = (all.staff || []).reduce((acc, s) => acc + (s.totalDeliveries || 0), 0);
+    const newDeliveries = (all.staff || []).reduce((acc, s) => acc + (s.newDeliveries || 0), 0);
+    const oldDeliveries = (all.staff || []).reduce((acc, s) => acc + (s.oldDeliveries || 0), 0);
+    const revenueCommission = (all.staff || []).reduce((acc, s) => acc + (s.revenueCommission || 0), 0);
+    const reorderCommission = (all.staff || []).reduce((acc, s) => acc + (s.reorderCommission || 0), 0);
+    const totalCommission = (all.staff || []).reduce((acc, s) => acc + (s.totalCommission || 0), 0);
+    const basePay = (all.staff || []).reduce((acc, s) => acc + (s.basePay || 0), 0);
+    const totalPay = (all.staff || []).reduce((acc, s) => acc + (s.totalPay || 0), 0);
+    return {
+      commissionRate: 10,
+      totalDeliveries,
+      newDeliveries,
+      oldDeliveries,
+      revenueCommission,
+      reorderCommission,
+      totalCommission,
+      basePay,
+      totalPay
+    };
+  }
   let staffData = all.staff.find(s => String(s.user._id) === String(userId));
   const delStats = await getStaffDeliveryStats(month, year, userId);
   if (delStats) {
-    const revenueCommission = delStats.newCommissionTotal ?? 0;
-    const reorderCommission = delStats.oldCommissionTotal ?? 0;
+    const revenueCommission = delStats.newCommissionTotal ?? (staffData?.revenueCommission ?? 0);
+    const reorderCommission = (staffData?.reorderCommission && staffData.reorderCommission > 0)
+      ? staffData.reorderCommission
+      : (delStats.oldCommissionTotal ?? 0);
     const totalCommission = staffData?.override?.manualCommission ?? (delStats.totalCommission ?? (revenueCommission + reorderCommission));
     const basePay = staffData?.basePay ?? 0;
     const totalPay = (staffData?.override?.manualCommission !== undefined && staffData?.override?.manualBasePay !== undefined)
@@ -2036,8 +2099,8 @@ export const getStaffCommission = async (userId, month, year) => {
       user: staffData?.user || { _id: userId },
       commissionRate: staffData?.commissionRate ?? 10,
       totalDeliveries: delStats.delivered ?? (staffData?.totalDeliveries || 0),
-      newDeliveries: delStats.newDelivered ?? 0,
-      oldDeliveries: delStats.oldDelivered ?? 0,
+      newDeliveries: delStats.newDelivered ?? (staffData?.newDeliveries || 0),
+      oldDeliveries: delStats.oldDelivered ?? (staffData?.oldDeliveries || 0),
       revenueCommission,
       reorderCommission,
       totalCommission,
