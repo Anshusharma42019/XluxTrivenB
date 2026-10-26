@@ -108,7 +108,7 @@ router.get('/debug/backfill-status-timestamps', async (req, res) => {
 
 router.get('/debug/run-cron', async (req, res) => {
   const smx = (await import('./shipmaxx.service.js')).default;
-  const { normalizeShipmaxxStatus, parseShipMaxxDate, extractStatusUpdatedAt } = await import('./shipmaxx.controller.js');
+  const { normalizeShipmaxxStatus, parseShipMaxxDate, extractStatusUpdatedAt, onOrderDelivered } = await import('./shipmaxx.controller.js');
 
   
   const trackingLimit = new Date();
@@ -158,7 +158,10 @@ router.get('/debug/run-cron', async (req, res) => {
             update.delivered_at = new Date();
           }
         }
-        await Order.updateOne({ _id: o._id }, { $set: update });
+        await Order.updateWithTransaction({ _id: o._id }, { $set: update });
+        if (status === 'DELIVERED' && o.status !== 'DELIVERED') {
+          await onOrderDelivered(o._id, update.delivered_at).catch(() => {});
+        }
         if (status !== o.status) {
           updatedCount++;
           results.push({ awb: o.awb_code, old: o.status, new: status });
@@ -168,6 +171,17 @@ router.get('/debug/run-cron', async (req, res) => {
       console.error(e);
     }
   }
+
+  if (updatedCount > 0) {
+    try {
+      const { cache } = await import('../../utils/cache.js');
+      cache.delPattern('route:/api/v1/dashboard');
+      cache.delPattern('route:/api/v1/ops-dashboard');
+      cache.delPattern('route:/api/v1/shipmaxx');
+      cache.delPattern('route:/api/v1/leads');
+    } catch (cErr) {}
+  }
+
   res.json({ checked: activeOrders.length, updatedCount, results });
 });
 router.get('/debug/41626', catchAsync(async (req, res) => {
@@ -419,6 +433,8 @@ router.get('/shipping/track-shipment', auth(), c.trackShipment);
 router.get('/shipping/track-shipment/:awb', auth(), c.trackShipment);
 router.get('/shipping/generate-label', auth(), c.generateLabel);
 router.get('/shipping/generate-label/:awb', auth(), c.generateLabel);
+router.get('/shipping/download-label', auth(), c.generateLabel);
+router.get('/shipping/download-label/:awb', auth(), c.generateLabel);
 router.get('/shipping/manifest/:awb', auth(), c.getManifest);
 router.post('/shipping/cancel-shipment', auth(), c.cancelShipment);
 router.post('/shipping/serviceability', auth(), c.checkServiceability);
@@ -444,4 +460,11 @@ router.post('/ndr/notes', auth(), c.createNdrNote);
 router.put('/ndr/notes/:id', auth(), c.updateNdrNote);
 router.delete('/ndr/notes/:id', auth(), c.deleteNdrNote);
 
+// ── Weight Disputes ───────────────────────────────────────────────────────────
+router.get('/weight-disputes', auth(), c.getWeightDisputes);
+router.get('/weight-disputes/:id/history', auth(), c.getWeightDisputeHistory);
+router.post('/weight-disputes/:id/accept', auth(), c.acceptWeightDispute);
+router.post('/weight-disputes/:id/reject', auth(), c.rejectWeightDispute);
+
 export default router;
+

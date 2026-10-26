@@ -4,6 +4,7 @@ import ApiResponse from '../../utils/ApiResponse.js';
 import * as dashboardService from './dashboard.service.js';
 import { getStaffDeliveryStats } from './dashboard.service.js';
 import supportDashboardService from './supportDashboard.service.js';
+import logisticsDashboardService from './logisticsDashboard.service.js';
 
 const cache = new Map();
 const CACHE_TTL = 60000; // 60 seconds memory cache (automatically purged on data changes)
@@ -193,11 +194,26 @@ const getSupportDashboardStats = catchAsync(async (req, res) => {
   res.json(new ApiResponse(httpStatus.OK, data, 'Support dashboard stats fetched successfully'));
 });
 
+const getLogisticsDashboardStats = catchAsync(async (req, res) => {
+  const { from, to, preset, department, courier, platform, staffId } = req.query;
+  const data = await logisticsDashboardService.getLogisticsDashboardStats({
+    from,
+    to,
+    preset,
+    department,
+    courier,
+    platform,
+    staffId,
+    user: req.user
+  });
+  res.json(new ApiResponse(httpStatus.OK, data, 'Logistics dashboard stats fetched successfully'));
+});
+
 export default { 
   debugDeliveries, getStats, getRevenueChart, getStaffStats, setStaffTarget, 
   getTargetHistory, getStaffVerifications, getStaffTodayLists, getStaffMonthlyChart, 
   getAllStaffStats, getStaffCommission, getAllStaffCommissions, saveCommissionOverride, 
   getUnassignedOrders, assignOrder, getStaffDeliveryStats: getStaffDeliveryStatsHandler, 
   getMyDeliveryStats, getEmployeePerformanceMatrix, getStaffDetailKPIs, getTaskDrilldown,
-  getSupportDashboardStats
+  getSupportDashboardStats, getLogisticsDashboardStats
 };

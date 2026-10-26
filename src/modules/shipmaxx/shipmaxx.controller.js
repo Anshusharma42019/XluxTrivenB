@@ -427,6 +427,66 @@ export const setAutoFollowUps = async (orderId, deliveredAt, existingStaffId = n
   }
 };
 
+/**
+ * Centralized lifecycle handler when an order is DELIVERED.
+ * Ensures all related entities, leads, follow-ups, commissions,
+ * and caches are properly and immediately updated across the entire system.
+ */
+export const onOrderDelivered = async (orderId, deliveredAt = new Date()) => {
+  try {
+    const order = await Order.findById(orderId);
+    if (!order) return;
+
+    const eventDate = deliveredAt ? new Date(deliveredAt) : (order.delivered_at || new Date());
+
+    // 1. Ensure lead status is updated to 'follow_up' and linked
+    let leadId = order.lead_id;
+    if (!leadId && order.billing_phone) {
+      const cleanPhone = String(order.billing_phone).replace(/\D/g, '').slice(-10);
+      if (cleanPhone.length >= 10) {
+        const lead = await leadService.findLeadByPhone(cleanPhone);
+        if (lead) {
+          leadId = lead._id;
+          await Order.updateOne({ _id: order._id }, { $set: { lead_id: leadId } });
+        }
+      }
+    }
+    if (leadId) {
+      await Lead.findByIdAndUpdate(leadId, { status: 'follow_up' }).catch(() => {});
+    }
+
+    // 2. Schedule followups and send WhatsApp consultation message
+    if (!order.auto_followups_set) {
+      await setAutoFollowUps(order._id, eventDate).catch(err => {
+        console.error('[onOrderDelivered] setAutoFollowUps error:', err.message);
+      });
+    }
+
+    // 3. Generate reorder commissions
+    try {
+      const { generateReorderCommissions } = await import('../shiprocket/shiprocket.controller.js');
+      if (typeof generateReorderCommissions === 'function') {
+        await generateReorderCommissions();
+      }
+    } catch (commErr) {
+      console.error('[onOrderDelivered] Commission error:', commErr.message);
+    }
+
+    // 4. Invalidate all dashboard & related caches immediately
+    try {
+      const { cache } = await import('../../utils/cache.js');
+      cache.delPattern('route:/api/v1/dashboard');
+      cache.delPattern('route:/api/v1/ops-dashboard');
+      cache.delPattern('route:/api/v1/shipmaxx');
+      cache.delPattern('route:/api/v1/leads');
+    } catch (cErr) {
+      console.error('[onOrderDelivered] Cache invalidation error:', cErr.message);
+    }
+  } catch (err) {
+    console.error('[onOrderDelivered] Error handling delivered order:', orderId, err.message);
+  }
+};
+
 // Helper to safely parse ShipMaxx timestamps which might be in DD-MM-YYYY HH:mm:ss format
 export const parseShipMaxxDate = (dateStr) => {
   if (!dateStr) return new Date();
@@ -1848,9 +1908,11 @@ export const runSyncInBackground = async (mode = 'quick') => {
               if (tracking.history) { const de = tracking.history.find(h => h.system_status_code === 'DEL' || (h.system_status_name || '').toLowerCase() === 'delivered' || (h.status || '').toLowerCase() === 'delivered'); if (de?.date || de?.timestamp) delAt = parseShipMaxxDate(de.date || de.timestamp); }
               if (delAt) { update.delivered_at = delAt; update.status_updated_at = delAt; }
               else { const dd = await Order.findOne({ _id: o._id }).select('delivered_at status_updated_at').lean(); update.delivered_at = dd?.delivered_at || dd?.status_updated_at || update.status_updated_at || o.status_updated_at || new Date(); }
-              if (o.lead_id) await Lead.findByIdAndUpdate(o.lead_id, { status: 'follow_up' }).catch(() => { });
             }
             await Order.updateWithTransaction({ _id: o._id }, { $set: update });
+            if (status === 'DELIVERED' && o.status !== 'DELIVERED') {
+              onOrderDelivered(o._id, update.delivered_at).catch(() => {});
+            }
             updatedCount++;
           } catch (err) { console.error(`[Sync] AWB ${o.awb_code}:`, err.message); }
         }));
@@ -1863,7 +1925,26 @@ export const runSyncInBackground = async (mode = 'quick') => {
     // Auto followups
     if (!isTimedOut()) {
       const nfu = await Order.find({ platform: 'shipmaxx', status: /^delivered$/i, auto_followups_set: { $ne: true } }).select('_id delivered_at createdAt').lean();
-      for (const o of nfu) await setAutoFollowUps(o._id, o.delivered_at || o.createdAt || new Date());
+      for (const o of nfu) await onOrderDelivered(o._id, o.delivered_at || o.createdAt || new Date());
+    }
+
+    if (updatedCount > 0) {
+      try {
+        const { generateReorderCommissions } = await import('../shiprocket/shiprocket.controller.js');
+        if (typeof generateReorderCommissions === 'function') await generateReorderCommissions();
+      } catch (commErr) {
+        console.error('[Sync ShipMaxx] Commission error:', commErr.message);
+      }
+
+      try {
+        const { cache } = await import('../../utils/cache.js');
+        cache.delPattern('route:/api/v1/dashboard');
+        cache.delPattern('route:/api/v1/ops-dashboard');
+        cache.delPattern('route:/api/v1/shipmaxx');
+        cache.delPattern('route:/api/v1/leads');
+      } catch (cErr) {
+        console.error('[Sync ShipMaxx] Cache invalidation error:', cErr.message);
+      }
     }
 
     const elapsed = Math.round((Date.now() - syncStart) / 1000);
@@ -3245,45 +3326,21 @@ export const shipmaxxWebhook = catchAsync(async (req, res) => {
     return;
   }
 
-  // ── DELIVERED: send WhatsApp + set followups ──────────────────────────────
-  if (status === 'DELIVERED' && existing?.status !== 'DELIVERED') {
+  // ── DELIVERED: send WhatsApp + set followups + commission + cache ───────
+  if ((status === 'DELIVERED' || finalStatus === 'DELIVERED') && existing?.status !== 'DELIVERED') {
     console.log('[ShipMaxx Webhook] Order newly DELIVERED:', updated.order_id);
+    await onOrderDelivered(updated._id, eventDate);
+  }
 
-    // Set followups if not already set — this also sends WA message
-    if (!updated.auto_followups_set) {
-      await setAutoFollowUps(updated._id, eventDate);
-    } else {
-      // Followups already set but maybe WA not sent — check and send
-      const templateName = process.env.INTERAKT_1ST_FOLLOWUP_TEMPLATE;
-      if (templateName && updated.billing_phone) {
-        const fu1 = await Followup.findOne({ order_id: String(updated._id), followup_number: 1 })
-          .select('auto_message_sent').lean();
-        if (!fu1 || !fu1.auto_message_sent) {
-          await Followup.findOneAndUpdate(
-            { order_id: String(updated._id), followup_number: 1 },
-            { $set: { auto_message_sent: true } }
-          );
-          sendWhatsAppMessage({
-            phone: updated.billing_phone,
-            templateName,
-            languageCode: 'en',
-            bodyValues: [updated.billing_customer_name || 'Customer']
-          }).then(() => console.log(`[ShipMaxx Webhook] ✅ WA sent to ${updated.billing_phone}`))
-            .catch(async (err) => {
-              console.error('[ShipMaxx Webhook] WA error:', err.message);
-              await Followup.findOneAndUpdate(
-                { order_id: String(updated._id), followup_number: 1 },
-                { $set: { auto_message_sent: false } }
-              ).catch(() => { });
-            });
-        }
-      }
-    }
-
-    // Update lead status
-    if (updated.lead_id) {
-      Lead.findByIdAndUpdate(updated.lead_id, { status: 'follow_up' }).catch(() => { });
-    }
+  // Always invalidate dashboard & shipmaxx caches on webhook status change
+  try {
+    const { cache } = await import('../../utils/cache.js');
+    cache.delPattern('route:/api/v1/dashboard');
+    cache.delPattern('route:/api/v1/ops-dashboard');
+    cache.delPattern('route:/api/v1/shipmaxx');
+    cache.delPattern('route:/api/v1/leads');
+  } catch (err) {
+    console.error('[ShipMaxx Webhook] Cache invalidation error:', err.message);
   }
 });
 
@@ -3598,10 +3655,19 @@ export const ndrAction = catchAsync(async (req, res) => {
 
   // Log action locally in our DB
   try {
-    const order = await Order.findOne({ platform: 'shipmaxx', $or: [{ order_id: ndr_id }, { awb_code: ndr_id }] });
+    const isObjId = mongoose.isValidObjectId(ndr_id);
+    const query = {
+      $or: [
+        ...(isObjId ? [{ _id: ndr_id }] : []),
+        { order_id: String(ndr_id) },
+        { awb_code: String(ndr_id) },
+        { shipmaxx_ndr_id: String(ndr_id) }
+      ]
+    };
+    const order = await Order.findOne(query);
     if (order) {
       const comment = {
-        text: `[NDR Action Request] Action: ${action}. Notes: ${notes || 'None'}`,
+        text: `[NDR Action Request] Action: ${action.toUpperCase()}. Notes: ${notes || 'None'}`,
         type: 'system',
         section: 'NDR',
         createdBy: req.user._id,
@@ -3637,10 +3703,19 @@ export const ndrBulkAction = catchAsync(async (req, res) => {
   // Log actions locally in our DB
   try {
     for (const ndr_id of ndr_ids) {
-      const order = await Order.findOne({ platform: 'shipmaxx', $or: [{ order_id: ndr_id }, { awb_code: ndr_id }] });
+      const isObjId = mongoose.isValidObjectId(ndr_id);
+      const query = {
+        $or: [
+          ...(isObjId ? [{ _id: ndr_id }] : []),
+          { order_id: String(ndr_id) },
+          { awb_code: String(ndr_id) },
+          { shipmaxx_ndr_id: String(ndr_id) }
+        ]
+      };
+      const order = await Order.findOne(query);
       if (order) {
         const comment = {
-          text: `[Bulk NDR Action Request] Action: ${action}. Notes: ${notes || 'None'}`,
+          text: `[Bulk NDR Action Request] Action: ${action.toUpperCase()}. Notes: ${notes || 'None'}`,
           type: 'system',
           section: 'NDR',
           createdBy: req.user._id,
@@ -3702,4 +3777,26 @@ export const deleteNdrNote = catchAsync(async (req, res) => {
   await NdrNote.findByIdAndDelete(req.params.id);
   res.json(new ApiResponse(200, null, 'NDR note deleted'));
 });
+
+// ── Weight Disputes ───────────────────────────────────────────────────────────
+export const getWeightDisputes = catchAsync(async (req, res) => {
+  const data = await smx.getWeightDisputes(req.query);
+  res.json(new ApiResponse(200, data, 'Weight disputes fetched'));
+});
+
+export const getWeightDisputeHistory = catchAsync(async (req, res) => {
+  const data = await smx.getWeightDisputeHistory(req.params.id);
+  res.json(new ApiResponse(200, data, 'Weight dispute history fetched'));
+});
+
+export const acceptWeightDispute = catchAsync(async (req, res) => {
+  const data = await smx.acceptWeightDispute(req.params.id);
+  res.json(new ApiResponse(200, data, 'Weight dispute accepted'));
+});
+
+export const rejectWeightDispute = catchAsync(async (req, res) => {
+  const data = await smx.rejectWeightDispute(req.params.id, req.body);
+  res.json(new ApiResponse(200, data, 'Weight dispute challenge submitted'));
+});
+
 

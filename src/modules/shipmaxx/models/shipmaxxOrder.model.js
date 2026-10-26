@@ -106,10 +106,11 @@ shipmaxxOrderSchema.statics.updateWithTransaction = async function (query, updat
       const isDelivered = /^delivered$/i.test(doc.status);
       const isRto = /^rto/i.test(doc.status);
       
-      let DeliveredModel, InTransitModel, RtoModel;
+      let DeliveredModel, InTransitModel, RtoModel, ReadyToShipmentModel;
       try { DeliveredModel = mongoose.model('ShipmaxxDeliveredOrder'); } catch(e) {}
       try { InTransitModel = mongoose.model('ShipmaxxInTransitOrder'); } catch(e) {}
       try { RtoModel = mongoose.model('ShipmaxxRtoOrder'); } catch(e) {}
+      try { ReadyToShipmentModel = mongoose.model('ShipmaxxReadyToShipment'); } catch(e) {}
       
       const data = {
         order_id: doc.order_id,
@@ -127,6 +128,7 @@ shipmaxxOrderSchema.statics.updateWithTransaction = async function (query, updat
         order_items: doc.order_items || [],
         status: doc.status,
         lead_id: doc.lead_id || null,
+        verification_staff_id: doc.verified_by || null,
         status_updated_at: doc.status_updated_at || doc.createdAt,
         order_date: doc.createdAt
       };
@@ -135,11 +137,23 @@ shipmaxxOrderSchema.statics.updateWithTransaction = async function (query, updat
         data.delivered_at = doc.delivered_at || doc.createdAt;
         if (DeliveredModel) await DeliveredModel.findOneAndUpdate({ order_id: doc.order_id }, { $set: data }, { upsert: true, session });
         if (InTransitModel) await InTransitModel.deleteOne({ order_id: doc.order_id }, { session });
+        if (RtoModel) await RtoModel.deleteOne({ order_id: doc.order_id }, { session });
+        if (ReadyToShipmentModel) await ReadyToShipmentModel.deleteOne({ order_id: doc.order_id }, { session });
       } else if (isRto) {
         if (RtoModel) await RtoModel.findOneAndUpdate({ order_id: doc.order_id }, { $set: data }, { upsert: true, session });
         if (InTransitModel) await InTransitModel.deleteOne({ order_id: doc.order_id }, { session });
+        if (DeliveredModel) await DeliveredModel.deleteOne({ order_id: doc.order_id }, { session });
+        if (ReadyToShipmentModel) await ReadyToShipmentModel.deleteOne({ order_id: doc.order_id }, { session });
+      } else if (doc.status === 'READY_TO_SHIP') {
+        if (ReadyToShipmentModel) await ReadyToShipmentModel.findOneAndUpdate({ order_id: doc.order_id }, { $set: data }, { upsert: true, session });
+        if (InTransitModel) await InTransitModel.deleteOne({ order_id: doc.order_id }, { session });
+        if (DeliveredModel) await DeliveredModel.deleteOne({ order_id: doc.order_id }, { session });
+        if (RtoModel) await RtoModel.deleteOne({ order_id: doc.order_id }, { session });
       } else {
         if (InTransitModel) await InTransitModel.findOneAndUpdate({ order_id: doc.order_id }, { $set: data }, { upsert: true, session });
+        if (DeliveredModel) await DeliveredModel.deleteOne({ order_id: doc.order_id }, { session });
+        if (RtoModel) await RtoModel.deleteOne({ order_id: doc.order_id }, { session });
+        if (ReadyToShipmentModel) await ReadyToShipmentModel.deleteOne({ order_id: doc.order_id }, { session });
       }
     }
 

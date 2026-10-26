@@ -1,6 +1,13 @@
 import axios from 'axios';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import ApiError from '../../utils/ApiError.js';
 import { config } from '../../config/config.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const TOKEN_CACHE_FILE = path.join(__dirname, '.token_cache.json');
 
 const BASE_URL = config.shipmaxx.baseUrl;
 const AUTH_URL = config.shipmaxx.authUrl;
@@ -11,6 +18,32 @@ let _apiKey;
 let _tokenExpiresAt = 0;   // Unix ms — when the cached token expires
 let _loginPromise = null;   // Guards against concurrent login attempts
 let _dynamicAuthUrl;
+
+const loadDiskToken = () => {
+  try {
+    if (fs.existsSync(TOKEN_CACHE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(TOKEN_CACHE_FILE, 'utf8'));
+      if (data?.apiKey && data?.expiresAt && Date.now() < (data.expiresAt - 5 * 60 * 1000)) {
+        _apiKey = data.apiKey;
+        _tokenExpiresAt = data.expiresAt;
+        return true;
+      }
+    }
+  } catch {}
+  return false;
+};
+
+const saveDiskToken = (key, expiresAt) => {
+  try {
+    fs.writeFileSync(TOKEN_CACHE_FILE, JSON.stringify({ apiKey: key, expiresAt }));
+  } catch {}
+};
+
+const clearDiskToken = () => {
+  try {
+    if (fs.existsSync(TOKEN_CACHE_FILE)) fs.unlinkSync(TOKEN_CACHE_FILE);
+  } catch {}
+};
 
 export const setAuthUrl = (url) => {
   _dynamicAuthUrl = url;
@@ -23,15 +56,20 @@ export const setCredentials = (email, password) => {
 export const setApiKey = (key) => {
   _apiKey = key;
   _tokenExpiresAt = Date.now() + 23 * 60 * 60 * 1000; // treat manual key as valid for 23h
+  saveDiskToken(_apiKey, _tokenExpiresAt);
 };
 
 const getAuthHeader = () => {
+  if (!_apiKey) loadDiskToken();
   if (_apiKey) return `Bearer ${_apiKey}`;
   return '';
 };
 
 // Returns true if token is missing or about to expire (within 5 min buffer)
-const isTokenExpired = () => !_apiKey || Date.now() >= (_tokenExpiresAt - 5 * 60 * 1000);
+const isTokenExpired = () => {
+  if (!_apiKey) loadDiskToken();
+  return !_apiKey || Date.now() >= (_tokenExpiresAt - 5 * 60 * 1000);
+};
 
 const call = async (method, url, options = {}, isRetry = false) => {
   if (isTokenExpired()) {
@@ -57,6 +95,7 @@ const call = async (method, url, options = {}, isRetry = false) => {
     if (statusCode === 401) { 
       _apiKey = null; 
       _tokenExpiresAt = 0; 
+      clearDiskToken();
       
       // Auto-retry once
       if (!isRetry) {
@@ -93,7 +132,8 @@ export const login = async () => {
       _apiKey = res.data.access_token;
       // Token is valid 24h; cache for 23h to give a 1h buffer before expiry
       _tokenExpiresAt = Date.now() + 23 * 60 * 60 * 1000;
-      console.log(`[ShipMaxx] Token cached, expires in 23h`);
+      saveDiskToken(_apiKey, _tokenExpiresAt);
+      console.log(`[ShipMaxx] Token cached to memory and disk, expires in 23h`);
       return _apiKey;
     }
     throw new ApiError(500, 'Login succeeded but access_token was missing from response');
@@ -173,6 +213,12 @@ export const getNdrList    = (params)         => get('/ndr', params);
 export const ndrAction     = (ndr_id, body)   => post(`/ndr/${ndr_id}/action`, body);
 export const ndrBulkAction = (body)           => post('/ndr/bulk-action', body);
 
+// ── Weight Disputes ───────────────────────────────────────────────────────────
+export const getWeightDisputes        = (params)       => get('/weight-disputes', params);
+export const getWeightDisputeHistory  = (dispute_id)   => get(`/weight-disputes/${dispute_id}/history`);
+export const acceptWeightDispute      = (dispute_id)   => post(`/weight-disputes/${dispute_id}/accept`);
+export const rejectWeightDispute      = (dispute_id, data, headers = {}) => call('POST', `/weight-disputes/${dispute_id}/reject`, { data, headers });
+
 export default {
   login, setCredentials, setApiKey, setAuthUrl,
   getOrder, createOrder, updateOrder, fetchAllOrders,
@@ -180,5 +226,7 @@ export default {
   cancelShipment, checkServiceability, getShipments, getShipmentById,
   getWarehouses, createWarehouse,
   getInvoice, downloadLabelPdf, downloadManifestHtml,
-  getNdrList, ndrAction, ndrBulkAction
+  getNdrList, ndrAction, ndrBulkAction,
+  getWeightDisputes, getWeightDisputeHistory, acceptWeightDispute, rejectWeightDispute
 };
+

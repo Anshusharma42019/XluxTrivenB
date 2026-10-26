@@ -2321,6 +2321,7 @@ export const webhook = catchAsync(async (req, res) => {
   const event = normalizeShiprocketStatus(WEBHOOK_EVENTS[statusId] || payload?.current_status || payload?.shipment_status || 'UNKNOWN');
   const eventDate = parseShiprocketDate(payload?.current_timestamp || payload?.updated_at);
   const awb = payload?.awb || payload?.awb_code;
+  const _id = payload?._id || payload?.id;
   const srid = payload?.sr_order_id || payload?.shiprocket_order_id;
   const query = [];
   if (_id) query.push({ _id: String(_id) });
@@ -2345,7 +2346,17 @@ export const webhook = catchAsync(async (req, res) => {
       }
       if (lid) await Lead.findByIdAndUpdate(lid, { status: 'follow_up' });
       if (!order.auto_followups_set) await setAutoFollowUps(order._id, eventDate);
+      await generateReorderCommissions().catch(() => {});
     }
+
+    // Invalidate dashboard caches on status update
+    try {
+      const { cache } = await import('../../utils/cache.js');
+      cache.delPattern('route:/api/v1/dashboard');
+      cache.delPattern('route:/api/v1/ops-dashboard');
+      cache.delPattern('route:/api/v1/shiprocket');
+      cache.delPattern('route:/api/v1/leads');
+    } catch (cErr) {}
   }
   res.json({ success: true, event });
 });

@@ -2,7 +2,7 @@ import cron from 'node-cron';
 import mongoose from 'mongoose';
 import { ShipmaxxOrder as Order } from './models/shipmaxxOrder.model.js';
 import smx from './shipmaxx.service.js';
-import { normalizeShipmaxxStatus, parseShipMaxxDate, extractStatusUpdatedAt, setAutoFollowUps } from './shipmaxx.controller.js';
+import { normalizeShipmaxxStatus, parseShipMaxxDate, extractStatusUpdatedAt, setAutoFollowUps, onOrderDelivered } from './shipmaxx.controller.js';
 import { generateReorderCommissions } from '../shiprocket/shiprocket.controller.js';
 import { Lead } from '../lead/lead.model.js';
 import { sendWhatsAppMessage } from '../interakt/interakt.service.js';
@@ -304,11 +304,7 @@ export const runCronSync = async () => {
             await Order.updateWithTransaction({ _id: o._id }, { $set: update }).catch(() => {});
 
             if (status === 'DELIVERED' && o.status !== 'DELIVERED') {
-              if (!o.auto_followups_set) {
-                await setAutoFollowUps(o._id, update.delivered_at || new Date()).catch(err => {
-                  console.error('[ShipMaxx Cron] Failed to set auto followups:', err.message);
-                });
-              }
+              onOrderDelivered(o._id, update.delivered_at || new Date()).catch(() => {});
             }
 
             if (status !== o.status) updatedCount++;
@@ -321,15 +317,23 @@ export const runCronSync = async () => {
     }
     if (updatedCount > 0) {
       await generateReorderCommissions();
+      try {
+        const { cache } = await import('../../utils/cache.js');
+        cache.delPattern('route:/api/v1/dashboard');
+        cache.delPattern('route:/api/v1/ops-dashboard');
+        cache.delPattern('route:/api/v1/shipmaxx');
+        cache.delPattern('route:/api/v1/leads');
+      } catch (cErr) {
+        console.error('[ShipMaxx Cron] Cache clear error:', cErr.message);
+      }
     }
 
     // 4. Set auto followups with equal support staff assignment
     try {
       const nfu = await Order.find({ platform: 'shipmaxx', status: /^delivered$/i, auto_followups_set: { $ne: true } }).select('_id delivered_at createdAt').lean();
       if (nfu.length > 0) {
-        const { setAutoFollowUps } = await import('./shipmaxx.controller.js');
         for (const o of nfu) {
-          await setAutoFollowUps(o._id, o.delivered_at || o.createdAt || new Date());
+          await onOrderDelivered(o._id, o.delivered_at || o.createdAt || new Date());
         }
         console.log(`[Cron] Auto-followups & support assignment set for ${nfu.length} orders`);
       }

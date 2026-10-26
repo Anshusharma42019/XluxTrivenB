@@ -41,5 +41,4 @@ if (process.env.VERCEL !== '1') {
 }
 
 export default handler;
-// Restart triggered by Antigravity - order reassignment
-
+// Restart triggered by Antigravity - logistics dashboard date filtering updated
