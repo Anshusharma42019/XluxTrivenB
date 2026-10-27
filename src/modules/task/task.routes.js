@@ -1,4 +1,4 @@
-import express from 'express';
+ import express from 'express';
 import auth from '../../middleware/auth.js';
 import requireCheckedIn from '../../middleware/requireCheckedIn.js';
 import validate from '../../middleware/validate.js';

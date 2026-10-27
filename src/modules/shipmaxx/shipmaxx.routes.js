@@ -403,6 +403,8 @@ router.post('/orders/sync', auth(), c.syncShipmaxx);
 router.post('/orders/import', auth(), c.importOrders);
 router.post('/orders/import-by-ids', auth(), c.importByIds);
 router.post('/orders/manual-followup', auth(), c.createManualFollowup);
+router.get('/orders/next-bill-seq', auth(), c.getNextBillSeq);
+router.post('/orders/manual-bill', auth(), c.createManualBill);
 
 // Support Assignment Routes
 router.post('/followups/auto-assign', auth(), c.autoAssignFollowups);
@@ -412,6 +414,7 @@ router.get('/support-staff', auth(), c.getSupportStaffList);
 
 router.get('/orders/:order_id', auth(), c.getOrder);
 router.put('/orders/:order_id', auth(), c.updateOrder);
+router.delete('/orders/:id', auth(), c.deleteOrder);
 
 // ── Per-order actions ─────────────────────────────────────────────────────────
 router.post('/orders/:id/notes', auth(), c.saveOrderNote);

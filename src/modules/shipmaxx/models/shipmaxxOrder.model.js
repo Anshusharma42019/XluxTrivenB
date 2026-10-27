@@ -81,6 +81,13 @@ const shipmaxxOrderSchema = new mongoose.Schema({
   interakt_reply_read: { type: Boolean, default: false },
   bill_number: { type: String, index: true },
   bill_seq: { type: Number, index: true },
+  doctor_fee: { type: Number, default: 0 },
+  doctor_fee_name: { type: String, default: 'Doctor Consultation Charges' },
+  doctor_fee_hsn: { type: String, default: '999312' },
+  doctor_fee_tax: { type: Number, default: 0 },
+  company_name: { type: String, default: 'TRIVEN WELLNESS LLP' },
+  is_manual_bill: { type: Boolean, default: false },
+  remarks: { type: String, default: '' },
   raw_response: mongoose.Schema.Types.Mixed,
 }, { timestamps: true });
 

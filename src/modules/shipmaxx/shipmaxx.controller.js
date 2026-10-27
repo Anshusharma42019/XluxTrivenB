@@ -2140,7 +2140,7 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
     delivered_at: { $gte: septCutoff }
   })
     .sort({ delivered_at: 1, status_updated_at: 1, createdAt: 1, _id: 1 })
-    .select('_id bill_seq bill_number delivered_at status_updated_at createdAt')
+    .select('_id bill_seq bill_number is_manual_bill delivered_at status_updated_at createdAt')
     .lean();
 
   const seqMap = new Map();
@@ -2148,16 +2148,24 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
     let seq = 1;
     const bulkOps = [];
     for (const ord of septemberDelivered) {
-      const seqStr = String(seq).padStart(4, '0');
-      const generatedNum = `TW-${seqStr}`;
-      seqMap.set(String(ord._id), { seq, billNumber: generatedNum });
-      if (ord.bill_seq !== seq || ord.bill_number !== generatedNum) {
-        bulkOps.push({
-          updateOne: {
-            filter: { _id: ord._id },
-            update: { $set: { bill_seq: seq, bill_number: generatedNum } }
-          }
-        });
+      if (ord.is_manual_bill && ord.bill_number) {
+        const curSeq = ord.bill_seq || seq;
+        seqMap.set(String(ord._id), { seq: curSeq, billNumber: ord.bill_number });
+        if (curSeq >= seq) {
+          seq = curSeq;
+        }
+      } else {
+        const seqStr = String(seq).padStart(4, '0');
+        const generatedNum = `TW-${seqStr}`;
+        seqMap.set(String(ord._id), { seq, billNumber: generatedNum });
+        if (ord.bill_seq !== seq || ord.bill_number !== generatedNum) {
+          bulkOps.push({
+            updateOne: {
+              filter: { _id: ord._id },
+              update: { $set: { bill_seq: seq, bill_number: generatedNum } }
+            }
+          });
+        }
       }
       seq++;
     }
@@ -2223,6 +2231,163 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
     }
   });
   res.json(new ApiResponse(200, { data: orders, total, totalRevenue, page: pageNum, per_page: isGetAll ? total : limitNum }, 'Delivered orders fetched'));
+});
+
+export const getNextBillSeq = catchAsync(async (req, res) => {
+  const septCutoff = new Date('2026-09-01T00:00:00.000+05:30');
+  const statusFilter = { $in: [/^delivered$/i, /^DEL$/i] };
+  const highest = await Order.findOne({
+    platform: 'shipmaxx',
+    status: statusFilter,
+    delivered_at: { $gte: septCutoff },
+    bill_seq: { $exists: true, $ne: null }
+  }).sort({ bill_seq: -1 }).select('bill_seq bill_number').lean();
+
+  const nextSeq = (highest?.bill_seq || 0) + 1;
+  const nextBillNumber = `TW-${String(nextSeq).padStart(4, '0')}`;
+  res.json(new ApiResponse(200, { nextSeq, billNumber: nextBillNumber }, 'Next bill sequence fetched'));
+});
+
+export const createManualBill = catchAsync(async (req, res) => {
+  const {
+    customer,
+    payment_method = 'COD',
+    delivered_at,
+    courier_name = 'Manual Delivery',
+    awb_code,
+    order_id,
+    bill_number,
+    bill_seq,
+    order_items = [],
+    sub_total,
+    doctor_fee = 0,
+    doctor_fee_name = 'Doctor Consultation Charges',
+    doctor_fee_hsn = '999312',
+    doctor_fee_tax = 0,
+    company_name = 'TRIVEN WELLNESS LLP',
+    remarks = '',
+  } = req.body;
+
+  const custName = (customer?.name && String(customer.name).trim()) || 'Direct Customer';
+  const custPhone = (customer?.phone && String(customer.phone).trim()) || '9999999999';
+  const custEmail = (customer?.email && String(customer.email).trim()) || '';
+  const custAddress = (customer?.address && String(customer.address).trim()) || '';
+  const custCity = (customer?.city && String(customer.city).trim()) || '';
+  const custState = (customer?.state && String(customer.state).trim()) || 'Uttar Pradesh';
+  const custPincode = (customer?.pincode && String(customer.pincode).trim()) || '';
+
+  const septCutoff = new Date('2026-09-01T00:00:00.000+05:30');
+  const statusFilter = { $in: [/^delivered$/i, /^DEL$/i] };
+
+  // Calculate next sequential number
+  const highest = await Order.findOne({
+    platform: 'shipmaxx',
+    status: statusFilter,
+    delivered_at: { $gte: septCutoff },
+    bill_seq: { $exists: true, $ne: null }
+  }).sort({ bill_seq: -1 }).select('bill_seq bill_number').lean();
+
+  const nextSeq = (highest?.bill_seq || 0) + 1;
+  const autoBillNumber = `TW-${String(nextSeq).padStart(4, '0')}`;
+
+  let finalBillNumber = autoBillNumber;
+  let finalBillSeq = nextSeq;
+
+  if (bill_number && String(bill_number).trim()) {
+    finalBillNumber = String(bill_number).trim();
+    const numMatch = finalBillNumber.match(/\d+/);
+    if (numMatch) {
+      finalBillSeq = parseInt(numMatch[0], 10);
+    } else if (bill_seq) {
+      finalBillSeq = Number(bill_seq);
+    }
+  } else if (bill_seq) {
+    finalBillSeq = Number(bill_seq);
+    finalBillNumber = `TW-${String(finalBillSeq).padStart(4, '0')}`;
+  }
+
+  // Use now or provided date with time
+  let delDate = new Date();
+  if (delivered_at) {
+    const parsed = new Date(delivered_at);
+    if (!isNaN(parsed.getTime())) {
+      delDate = parsed;
+    }
+  }
+
+  // Generate unique order ID and AWB
+  const finalAwb = (awb_code && String(awb_code).trim()) || `MNL-${Date.now().toString().slice(-8)}`;
+  const finalOrderId = (order_id && String(order_id).trim()) || `MNL-${finalAwb.replace(/\D/g, '').slice(-6) || Date.now().toString().slice(-6)}`;
+
+  // Find lead if phone matches
+  let matchedLeadId = null;
+  const cleanPhone = String(custPhone).replace(/\D/g, '');
+  if (cleanPhone.length >= 10 && cleanPhone !== '9999999999') {
+    const lead = await leadService.findLeadByPhone(cleanPhone).catch(() => null);
+    if (lead) matchedLeadId = lead._id;
+  }
+
+  const itemsTotal = (order_items || []).reduce((acc, it) => acc + (Number(it.selling_price) || 0) * (Number(it.units) || 1), 0);
+  const finalSubTotal = sub_total !== undefined && sub_total !== null && Number(sub_total) >= 0
+    ? Number(sub_total)
+    : itemsTotal + (Number(doctor_fee) || 0);
+
+  const newOrder = await Order.create({
+    order_id: finalOrderId,
+    awb_code: finalAwb,
+    courier_name: courier_name || 'Manual Delivery',
+    status: 'DELIVERED',
+    platform: 'shipmaxx',
+    delivery_attempt: 1,
+
+    billing_customer_name: custName,
+    billing_phone: custPhone,
+    billing_email: custEmail,
+    billing_address: custAddress,
+    billing_city: custCity,
+    billing_state: custState,
+    billing_pincode: custPincode,
+    billing_country: 'India',
+
+    shipping_is_billing: true,
+    shipping_address: custAddress,
+    shipping_city: custCity,
+    shipping_state: custState,
+    shipping_pincode: custPincode,
+
+    order_items: (order_items || []).map(it => ({
+      name: it.name || 'Ayurvedic Medicine',
+      sku: it.sku || 'MED-01',
+      units: Number(it.units) || 1,
+      selling_price: Number(it.selling_price) || 0,
+      discount: String(it.discount || '0'),
+      tax: it.tax !== undefined ? String(it.tax) : '0',
+      hsn: it.hsn || '30049011',
+    })),
+
+    payment_method: payment_method || 'COD',
+    sub_total: finalSubTotal,
+
+    delivered_at: delDate,
+    status_updated_at: delDate,
+
+    bill_seq: finalBillSeq,
+    bill_number: finalBillNumber,
+
+    doctor_fee: Number(doctor_fee) || 0,
+    doctor_fee_name: doctor_fee_name || 'Doctor Consultation Charges',
+    doctor_fee_hsn: doctor_fee_hsn || '999312',
+    doctor_fee_tax: Number(doctor_fee_tax) || 0,
+    company_name: company_name || 'TRIVEN WELLNESS LLP',
+    is_manual_bill: true,
+    remarks: remarks || '',
+
+    lead_id: matchedLeadId,
+    created_by: req.user?._id || null,
+    verified_by: req.user?._id || null,
+  });
+
+  res.json(new ApiResponse(201, newOrder, `Manual bill ${finalBillNumber} created successfully`));
 });
 
 export const getDeliveredOrdersFromSchema = catchAsync(async (req, res) => {
@@ -3797,6 +3962,41 @@ export const acceptWeightDispute = catchAsync(async (req, res) => {
 export const rejectWeightDispute = catchAsync(async (req, res) => {
   const data = await smx.rejectWeightDispute(req.params.id, req.body);
   res.json(new ApiResponse(200, data, 'Weight dispute challenge submitted'));
+});
+
+// ── Delete Order (Manual Bills) ───────────────────────────────────────────────
+export const deleteOrder = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  let order = null;
+  if (mongoose.Types.ObjectId.isValid(id)) {
+    order = await Order.findById(id);
+  }
+  if (!order) {
+    order = await Order.findOne({ $or: [{ order_id: id }, { awb_code: id }] });
+  }
+
+  if (!order) {
+    return res.status(404).json(new ApiResponse(404, null, 'Order not found'));
+  }
+
+  const orderId = order._id;
+  const ordCode = order.order_id;
+  const awbCode = order.awb_code;
+  const billNum = order.bill_number;
+
+  // 1. Delete from ShipmaxxOrder
+  await Order.deleteOne({ _id: orderId });
+
+  // 2. Delete from ShipmaxxDeliveredOrder
+  await DeliveredOrder.deleteMany({ $or: [{ order_id: ordCode }, { awb_code: awbCode }] }).catch(() => {});
+
+  // 3. Delete from Followups
+  await Followup.deleteMany({ order_id: orderId }).catch(() => {});
+
+  // 4. Invalidate caches
+  invalidateFollowupCache();
+
+  res.json(new ApiResponse(200, { deletedId: orderId, order_id: ordCode, bill_number: billNum }, 'Order permanently removed successfully'));
 });
 
 
