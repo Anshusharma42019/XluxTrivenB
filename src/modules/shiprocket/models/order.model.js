@@ -24,6 +24,7 @@ const orderSchema = new mongoose.Schema({
   billing_city: String,
   billing_state: String,
   billing_pincode: mongoose.Schema.Types.Mixed,
+  billing_gstin: String,
   billing_country: { type: String, default: 'India' },
   shipping_is_billing: { type: Boolean, default: true },
   shipping_address: String,

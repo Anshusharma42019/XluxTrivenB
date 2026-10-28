@@ -2185,37 +2185,58 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
   ).catch(() => {});
 
   const septemberDelivered = await Order.find({
-    platform: 'shipmaxx',
+    $or: [{ platform: 'shipmaxx' }, { is_manual_bill: true }],
     status: statusFilter,
     delivered_at: { $gte: septCutoff }
   })
     .sort({ delivered_at: 1, status_updated_at: 1, createdAt: 1, _id: 1 })
-    .select('_id bill_seq bill_number is_manual_bill delivered_at status_updated_at createdAt')
+    .select('_id bill_seq bill_number is_manual_bill sub_total order_items delivered_at status_updated_at createdAt')
     .lean();
 
+  const usedBillNumbers = new Set();
   const seqMap = new Map();
   if (septemberDelivered.length > 0) {
     let seq = 1;
     const bulkOps = [];
     for (const ord of septemberDelivered) {
-      if (ord.is_manual_bill && ord.bill_number) {
-        const curSeq = ord.bill_seq || seq;
-        seqMap.set(String(ord._id), { seq: curSeq, billNumber: ord.bill_number });
-        if (curSeq >= seq) {
-          seq = curSeq;
-        }
+      while (usedBillNumbers.has(`TW-${String(seq).padStart(4, '0')}`)) {
+        seq++;
+      }
+      const seqStr = String(seq).padStart(4, '0');
+      const generatedNum = `TW-${seqStr}`;
+
+      let assignedSeq = seq;
+      let assignedBillNum = generatedNum;
+
+      if (ord.is_manual_bill && ord.bill_number && !usedBillNumbers.has(ord.bill_number)) {
+        assignedBillNum = ord.bill_number;
+        const match = ord.bill_number.match(/\d+/);
+        assignedSeq = match ? parseInt(match[0], 10) : seq;
       } else {
-        const seqStr = String(seq).padStart(4, '0');
-        const generatedNum = `TW-${seqStr}`;
-        seqMap.set(String(ord._id), { seq, billNumber: generatedNum });
-        if (ord.bill_seq !== seq || ord.bill_number !== generatedNum) {
-          bulkOps.push({
-            updateOne: {
-              filter: { _id: ord._id },
-              update: { $set: { bill_seq: seq, bill_number: generatedNum } }
-            }
-          });
-        }
+        assignedSeq = seq;
+        assignedBillNum = generatedNum;
+      }
+
+      usedBillNumbers.add(assignedBillNum);
+      seqMap.set(String(ord._id), { seq: assignedSeq, billNumber: assignedBillNum });
+
+      const updates = {};
+      if (ord.bill_seq !== assignedSeq || ord.bill_number !== assignedBillNum) {
+        updates.bill_seq = assignedSeq;
+        updates.bill_number = assignedBillNum;
+      }
+      if (ord.is_manual_bill && (ord.sub_total === 165200 || (ord.order_items?.[0]?.selling_price === 140000 && ord.sub_total !== 140000))) {
+        updates.sub_total = 140000;
+        updates['raw_response.tax_calculation_type'] = 'inclusive';
+        updates.tax_calculation_type = 'inclusive';
+      }
+      if (Object.keys(updates).length > 0) {
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: ord._id },
+            update: { $set: updates }
+          }
+        });
       }
       seq++;
     }
@@ -2343,13 +2364,28 @@ export const getNextBillSeq = catchAsync(async (req, res) => {
   const septCutoff = new Date('2026-09-01T00:00:00.000+05:30');
   const statusFilter = { $in: [/^delivered$/i, /^DEL$/i] };
   const highest = await Order.findOne({
-    platform: 'shipmaxx',
     status: statusFilter,
     delivered_at: { $gte: septCutoff },
     bill_seq: { $exists: true, $ne: null }
   }).sort({ bill_seq: -1 }).select('bill_seq bill_number').lean();
 
-  const nextSeq = (highest?.bill_seq || 0) + 1;
+  let maxSeq = highest?.bill_seq || 0;
+
+  const highestNum = await Order.findOne({
+    status: statusFilter,
+    delivered_at: { $gte: septCutoff },
+    bill_number: /^TW-\d+$/
+  }).sort({ bill_number: -1 }).select('bill_number bill_seq').lean();
+
+  if (highestNum?.bill_number) {
+    const match = highestNum.bill_number.match(/\d+/);
+    if (match) {
+      const parsed = parseInt(match[0], 10);
+      if (parsed > maxSeq) maxSeq = parsed;
+    }
+  }
+
+  const nextSeq = maxSeq + 1;
   const nextBillNumber = `TW-${String(nextSeq).padStart(4, '0')}`;
   res.json(new ApiResponse(200, { nextSeq, billNumber: nextBillNumber }, 'Next bill sequence fetched'));
 });
@@ -2381,6 +2417,9 @@ export const createManualBill = catchAsync(async (req, res) => {
   const custCity = (customer?.city && String(customer.city).trim()) || '';
   const custState = (customer?.state && String(customer.state).trim()) || 'Uttar Pradesh';
   const custPincode = (customer?.pincode && String(customer.pincode).trim()) || '';
+  const custGstin = (customer?.gstin && String(customer.gstin).trim().toUpperCase()) ||
+                    (req.body.billing_gstin && String(req.body.billing_gstin).trim().toUpperCase()) ||
+                    (req.body.customer_gstin && String(req.body.customer_gstin).trim().toUpperCase()) || '';
 
   const septCutoff = new Date('2026-09-01T00:00:00.000+05:30');
   const statusFilter = { $in: [/^delivered$/i, /^DEL$/i] };
@@ -2446,6 +2485,7 @@ export const createManualBill = catchAsync(async (req, res) => {
     billing_city: custCity,
     billing_state: custState,
     billing_pincode: custPincode,
+    billing_gstin: custGstin,
     billing_country: 'India',
 
     shipping_is_billing: true,
@@ -2480,6 +2520,13 @@ export const createManualBill = catchAsync(async (req, res) => {
     company_name: company_name || 'TRIVEN WELLNESS LLP',
     is_manual_bill: true,
     remarks: remarks || '',
+    raw_response: {
+      company_gstin: company_gstin || undefined,
+      company_address: company_address || undefined,
+      tax_calculation_type: req.body.tax_calculation_type || 'exclusive',
+      customer_gstin: custGstin || undefined,
+      billing_gstin: custGstin || undefined,
+    },
 
     lead_id: null, // Isolated manual bill - do not count in CRM conversions
     created_by: req.user?._id || null,
@@ -2547,6 +2594,16 @@ export const updateManualBill = catchAsync(async (req, res) => {
       order.billing_pincode = String(customer.pincode).trim();
       order.shipping_pincode = order.billing_pincode;
     }
+    if (customer.gstin !== undefined) {
+      order.billing_gstin = String(customer.gstin).trim().toUpperCase();
+    }
+  }
+
+  if (req.body.billing_gstin !== undefined) {
+    order.billing_gstin = String(req.body.billing_gstin).trim().toUpperCase();
+  }
+  if (req.body.customer_gstin !== undefined) {
+    order.billing_gstin = String(req.body.customer_gstin).trim().toUpperCase();
   }
 
   if (payment_method !== undefined) order.payment_method = payment_method;
@@ -2599,10 +2656,15 @@ export const updateManualBill = catchAsync(async (req, res) => {
     order.sub_total = itemsTotal + (Number(order.doctor_fee) || 0);
   }
 
-  if (company_gstin !== undefined || company_address !== undefined) {
+  if (company_gstin !== undefined || company_address !== undefined || req.body.tax_calculation_type !== undefined || order.billing_gstin) {
     order.raw_response = order.raw_response || {};
     if (company_gstin !== undefined) order.raw_response.company_gstin = company_gstin;
     if (company_address !== undefined) order.raw_response.company_address = company_address;
+    if (req.body.tax_calculation_type !== undefined) order.raw_response.tax_calculation_type = req.body.tax_calculation_type;
+    if (order.billing_gstin) {
+      order.raw_response.customer_gstin = order.billing_gstin;
+      order.raw_response.billing_gstin = order.billing_gstin;
+    }
     order.markModified('raw_response');
   }
 
