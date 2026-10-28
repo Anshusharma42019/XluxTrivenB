@@ -2103,6 +2103,67 @@ export const getOrders = catchAsync(async (req, res) => {
 });
 
 
+// ── Resequence Delivered Orders (No missing gaps, strictly sequential) ──
+export const resequenceDeliveredOrders = async () => {
+  const septCutoff = new Date('2026-09-01T00:00:00.000+05:30');
+  const statusFilter = { $in: [/^delivered$/i, /^DEL$/i] };
+
+  // Clean up bill_seq/bill_number from orders delivered before Sept 1, 2026
+  await Order.updateMany(
+    {
+      platform: 'shipmaxx',
+      status: statusFilter,
+      delivered_at: { $lt: septCutoff }
+    },
+    { $unset: { bill_seq: 1, bill_number: 1 } }
+  ).catch(() => {});
+
+  const septemberDelivered = await Order.find({
+    $or: [{ platform: 'shipmaxx' }, { is_manual_bill: true }],
+    status: statusFilter,
+    delivered_at: { $gte: septCutoff }
+  })
+    .sort({ delivered_at: 1, status_updated_at: 1, createdAt: 1, _id: 1 })
+    .select('_id bill_seq bill_number is_manual_bill sub_total order_items delivered_at status_updated_at createdAt')
+    .lean();
+
+  const seqMap = new Map();
+  if (septemberDelivered.length > 0) {
+    let seq = 1;
+    const bulkOps = [];
+    for (const ord of septemberDelivered) {
+      const assignedSeq = seq;
+      const assignedBillNum = `TW-${String(seq).padStart(4, '0')}`;
+
+      seqMap.set(String(ord._id), { seq: assignedSeq, billNumber: assignedBillNum });
+
+      const updates = {};
+      if (ord.bill_seq !== assignedSeq || ord.bill_number !== assignedBillNum) {
+        updates.bill_seq = assignedSeq;
+        updates.bill_number = assignedBillNum;
+      }
+      if (ord.is_manual_bill && (ord.sub_total === 165200 || (ord.order_items?.[0]?.selling_price === 140000 && ord.sub_total !== 140000))) {
+        updates.sub_total = 140000;
+        updates['raw_response.tax_calculation_type'] = 'inclusive';
+        updates.tax_calculation_type = 'inclusive';
+      }
+      if (Object.keys(updates).length > 0) {
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: ord._id },
+            update: { $set: updates }
+          }
+        });
+      }
+      seq++;
+    }
+    if (bulkOps.length > 0) {
+      await Order.bulkWrite(bulkOps).catch(() => {});
+    }
+  }
+  return seqMap;
+};
+
 // ── Delivered Orders ──────────────────────────────────────────────────────────
 export const getDeliveredOrders = catchAsync(async (req, res) => {
   const { search, page = 1, per_page = 50, from, to, payment_method, sort = 'asc' } = req.query;
@@ -2171,62 +2232,9 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
 
   const sortDir = String(sort).toLowerCase() === 'desc' ? -1 : 1;
 
-  // Ensure delivered orders FROM September 1, 2026 onwards have sequential bill numbers (TW-0001, TW-0002...)
+  // Ensure delivered orders FROM September 1, 2026 onwards have unbroken sequential bill numbers (TW-0001, TW-0002...)
   const septCutoff = new Date('2026-09-01T00:00:00.000+05:30');
-
-  // Clean up bill_seq/bill_number from orders delivered before Sept 1, 2026
-  await Order.updateMany(
-    {
-      platform: 'shipmaxx',
-      status: statusFilter,
-      delivered_at: { $lt: septCutoff }
-    },
-    { $unset: { bill_seq: 1, bill_number: 1 } }
-  ).catch(() => {});
-
-  const septemberDelivered = await Order.find({
-    $or: [{ platform: 'shipmaxx' }, { is_manual_bill: true }],
-    status: statusFilter,
-    delivered_at: { $gte: septCutoff }
-  })
-    .sort({ delivered_at: 1, status_updated_at: 1, createdAt: 1, _id: 1 })
-    .select('_id bill_seq bill_number is_manual_bill sub_total order_items delivered_at status_updated_at createdAt')
-    .lean();
-
-  const seqMap = new Map();
-  if (septemberDelivered.length > 0) {
-    let seq = 1;
-    const bulkOps = [];
-    for (const ord of septemberDelivered) {
-      const assignedSeq = seq;
-      const assignedBillNum = `TW-${String(seq).padStart(4, '0')}`;
-
-      seqMap.set(String(ord._id), { seq: assignedSeq, billNumber: assignedBillNum });
-
-      const updates = {};
-      if (ord.bill_seq !== assignedSeq || ord.bill_number !== assignedBillNum) {
-        updates.bill_seq = assignedSeq;
-        updates.bill_number = assignedBillNum;
-      }
-      if (ord.is_manual_bill && (ord.sub_total === 165200 || (ord.order_items?.[0]?.selling_price === 140000 && ord.sub_total !== 140000))) {
-        updates.sub_total = 140000;
-        updates['raw_response.tax_calculation_type'] = 'inclusive';
-        updates.tax_calculation_type = 'inclusive';
-      }
-      if (Object.keys(updates).length > 0) {
-        bulkOps.push({
-          updateOne: {
-            filter: { _id: ord._id },
-            update: { $set: updates }
-          }
-        });
-      }
-      seq++;
-    }
-    if (bulkOps.length > 0) {
-      await Order.bulkWrite(bulkOps).catch(() => {});
-    }
-  }
+  const seqMap = await resequenceDeliveredOrders();
 
   // Cleanup/isolate any manual orders in DB that might have lead_id or verified_by set accidentally
   await Order.updateMany(
@@ -4282,7 +4290,10 @@ export const deleteOrder = catchAsync(async (req, res) => {
   // 4. Invalidate caches
   invalidateFollowupCache();
 
-  res.json(new ApiResponse(200, { deletedId: orderId, order_id: ordCode, bill_number: billNum }, 'Order permanently removed successfully'));
+  // 5. Automatically re-sequence remaining delivered orders so the sequence remains unbroken without gaps!
+  await resequenceDeliveredOrders().catch(() => {});
+
+  res.json(new ApiResponse(200, { deletedId: orderId, order_id: ordCode, bill_number: billNum }, 'Order permanently removed and sequence updated successfully'));
 });
 
 
