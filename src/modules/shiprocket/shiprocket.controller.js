@@ -117,6 +117,7 @@ export const generateReorderCommissions = async () => {
       ShipmaxxOrder.find({
         status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
         reorder_commission_generated: { $ne: true },
+        is_manual_bill: { $ne: true },
       }).populate('lead_id').lean()
     ]);
 
@@ -163,7 +164,7 @@ export const generateReorderCommissions = async () => {
           // First, check historical orders for this phone number to find a Sales agent
           const [srOrders, smOrders] = await Promise.all([
             Order.find({ billing_phone: phoneRegex }).select('task_created_by verified_by created_by').lean(),
-            ShipmaxxOrder.find({ billing_phone: phoneRegex }).select('task_created_by verified_by created_by').lean()
+            ShipmaxxOrder.find({ billing_phone: phoneRegex, is_manual_bill: { $ne: true } }).select('task_created_by verified_by created_by').lean()
           ]);
           
           const allOrders = [...srOrders, ...smOrders];
@@ -1320,6 +1321,9 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
     status: { $in: ['DELIVERED', 'Delivered', 'delivered'] },
     followup_done: { $ne: true },
     sent_to_verification: { $ne: true },
+    is_manual_bill: { $ne: true },
+    order_id: { $not: /^MNL-/i },
+    awb_code: { $not: /^MNL-/i },
   };
   if (validLeadIds !== null) {
     query.lead_id = { $in: validLeadIds };

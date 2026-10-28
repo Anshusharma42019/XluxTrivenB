@@ -1091,7 +1091,12 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
   const { from, to, department } = req.query;
 
   const baseConditions = [
-    { platform: 'shipmaxx' }
+    {
+      platform: 'shipmaxx',
+      is_manual_bill: { $ne: true },
+      order_id: { $not: /^MNL-/i },
+      awb_code: { $not: /^MNL-/i },
+    }
   ];
 
   const PILES_REGEX = /piles|gastro|bawasir|bavasir|hemorrhoid|fissure|fistula|bhagander/i;
@@ -1188,19 +1193,47 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
     };
   }
 
-  const [deliveredCountResult, statusBreakdown, revenueAggregation, paymentBreakdownResult] = await Promise.all([
-    Order.countDocuments(deliveredOnlyMatch),
+  // Courier delivered match: strictly exclude manual bills
+  const courierOnlyDeliveredMatch = {
+    $and: [
+      deliveredOnlyMatch,
+      { is_manual_bill: { $ne: true }, order_id: { $not: /^MNL-/i }, awb_code: { $not: /^MNL-/i } }
+    ]
+  };
+
+  // Manual bills match: strictly manual bills
+  const manualOnlyDeliveredMatch = {
+    $and: [
+      deliveredOnlyMatch,
+      { $or: [{ is_manual_bill: true }, { order_id: /^MNL-/i }, { awb_code: /^MNL-/i }] }
+    ]
+  };
+
+  const [
+    courierCountResult,
+    courierRevAgg,
+    manualCountResult,
+    manualRevAgg,
+    statusBreakdown,
+    paymentBreakdownResult
+  ] = await Promise.all([
+    Order.countDocuments(courierOnlyDeliveredMatch),
+    Order.aggregate([
+      { $match: courierOnlyDeliveredMatch },
+      { $group: { _id: null, totalRevenue: { $sum: '$sub_total' } } }
+    ]),
+    Order.countDocuments(manualOnlyDeliveredMatch),
+    Order.aggregate([
+      { $match: manualOnlyDeliveredMatch },
+      { $group: { _id: null, totalManual: { $sum: '$sub_total' } } }
+    ]),
     Order.aggregate([
       { $match: match },
       { $group: { _id: '$status', count: { $sum: 1 }, revenue: { $sum: '$sub_total' } } },
       { $sort: { count: -1 } }
     ]),
     Order.aggregate([
-      { $match: deliveredOnlyMatch },
-      { $group: { _id: null, totalRevenue: { $sum: '$sub_total' } } }
-    ]),
-    Order.aggregate([
-      { $match: deliveredOnlyMatch },
+      { $match: courierOnlyDeliveredMatch },
       {
         $group: {
           _id: {
@@ -1216,6 +1249,13 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
       }
     ])
   ]);
+
+  const courierRevenue = courierRevAgg?.[0]?.totalRevenue || 0;
+  const courierCount = courierCountResult || 0;
+  const manualRevenue = manualRevAgg?.[0]?.totalManual || 0;
+  const manualCount = manualCountResult || 0;
+  const totalCount = courierCount + manualCount;
+  const totalRevenue = courierRevenue + manualRevenue;
 
   let codCount = 0;
   let codRevenue = 0;
@@ -1252,20 +1292,25 @@ export const getDeliveredStats = catchAsync(async (req, res) => {
 
   const delIdx = breakdown.findIndex(b => /^delivered$/i.test(b._id));
   if (delIdx === -1) {
-    breakdown.unshift({ _id: 'DELIVERED', count: deliveredCountResult, revenue: 0 });
+    breakdown.unshift({ _id: 'DELIVERED', count: courierCount, revenue: courierRevenue });
   } else {
-    breakdown[delIdx].count = deliveredCountResult;
+    breakdown[delIdx].count = courierCount;
+    breakdown[delIdx].revenue = courierRevenue;
   }
 
-  const totalRevenue = revenueAggregation?.[0]?.totalRevenue || 0;
-
   res.json(new ApiResponse(200, {
-    count: deliveredCountResult,
-    revenue: totalRevenue,
+    count: courierCount,
+    revenue: courierRevenue,
+    courierCount,
+    courierRevenue,
+    totalCount,
+    totalRevenue,
     codCount,
     codRevenue,
     prepaidCount,
     prepaidRevenue,
+    manualCount,
+    manualRevenue,
     statusBreakdown: breakdown
   }, 'Delivered stats'));
 });
@@ -1313,7 +1358,12 @@ export const getStatusOrders = catchAsync(async (req, res) => {
   if (!queryStatus) return res.status(400).json(new ApiResponse(400, null, 'Status is required'));
 
   const baseConditions = [
-    { platform: 'shipmaxx' }
+    {
+      platform: 'shipmaxx',
+      is_manual_bill: { $ne: true },
+      order_id: { $not: /^MNL-/i },
+      awb_code: { $not: /^MNL-/i },
+    }
   ];
 
   const PILES_REGEX = /piles|gastro|bawasir|bavasir|hemorrhoid|fissure|fistula|bhagander/i;
@@ -1985,7 +2035,7 @@ export const runCronSyncWebhook = catchAsync(async (req, res) => {
 
 export const getOrders = catchAsync(async (req, res) => {
   const { status, shipment_status, from, to, search, page = 1, limit = 50, has_awb } = req.query;
-  const match = { platform: 'shipmaxx' };
+  const match = { platform: 'shipmaxx', is_manual_bill: { $ne: true } };
 
   if (has_awb === 'true') {
     match.awb_code = { $exists: true, $ne: '' };
@@ -2174,38 +2224,83 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
     }
   }
 
-  const [orders, total, totalRevenueAgg] = await Promise.all([
+  // Cleanup/isolate any manual orders in DB that might have lead_id or verified_by set accidentally
+  await Order.updateMany(
+    {
+      $or: [{ is_manual_bill: true }, { order_id: /^MNL-/i }, { awb_code: /^MNL-/i }, { courier_name: 'Manual Delivery' }]
+    },
+    {
+      $set: { lead_id: null, verified_by: null, is_manual_bill: true }
+    }
+  ).catch(() => {});
+
+  // Separate courier deliveries and manual bills accurately without relying on subtraction
+  const courierOnlyMatch = {
+    $and: [
+      match,
+      { is_manual_bill: { $ne: true }, order_id: { $not: /^MNL-/i }, awb_code: { $not: /^MNL-/i } }
+    ]
+  };
+
+  const manualOnlyMatch = {
+    $and: [
+      match,
+      { $or: [{ is_manual_bill: true }, { order_id: /^MNL-/i }, { awb_code: /^MNL-/i }] }
+    ]
+  };
+
+  const [orders, total, courierCountResult, courierRevAgg, manualCountResult, manualRevAgg] = await Promise.all([
     Order.find(match)
       .populate({ path: 'lead_id', select: 'phone email assignedTo', populate: { path: 'assignedTo', select: 'name role' } })
       .populate('verified_by', 'name role')
+      .populate('created_by', 'name role')
       .sort({ delivered_at: sortDir, status_updated_at: sortDir, createdAt: sortDir, _id: sortDir })
       .skip(skipNum).limit(limitNum).lean(),
     Order.countDocuments(match),
+    Order.countDocuments(courierOnlyMatch),
     Order.aggregate([
-      { $match: match },
+      { $match: courierOnlyMatch },
+      { $group: { _id: null, totalRevenue: { $sum: '$sub_total' } } }
+    ]),
+    Order.countDocuments(manualOnlyMatch),
+    Order.aggregate([
+      { $match: manualOnlyMatch },
       { $group: { _id: null, totalRevenue: { $sum: '$sub_total' } } }
     ])
   ]);
 
-  const totalRevenue = totalRevenueAgg?.[0]?.totalRevenue || 0;
+  const courierCount = courierCountResult || 0;
+  const courierRevenue = courierRevAgg?.[0]?.totalRevenue || 0;
+  const manualCount = manualCountResult || 0;
+  const manualRevenue = manualRevAgg?.[0]?.totalRevenue || 0;
+  const totalRevenue = courierRevenue + manualRevenue;
 
   orders.forEach(o => {
-    let staffName = undefined;
-    let staffId = undefined;
-    if (o.verified_by) {
-      staffName = o.verified_by.name;
-      staffId = o.verified_by._id || o.verified_by.id;
-    }
+    const isManualOrder = o.is_manual_bill || o.courier_name === 'Manual Delivery' || String(o.awb_code || '').startsWith('MNL-') || String(o.order_id || '').startsWith('MNL-');
 
-    if (o.verified_by) {
-      o.staff_name = staffName || '';
-      o.staff_role = o.verified_by.role || '';
+    if (isManualOrder) {
+      o.staff_name = o.created_by?.name || 'Admin';
+      o.staff_role = 'Admin';
+      o.verification_staff_id = o.created_by?._id || o.created_by?.id || null;
+      o.verification_staff_name = o.staff_name;
     } else {
-      o.staff_name = o.lead_id?.assignedTo?.name || '';
-      o.staff_role = o.lead_id?.assignedTo?.role || '';
+      let staffName = undefined;
+      let staffId = undefined;
+      if (o.verified_by) {
+        staffName = o.verified_by.name;
+        staffId = o.verified_by._id || o.verified_by.id;
+      }
+
+      if (o.verified_by) {
+        o.staff_name = staffName || '';
+        o.staff_role = o.verified_by.role || '';
+      } else {
+        o.staff_name = o.lead_id?.assignedTo?.name || '';
+        o.staff_role = o.lead_id?.assignedTo?.role || '';
+      }
+      o.verification_staff_id = staffId;
+      o.verification_staff_name = staffName;
     }
-    o.verification_staff_id = staffId;
-    o.verification_staff_name = staffName;
 
     // Set sequence-wise bill_number ONLY for September 2026 onwards
     const ordDate = new Date(o.delivered_at || o.status_updated_at || o.createdAt);
@@ -2230,7 +2325,18 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
       o.billNumber = null;
     }
   });
-  res.json(new ApiResponse(200, { data: orders, total, totalRevenue, page: pageNum, per_page: isGetAll ? total : limitNum }, 'Delivered orders fetched'));
+
+  res.json(new ApiResponse(200, {
+    data: orders,
+    total,
+    totalRevenue,
+    courierRevenue,
+    courierCount,
+    manualRevenue,
+    manualCount,
+    page: pageNum,
+    per_page: isGetAll ? total : limitNum
+  }, 'Delivered orders fetched'));
 });
 
 export const getNextBillSeq = catchAsync(async (req, res) => {
@@ -2319,14 +2425,7 @@ export const createManualBill = catchAsync(async (req, res) => {
   const finalAwb = (awb_code && String(awb_code).trim()) || `MNL-${Date.now().toString().slice(-8)}`;
   const finalOrderId = (order_id && String(order_id).trim()) || `MNL-${finalAwb.replace(/\D/g, '').slice(-6) || Date.now().toString().slice(-6)}`;
 
-  // Find lead if phone matches
-  let matchedLeadId = null;
-  const cleanPhone = String(custPhone).replace(/\D/g, '');
-  if (cleanPhone.length >= 10 && cleanPhone !== '9999999999') {
-    const lead = await leadService.findLeadByPhone(cleanPhone).catch(() => null);
-    if (lead) matchedLeadId = lead._id;
-  }
-
+  // Manual bills are always isolated from sales CRM leads and reps
   const itemsTotal = (order_items || []).reduce((acc, it) => acc + (Number(it.selling_price) || 0) * (Number(it.units) || 1), 0);
   const finalSubTotal = sub_total !== undefined && sub_total !== null && Number(sub_total) >= 0
     ? Number(sub_total)
@@ -2382,19 +2481,154 @@ export const createManualBill = catchAsync(async (req, res) => {
     is_manual_bill: true,
     remarks: remarks || '',
 
-    lead_id: matchedLeadId,
+    lead_id: null, // Isolated manual bill - do not count in CRM conversions
     created_by: req.user?._id || null,
-    verified_by: req.user?._id || null,
+    verified_by: null, // Do not count in sales staff performance / verification target
+    followup_done: true, // Isolated manual bill - do not count in follow-ups
+    auto_followups_set: true, // Do not trigger background follow-up schedules
   });
 
+  invalidateFollowupCache();
+
   res.json(new ApiResponse(201, newOrder, `Manual bill ${finalBillNumber} created successfully`));
+});
+
+export const updateManualBill = catchAsync(async (req, res) => {
+  const { id } = req.params;
+  let order = null;
+  if (mongoose.Types.ObjectId.isValid(id)) {
+    order = await Order.findById(id);
+  }
+  if (!order) {
+    order = await Order.findOne({ $or: [{ order_id: id }, { awb_code: id }] });
+  }
+  if (!order) {
+    throw new ApiError(404, 'Bill not found');
+  }
+
+  const {
+    customer,
+    payment_method,
+    delivered_at,
+    courier_name,
+    awb_code,
+    order_id,
+    bill_number,
+    bill_seq,
+    order_items,
+    sub_total,
+    doctor_fee,
+    doctor_fee_name,
+    doctor_fee_hsn,
+    doctor_fee_tax,
+    company_name,
+    company_gstin,
+    company_address,
+    remarks,
+  } = req.body;
+
+  if (customer) {
+    if (customer.name !== undefined) order.billing_customer_name = String(customer.name).trim();
+    if (customer.phone !== undefined) order.billing_phone = String(customer.phone).trim();
+    if (customer.email !== undefined) order.billing_email = String(customer.email).trim();
+    if (customer.address !== undefined) {
+      order.billing_address = String(customer.address).trim();
+      order.shipping_address = order.billing_address;
+    }
+    if (customer.city !== undefined) {
+      order.billing_city = String(customer.city).trim();
+      order.shipping_city = order.billing_city;
+    }
+    if (customer.state !== undefined) {
+      order.billing_state = String(customer.state).trim();
+      order.shipping_state = order.billing_state;
+    }
+    if (customer.pincode !== undefined) {
+      order.billing_pincode = String(customer.pincode).trim();
+      order.shipping_pincode = order.billing_pincode;
+    }
+  }
+
+  if (payment_method !== undefined) order.payment_method = payment_method;
+  if (courier_name !== undefined) order.courier_name = courier_name;
+  if (awb_code !== undefined && String(awb_code).trim()) order.awb_code = String(awb_code).trim();
+  if (order_id !== undefined && String(order_id).trim()) order.order_id = String(order_id).trim();
+
+  if (bill_number !== undefined && String(bill_number).trim()) {
+    order.bill_number = String(bill_number).trim();
+    const numMatch = order.bill_number.match(/\d+/);
+    if (numMatch) {
+      order.bill_seq = parseInt(numMatch[0], 10);
+    }
+  }
+  if (bill_seq !== undefined && Number(bill_seq) > 0) {
+    order.bill_seq = Number(bill_seq);
+  }
+
+  if (delivered_at !== undefined) {
+    const parsedDate = new Date(delivered_at);
+    if (!isNaN(parsedDate.getTime())) {
+      order.delivered_at = parsedDate;
+      order.status_updated_at = parsedDate;
+    }
+  }
+
+  if (order_items && Array.isArray(order_items)) {
+    order.order_items = order_items.map(it => ({
+      name: it.name || 'Ayurvedic Medicine',
+      sku: it.sku || 'MED-01',
+      units: Number(it.units) || 1,
+      selling_price: Number(it.selling_price) || 0,
+      discount: String(it.discount || '0'),
+      tax: it.tax !== undefined ? String(it.tax) : '0',
+      hsn: it.hsn || '30049011',
+    }));
+  }
+
+  if (doctor_fee !== undefined) order.doctor_fee = Number(doctor_fee) || 0;
+  if (doctor_fee_name !== undefined) order.doctor_fee_name = doctor_fee_name;
+  if (doctor_fee_hsn !== undefined) order.doctor_fee_hsn = doctor_fee_hsn;
+  if (doctor_fee_tax !== undefined) order.doctor_fee_tax = Number(doctor_fee_tax) || 0;
+  if (company_name !== undefined) order.company_name = company_name;
+  if (remarks !== undefined) order.remarks = remarks;
+
+  if (sub_total !== undefined && Number(sub_total) >= 0) {
+    order.sub_total = Number(sub_total);
+  } else if (order_items && Array.isArray(order_items)) {
+    const itemsTotal = order.order_items.reduce((acc, it) => acc + (Number(it.selling_price) || 0) * (Number(it.units) || 1), 0);
+    order.sub_total = itemsTotal + (Number(order.doctor_fee) || 0);
+  }
+
+  if (company_gstin !== undefined || company_address !== undefined) {
+    order.raw_response = order.raw_response || {};
+    if (company_gstin !== undefined) order.raw_response.company_gstin = company_gstin;
+    if (company_address !== undefined) order.raw_response.company_address = company_address;
+    order.markModified('raw_response');
+  }
+
+  order.lead_id = null;
+  order.verified_by = null;
+  order.is_manual_bill = true;
+  if (!order.created_by && req.user?._id) {
+    order.created_by = req.user._id;
+  }
+  await order.save();
+  invalidateFollowupCache();
+
+  res.json(new ApiResponse(200, order, `Manual bill ${order.bill_number || order.order_id} updated successfully`));
 });
 
 export const getDeliveredOrdersFromSchema = catchAsync(async (req, res) => {
   const { page = 1, per_page = 50, search, from, to } = req.query;
 
-  // Auto-sync delivered orders from Order collection
-  const newDelivered = await Order.find({ platform: 'shipmaxx', status: /^delivered$/i })
+  // Auto-sync delivered orders from Order collection (excluding manual bills)
+  const newDelivered = await Order.find({
+    platform: 'shipmaxx',
+    status: /^delivered$/i,
+    is_manual_bill: { $ne: true },
+    order_id: { $not: /^MNL-/i },
+    awb_code: { $not: /^MNL-/i }
+  })
     .select('order_id billing_customer_name billing_phone billing_email billing_address billing_city billing_state billing_pincode awb_code courier_name payment_method sub_total order_items status lead_id delivered_at createdAt verified_by').lean();
   for (const o of newDelivered) {
     await DeliveredOrder.findOneAndUpdate(
@@ -2560,6 +2794,9 @@ export const getOrdersWithFollowUps = catchAsync(async (req, res) => {
         status: { $in: ['DELIVERED', 'delivered', 'DEL', 'del'] },
         followup_done: { $ne: true },
         sent_to_verification: { $ne: true },
+        is_manual_bill: { $ne: true },
+        order_id: { $not: /^MNL-/i },
+        awb_code: { $not: /^MNL-/i },
       };
 
       const delivered = await Order.find(query)
@@ -3535,7 +3772,7 @@ export async function getShipmaxxPeriodStats(from, to, month, year) {
     endDate = new Date(Date.UTC(y, m + 1, 0, 23, 59, 59, 999) - IST_OFFSET);
   }
 
-  const match = {};
+  const match = { platform: 'shipmaxx', is_manual_bill: { $ne: true } };
   if (startDate || endDate) {
     match.createdAt = {};
     if (startDate) match.createdAt.$gte = startDate;
@@ -3544,7 +3781,9 @@ export async function getShipmaxxPeriodStats(from, to, month, year) {
 
   // Count delivered orders strictly by delivery date (delivered_at) within the period
   const deliveredMatch = { 
+    platform: 'shipmaxx',
     status: { $regex: /^delivered$/i },
+    is_manual_bill: { $ne: true },
     ...(startDate || endDate ? {
       delivered_at: {
         ...(startDate && { $gte: startDate }),
@@ -3621,7 +3860,7 @@ export const getNdrList = catchAsync(async (req, res) => {
 
   // If user requests RTO, Delivered, or All Initiated shipments directly in the table
   if (view === 'rto' || view === 'delivered' || view === 'all') {
-    let match = {};
+    let match = { platform: 'shipmaxx', is_manual_bill: { $ne: true } };
     if (from || to) {
       const dateRange = {};
       if (from) dateRange.$gte = new Date(from);
@@ -3637,7 +3876,9 @@ export const getNdrList = catchAsync(async (req, res) => {
       match.status = { $regex: /rto|rra/i };
     } else if (view === 'delivered') {
       match = { 
+        platform: 'shipmaxx',
         status: { $regex: /^delivered$/i },
+        is_manual_bill: { $ne: true },
         ...(from || to ? {
           delivered_at: {
             ...(from && { $gte: new Date(from) }),
@@ -3756,7 +3997,7 @@ export const getNdrList = catchAsync(async (req, res) => {
   }
 
   // Fallback to local MongoDB NDR records
-  const match = { status: /UNDELIVERED|NDR|EXCEPTION/i };
+  const match = { status: /UNDELIVERED|NDR|EXCEPTION/i, platform: 'shipmaxx', is_manual_bill: { $ne: true } };
   if (from || to) {
     match.status_updated_at = {};
     if (from) match.status_updated_at.$gte = new Date(from);

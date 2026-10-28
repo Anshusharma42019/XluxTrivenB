@@ -99,6 +99,7 @@ export const runCronSync = async () => {
             order_id: String(s.order_id || s.awb),
             awb_code: String(s.awb || ''),
             platform: 'shipmaxx',
+      is_manual_bill: { $ne: true },
             status_updated_at: statusUpdatedAt,
           };
 
@@ -174,6 +175,7 @@ export const runCronSync = async () => {
           
           const ud = {
             platform: 'shipmaxx',
+      is_manual_bill: { $ne: true },
             order_id: String(o.order_id)
           };
           if (o.customer_name && (!existing || !existing.billing_customer_name)) ud.billing_customer_name = o.customer_name;
@@ -237,6 +239,7 @@ export const runCronSync = async () => {
 
     const activeOrders = await Order.find({
       platform: 'shipmaxx',
+      is_manual_bill: { $ne: true },
       createdAt: { $gte: trackingLimit },
       $or: [
         { status: { $not: /^(delivered|rto_delivered|cancelled|canceled)/i } },

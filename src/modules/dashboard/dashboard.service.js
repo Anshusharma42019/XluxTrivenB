@@ -72,6 +72,7 @@ export const getStaffStats = async (userId, targetDate, from, to, userDepartment
 
   const deliveredQuery = {
     status: { $regex: /^delivered$/i },
+    is_manual_bill: { $ne: true },
     ...(isAllTime ? {} : { $or: [{ delivered_at: { $gte: start, $lte: end } }, { updatedAt: { $gte: start, $lte: end } }] })
   };
 
@@ -614,12 +615,14 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     }).select('assignedTo status cnp notes follow_ups createdAt updatedAt').lean(),
     Order.find({ 
       status: { $nin: ['cancelled', 'CANCELLED', 'Cancelled'] },
+      is_manual_bill: { $ne: true },
       ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
     }).select('comments billing_phone shipping_phone lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
       .populate('lead_id', 'assignedTo')
       .lean(),
     ShipmaxxOrder.find({ 
       status: { $nin: ['cancelled', 'CANCELLED', 'Cancelled'] },
+      is_manual_bill: { $ne: true },
       ...(isAllTime ? {} : { createdAt: { $gte: queryMinStart, $lte: queryMaxEnd } })
     }).select('comments billing_phone shipping_phone lead_id task_created_by created_by verified_by source_order_id status createdAt updatedAt')
       .populate('lead_id', 'assignedTo')
@@ -1770,9 +1773,15 @@ export async function getSynchronizedDeliveredOrders(monthStart, monthEnd, Order
     { path: 'verified_by', select: 'name role' }
   ];
 
+  const nonManualFilter = {
+    is_manual_bill: { $ne: true },
+    order_id: { $not: /^MNL-/i },
+    awb_code: { $not: /^MNL-/i }
+  };
+
   if (!monthStart || !monthEnd) {
-    let q1SR = OrderModel.find({ status: deliveredStatus }).select(selectFields);
-    let q1SM = ShipmaxxOrderModel.find({ status: deliveredStatus }).select(selectFields);
+    let q1SR = OrderModel.find({ status: deliveredStatus, ...nonManualFilter }).select(selectFields);
+    let q1SM = ShipmaxxOrderModel.find({ status: deliveredStatus, ...nonManualFilter }).select(selectFields);
     if (populateDetails) {
       q1SR = q1SR.populate(popList);
       q1SM = q1SM.populate(popList);
@@ -1813,10 +1822,10 @@ export async function getSynchronizedDeliveredOrders(monthStart, monthEnd, Order
     ]
   };
 
-  let q1SR = OrderModel.find(cohortQuery).select(selectFields);
-  let q2SR = OrderModel.find(backlogQuery).select(selectFields);
-  let q1SM = ShipmaxxOrderModel.find(cohortQuery).select(selectFields);
-  let q2SM = ShipmaxxOrderModel.find(backlogQuery).select(selectFields);
+  let q1SR = OrderModel.find({ ...cohortQuery, ...nonManualFilter }).select(selectFields);
+  let q2SR = OrderModel.find({ ...backlogQuery, ...nonManualFilter }).select(selectFields);
+  let q1SM = ShipmaxxOrderModel.find({ ...cohortQuery, ...nonManualFilter }).select(selectFields);
+  let q2SM = ShipmaxxOrderModel.find({ ...backlogQuery, ...nonManualFilter }).select(selectFields);
 
   if (populateDetails) {
     q1SR = q1SR.populate(popList);

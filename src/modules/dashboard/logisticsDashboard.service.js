@@ -100,10 +100,11 @@ export const getLogisticsDashboardStats = async ({
 
   // Courier filter helper
   const buildCourierQuery = (base = {}) => {
+    const q = { ...base, is_manual_bill: { $ne: true } };
     if (courier && courier !== 'all') {
-      return { ...base, courier_name: new RegExp(`^${courier}`, 'i') };
+      return { ...q, courier_name: new RegExp(`^${courier}`, 'i') };
     }
-    return base;
+    return q;
   };
 
   const guessCourierByAwb = (awb) => {

@@ -88,7 +88,7 @@ async function getStaffScope(staffId) {
 
 /* ─── Build mongo filter for orders ─────────────────────────────────────────── */
 async function buildOrderFilter(start, end, { hub, courier, awb, state, staffId, staffScope } = {}) {
-  const f = { createdAt: { $gte: start, $lte: end } };
+  const f = { createdAt: { $gte: start, $lte: end }, is_manual_bill: { $ne: true } };
   if (courier) f.courier_name    = { $regex: courier, $options: 'i' };
   if (awb) {
     f.awb_code = { $regex: awb, $options: 'i' };
@@ -839,7 +839,7 @@ export async function getRtoReasons(params) {
   const { start, end } = buildDateRange(preset, from, to);
   const staffScope = await getStaffScope(staffId);
 
-  const f = { createdAt: { $gte: start, $lte: end }, rto_verification_action: { $ne: 'send_to_verification' } };
+  const f = { createdAt: { $gte: start, $lte: end }, rto_verification_action: { $ne: 'send_to_verification' }, is_manual_bill: { $ne: true } };
   if (hub)     f.pickup_location = { $regex: hub,     $options: 'i' };
   if (courier) f.courier_name    = { $regex: courier, $options: 'i' };
   if (state)   f.billing_state   = { $regex: state,   $options: 'i' };
@@ -880,7 +880,7 @@ export async function getAging(params) {
   const now = new Date();
   const staffScope = await getStaffScope(staffId);
 
-  const base = {};
+  const base = { is_manual_bill: { $ne: true } };
   if (courier) base.courier_name    = { $regex: courier, $options: 'i' };
   if (hub)     base.pickup_location = { $regex: hub,     $options: 'i' };
   if (state)   base.billing_state   = { $regex: state,   $options: 'i' };

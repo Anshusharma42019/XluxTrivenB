@@ -405,6 +405,8 @@ router.post('/orders/import-by-ids', auth(), c.importByIds);
 router.post('/orders/manual-followup', auth(), c.createManualFollowup);
 router.get('/orders/next-bill-seq', auth(), c.getNextBillSeq);
 router.post('/orders/manual-bill', auth(), c.createManualBill);
+router.put('/orders/manual-bill/:id', auth(), c.updateManualBill);
+router.patch('/orders/manual-bill/:id', auth(), c.updateManualBill);
 
 // Support Assignment Routes
 router.post('/followups/auto-assign', auth(), c.autoAssignFollowups);

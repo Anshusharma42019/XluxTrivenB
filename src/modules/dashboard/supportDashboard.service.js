@@ -84,6 +84,7 @@ export const getSupportDashboardStats = async ({
   // 3. Query Delivered Orders dynamically for This Period and Previous Period (Last Month Cohort)
   const deliveredQuery = {
     status: { $regex: /^delivered$/i },
+    is_manual_bill: { $ne: true },
     $or: [
       { delivered_at: { $gte: startDate, $lte: endDate } },
       { delivered_at: null, status_updated_at: { $gte: startDate, $lte: endDate } },
@@ -129,6 +130,7 @@ export const getSupportDashboardStats = async ({
 
   const lastCohortQuery = {
     status: { $regex: /^delivered$/i },
+    is_manual_bill: { $ne: true },
     $or: [
       { delivered_at: { $gte: lastCohortStart, $lte: lastCohortEnd } },
       { delivered_at: null, status_updated_at: { $gte: lastCohortStart, $lte: lastCohortEnd } },
@@ -138,6 +140,7 @@ export const getSupportDashboardStats = async ({
 
   const returningCohortQuery = {
     status: { $regex: /^delivered$/i },
+    is_manual_bill: { $ne: true },
     $or: [
       { delivered_at: { $gte: returningCohortStart, $lte: returningCohortEnd } },
       { delivered_at: null, status_updated_at: { $gte: returningCohortStart, $lte: returningCohortEnd } },
@@ -468,7 +471,8 @@ export const getSupportDashboardStats = async ({
   // 7. End-to-End Re-Verification & Re-Order Tracking
   // Query all orders created in this period to identify repeat bookings
   const periodOrderFilter = {
-    createdAt: { $gte: startDate, $lte: endDate }
+    createdAt: { $gte: startDate, $lte: endDate },
+    is_manual_bill: { $ne: true }
   };
 
   if (effectiveStaffId) {
