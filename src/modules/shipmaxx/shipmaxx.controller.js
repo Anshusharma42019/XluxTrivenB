@@ -2193,31 +2193,14 @@ export const getDeliveredOrders = catchAsync(async (req, res) => {
     .select('_id bill_seq bill_number is_manual_bill sub_total order_items delivered_at status_updated_at createdAt')
     .lean();
 
-  const usedBillNumbers = new Set();
   const seqMap = new Map();
   if (septemberDelivered.length > 0) {
     let seq = 1;
     const bulkOps = [];
     for (const ord of septemberDelivered) {
-      while (usedBillNumbers.has(`TW-${String(seq).padStart(4, '0')}`)) {
-        seq++;
-      }
-      const seqStr = String(seq).padStart(4, '0');
-      const generatedNum = `TW-${seqStr}`;
+      const assignedSeq = seq;
+      const assignedBillNum = `TW-${String(seq).padStart(4, '0')}`;
 
-      let assignedSeq = seq;
-      let assignedBillNum = generatedNum;
-
-      if (ord.is_manual_bill && ord.bill_number && !usedBillNumbers.has(ord.bill_number)) {
-        assignedBillNum = ord.bill_number;
-        const match = ord.bill_number.match(/\d+/);
-        assignedSeq = match ? parseInt(match[0], 10) : seq;
-      } else {
-        assignedSeq = seq;
-        assignedBillNum = generatedNum;
-      }
-
-      usedBillNumbers.add(assignedBillNum);
       seqMap.set(String(ord._id), { seq: assignedSeq, billNumber: assignedBillNum });
 
       const updates = {};
