@@ -2398,6 +2398,8 @@ export const createManualBill = catchAsync(async (req, res) => {
     doctor_fee_hsn = '999312',
     doctor_fee_tax = 0,
     company_name = 'TRIVEN WELLNESS LLP',
+    company_gstin = '09AAZFT9024A1ZS',
+    company_address = '',
     remarks = '',
   } = req.body;
 
@@ -2417,7 +2419,7 @@ export const createManualBill = catchAsync(async (req, res) => {
 
   // Calculate next sequential number
   const highest = await Order.findOne({
-    platform: 'shipmaxx',
+    $or: [{ platform: 'shipmaxx' }, { is_manual_bill: true }],
     status: statusFilter,
     delivered_at: { $gte: septCutoff },
     bill_seq: { $exists: true, $ne: null }
@@ -2512,9 +2514,9 @@ export const createManualBill = catchAsync(async (req, res) => {
     is_manual_bill: true,
     remarks: remarks || '',
     raw_response: {
-      company_gstin: company_gstin || undefined,
-      company_address: company_address || undefined,
-      tax_calculation_type: req.body.tax_calculation_type || 'exclusive',
+      company_gstin: company_gstin || req.body.company_gstin || '09AAZFT9024A1ZS',
+      company_address: company_address || req.body.company_address || undefined,
+      tax_calculation_type: req.body.tax_calculation_type || 'inclusive',
       customer_gstin: custGstin || undefined,
       billing_gstin: custGstin || undefined,
     },
@@ -2528,7 +2530,11 @@ export const createManualBill = catchAsync(async (req, res) => {
 
   invalidateFollowupCache();
 
-  res.json(new ApiResponse(201, newOrder, `Manual bill ${finalBillNumber} created successfully`));
+  // Keep all delivered bills in unbroken strict chronological sequence
+  await resequenceDeliveredOrders().catch(() => {});
+  const refreshedOrder = await Order.findById(newOrder._id).lean();
+
+  res.json(new ApiResponse(201, refreshedOrder || newOrder, `Manual bill ${finalBillNumber} created successfully`));
 });
 
 export const updateManualBill = catchAsync(async (req, res) => {
@@ -2668,7 +2674,11 @@ export const updateManualBill = catchAsync(async (req, res) => {
   await order.save();
   invalidateFollowupCache();
 
-  res.json(new ApiResponse(200, order, `Manual bill ${order.bill_number || order.order_id} updated successfully`));
+  // Ensure unbroken consecutive chronological sequence across all orders
+  await resequenceDeliveredOrders().catch(() => {});
+  const refreshedOrder = await Order.findById(order._id).lean();
+
+  res.json(new ApiResponse(200, refreshedOrder || order, `Manual bill ${order.bill_number || order.order_id} updated successfully`));
 });
 
 export const getDeliveredOrdersFromSchema = catchAsync(async (req, res) => {
