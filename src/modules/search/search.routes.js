@@ -165,15 +165,48 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     Cnp.find({ isDeleted: false, $or: [{ lead: { $in: matchedLeadIds } }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
     Appointment.find({ isDeleted: false, $or: [{ patientName: safeRegex }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('createdBy', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
     
-    ShiprocketOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate({ path: 'verification_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate('created_by', 'name role').populate('task_created_by', 'name role').populate('verified_by', 'name role').populate('verification_staff_id', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate({ path: 'verification_staff_id', select: 'name role', strictPopulate: false }).populate('created_by', 'name role').populate('task_created_by', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShiprocketInTransitOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate('created_by', 'name role').populate('verification_staff_id', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShiprocketRtoOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate('created_by', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    ShiprocketOrder.find(orderMatch)
+      .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'verification_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
+      .populate({ path: 'task_created_by', select: 'name role', strictPopulate: false })
+      .populate({ path: 'verified_by', select: 'name role', strictPopulate: false })
+      .populate({ path: 'verification_staff_id', select: 'name role', strictPopulate: false })
+      .sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch)
+      .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'verification_staff_id', select: 'name role', strictPopulate: false })
+      .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
+      .populate({ path: 'task_created_by', select: 'name role', strictPopulate: false })
+      .sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShiprocketInTransitOrder') || ShiprocketOrder).find(orderMatch)
+      .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
+      .populate({ path: 'verification_staff_id', select: 'name role', strictPopulate: false })
+      .sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShiprocketRtoOrder') || ShiprocketOrder).find(orderMatch)
+      .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
+      .sort({ updatedAt: -1 }).limit(limit).lean(),
     
-    ShipmaxxOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate({ path: 'verified_by', select: 'name role', strictPopulate: false }).populate('created_by', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate({ path: 'verification_staff_id', select: 'name role', strictPopulate: false }).populate('created_by', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShipmaxxInTransitOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate('created_by', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShipmaxxRtoOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate('created_by', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    ShipmaxxOrder.find(orderMatch)
+      .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'verified_by', select: 'name role', strictPopulate: false })
+      .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
+      .sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch)
+      .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'verification_staff_id', select: 'name role', strictPopulate: false })
+      .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
+      .sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShipmaxxInTransitOrder') || ShipmaxxOrder).find(orderMatch)
+      .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
+      .sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShipmaxxRtoOrder') || ShipmaxxOrder).find(orderMatch)
+      .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
+      .sort({ updatedAt: -1 }).limit(limit).lean(),
     
     InterestedLead.find(leadMatch).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
     NotInterestedLead.find(leadMatch).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
