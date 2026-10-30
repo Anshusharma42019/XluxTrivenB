@@ -158,54 +158,70 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     verifiedOrders
   ] = await Promise.all([
     Lead.find(leadMatch).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
-    Task.find({ isDeleted: false, $or: [{ title: safeRegex }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('assignedTo', 'name role').populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
-    Verification.find({ isDeleted: false, $or: [{ title: safeRegex }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('assignedTo', 'name role').populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
-    ReadyToShipment.find({ isDeleted: false, $or: [{ title: safeRegex }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    Task.find({ $or: [{ title: safeRegex, isDeleted: false }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('assignedTo', 'name role').populate('createdBy', 'name role').populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    Verification.find({ $or: [{ title: safeRegex, isDeleted: false }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('assignedTo', 'name role').populate('verifiedBy', 'name role').populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    ReadyToShipment.find({ $or: [{ title: safeRegex, isDeleted: false }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
     CallAgain.find({ isDeleted: false, $or: [{ lead: { $in: matchedLeadIds } }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
     Cnp.find({ isDeleted: false, $or: [{ lead: { $in: matchedLeadIds } }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
     Appointment.find({ isDeleted: false, $or: [{ patientName: safeRegex }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('createdBy', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
     
     ShiprocketOrder.find(orderMatch)
       .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
-      .populate({ path: 'verification_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'verification_id', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'verifiedBy', select: 'name role' }], strictPopulate: false })
       .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
       .populate({ path: 'task_created_by', select: 'name role', strictPopulate: false })
       .populate({ path: 'verified_by', select: 'name role', strictPopulate: false })
       .populate({ path: 'verification_staff_id', select: 'name role', strictPopulate: false })
+      .populate({ path: 'support_staff', select: 'name role', strictPopulate: false })
       .sort({ updatedAt: -1 }).limit(limit).lean(),
     (getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch)
       .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'verification_id', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'verifiedBy', select: 'name role' }], strictPopulate: false })
       .populate({ path: 'verification_staff_id', select: 'name role', strictPopulate: false })
       .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
       .populate({ path: 'task_created_by', select: 'name role', strictPopulate: false })
+      .populate({ path: 'support_staff', select: 'name role', strictPopulate: false })
       .sort({ updatedAt: -1 }).limit(limit).lean(),
     (getModel('ShiprocketInTransitOrder') || ShiprocketOrder).find(orderMatch)
       .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'verification_id', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'verifiedBy', select: 'name role' }], strictPopulate: false })
       .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
       .populate({ path: 'verification_staff_id', select: 'name role', strictPopulate: false })
+      .populate({ path: 'support_staff', select: 'name role', strictPopulate: false })
       .sort({ updatedAt: -1 }).limit(limit).lean(),
     (getModel('ShiprocketRtoOrder') || ShiprocketOrder).find(orderMatch)
       .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'verification_id', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'verifiedBy', select: 'name role' }], strictPopulate: false })
       .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
+      .populate({ path: 'support_staff', select: 'name role', strictPopulate: false })
       .sort({ updatedAt: -1 }).limit(limit).lean(),
     
     ShipmaxxOrder.find(orderMatch)
       .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'verification_id', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'verifiedBy', select: 'name role' }], strictPopulate: false })
       .populate({ path: 'verified_by', select: 'name role', strictPopulate: false })
       .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
+      .populate({ path: 'task_created_by', select: 'name role', strictPopulate: false })
+      .populate({ path: 'support_staff', select: 'name role', strictPopulate: false })
       .sort({ updatedAt: -1 }).limit(limit).lean(),
     (getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch)
       .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'verification_id', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'verifiedBy', select: 'name role' }], strictPopulate: false })
       .populate({ path: 'verification_staff_id', select: 'name role', strictPopulate: false })
       .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
+      .populate({ path: 'support_staff', select: 'name role', strictPopulate: false })
       .sort({ updatedAt: -1 }).limit(limit).lean(),
     (getModel('ShipmaxxInTransitOrder') || ShipmaxxOrder).find(orderMatch)
       .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'verification_id', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'verifiedBy', select: 'name role' }], strictPopulate: false })
       .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
+      .populate({ path: 'support_staff', select: 'name role', strictPopulate: false })
       .sort({ updatedAt: -1 }).limit(limit).lean(),
     (getModel('ShipmaxxRtoOrder') || ShipmaxxOrder).find(orderMatch)
       .populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false })
+      .populate({ path: 'verification_id', populate: [{ path: 'assignedTo', select: 'name role' }, { path: 'verifiedBy', select: 'name role' }], strictPopulate: false })
       .populate({ path: 'created_by', select: 'name role', strictPopulate: false })
+      .populate({ path: 'support_staff', select: 'name role', strictPopulate: false })
       .sort({ updatedAt: -1 }).limit(limit).lean(),
     
     InterestedLead.find(leadMatch).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
@@ -278,9 +294,10 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
       lead_id: record.lead_id?._id || record.lead_id || record.lead?._id || record.lead || null,
       leadAssignedStaff: record.lead_id?.assignedTo ? { name: record.lead_id.assignedTo.name, role: record.lead_id.assignedTo.role } : (record.lead?.assignedTo ? { name: record.lead.assignedTo.name, role: record.lead.assignedTo.role } : null),
       createdStaff: record.created_by ? { name: record.created_by.name, role: record.created_by.role } : (record.task_created_by ? { name: record.task_created_by.name, role: record.task_created_by.role } : null),
-      verificationStaff: (record.verification_id?.assignedTo || record.verification_staff_id || record.verified_by) ? {
-        name: (record.verification_id?.assignedTo?.name || record.verification_staff_id?.name || record.verified_by?.name),
-        role: (record.verification_id?.assignedTo?.role || record.verification_staff_id?.role || record.verified_by?.role)
+      supportStaff: record.support_staff ? { name: record.support_staff.name, role: record.support_staff.role } : null,
+      verificationStaff: (record.verification_id?.assignedTo || record.verification_id?.verifiedBy || record.verifiedBy || record.verification_staff_id || record.verified_by) ? {
+        name: (record.verification_id?.assignedTo?.name || record.verification_id?.verifiedBy?.name || record.verifiedBy?.name || record.verification_staff_id?.name || record.verified_by?.name),
+        role: (record.verification_id?.assignedTo?.role || record.verification_id?.verifiedBy?.role || record.verifiedBy?.role || record.verification_staff_id?.role || record.verified_by?.role)
       } : null
     });
   };
@@ -406,7 +423,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
          link = `/shipmaxx/followup?openId=${o._id}`;
       }
       
-      const staffUser = o.verification_staff_id || o.verified_by || o.created_by || o.lead_id?.assignedTo;
+      const staffUser = o.verification_id?.assignedTo || o.verification_id?.verifiedBy || o.verification_staff_id || o.verified_by || o.created_by || o.task_created_by || o.support_staff || o.lead_id?.assignedTo;
       addResult(o, 'shipmaxx', moduleName, o.billing_phone, o.billing_customer_name, o.status, link, staffUser, latestNote);
     });
   };
@@ -624,39 +641,103 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     const history = group.history || [];
     const orderChain = group.order_chain || [];
 
-    // All real order records sorted by createdAt ascending
-    const orderRecords = history
-      .filter(r => ['order', 'shipmaxx'].includes(r.type))
+    // Real shipment / delivery orders (Shiprocket, Shipmaxx)
+    const shipmentOrders = history
+      .filter(r => ['shipmaxx'].includes(r.type) || (r.type === 'order' && !['Verified Orders', 'Pending Orders', 'On Hold'].includes(r.module)))
       .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
 
-    // 1. First Order details (Sales rep)
+    // Kit 1 shipment order (if placed / delivered)
+    const firstShipment = shipmentOrders.length > 0 ? shipmentOrders[0] : null;
+
+    // All verifications sorted ascending
+    const verifications = history
+      .filter(r => r.type === 'verification' || (r.type === 'order' && r.module === 'Verified Orders'))
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    // Find the original verification for Kit 1 (exclude re-verification / reorder titles)
+    const originalVerif = verifications.find(v => {
+      const title = ((v.title || '') + ' ' + (v.note || '')).toLowerCase();
+      return !title.includes('re-verification') && !title.includes('reorder') && !title.includes('kit');
+    }) || verifications[0];
+
+    // All tasks sorted ascending
+    const tasks = history
+      .filter(r => r.type === 'task')
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    const originalTask = tasks.find(t => {
+      const title = ((t.title || '') + ' ' + (t.note || '')).toLowerCase();
+      return !title.includes('re-verification') && !title.includes('reorder') && !title.includes('kit');
+    }) || tasks[0];
+
+    // 1. Determine 1st Order Rep (Sales)
     let firstOrder = null;
+    let firstStaffName = null;
+    let firstStaffRole = 'sales';
+
     const chain1 = orderChain.find(c => c.chain_seq === 1 || c.order_type === 'first');
-    if (chain1) {
+    if (chain1?.submitter_id?.name) {
+      firstStaffName = chain1.submitter_id.name;
+      firstStaffRole = chain1.submitter_id.role || 'sales';
+    } else if (originalVerif?.assignedTo && originalVerif?.assignedRole === 'sales') {
+      firstStaffName = originalVerif.assignedTo;
+      firstStaffRole = 'sales';
+    } else if (firstShipment?.verificationStaff?.role === 'sales') {
+      firstStaffName = firstShipment.verificationStaff.name;
+      firstStaffRole = 'sales';
+    } else if (originalTask?.assignedTo && originalTask?.assignedRole === 'sales') {
+      firstStaffName = originalTask.assignedTo;
+      firstStaffRole = 'sales';
+    } else if (firstShipment?.createdStaff?.role === 'sales') {
+      firstStaffName = firstShipment.createdStaff.name;
+      firstStaffRole = 'sales';
+    } else if (originalVerif?.assignedTo && originalVerif?.assignedRole !== 'support') {
+      firstStaffName = originalVerif.assignedTo;
+      firstStaffRole = originalVerif.assignedRole || 'sales';
+    } else if (originalTask?.assignedTo && originalTask?.assignedRole !== 'support') {
+      firstStaffName = originalTask.assignedTo;
+      firstStaffRole = originalTask.assignedRole || 'sales';
+    } else if (firstShipment?.verificationStaff?.name) {
+      firstStaffName = firstShipment.verificationStaff.name;
+      firstStaffRole = firstShipment.verificationStaff.role || 'sales';
+    } else if (firstShipment?.createdStaff?.name) {
+      firstStaffName = firstShipment.createdStaff.name;
+      firstStaffRole = firstShipment.createdStaff.role || 'sales';
+    } else {
+      const leadRec = history.find(r => r.type === 'lead');
+      firstStaffName = originalVerif?.assignedTo || originalTask?.assignedTo || leadRec?.assignedTo || 'Sales Staff';
+      firstStaffRole = originalVerif?.assignedRole || originalTask?.assignedRole || leadRec?.assignedRole || 'sales';
+    }
+
+    if (firstShipment) {
       firstOrder = {
-        staffName: chain1.submitter_id?.name || 'Sales Staff',
-        staffRole: chain1.submitter_id?.role || 'sales',
-        status: chain1.order_id?.status || 'DELIVERED',
-        orderId: chain1.order_id?.order_id || null,
-        awb: chain1.order_id?.awb_code || null,
-        subTotal: chain1.order_id?.sub_total || null,
-        date: chain1.order_id?.delivered_at || chain1.createdAt,
-        source: 'order_chain'
+        staffName: firstStaffName,
+        staffRole: firstStaffRole,
+        status: firstShipment.status || 'DELIVERED',
+        orderId: firstShipment.order_id || null,
+        awb: firstShipment.awb_code || null,
+        subTotal: firstShipment.sub_total || null,
+        date: firstShipment.delivered_at || firstShipment.createdAt,
+        link: firstShipment.link,
+        source: 'shipment_order'
       };
-    } else if (orderRecords.length > 0) {
-      const o1 = orderRecords[0];
-      const staffName = o1.leadAssignedStaff?.name || o1.createdStaff?.name || o1.assignedTo || 'Sales Staff';
-      const staffRole = o1.leadAssignedStaff?.role || o1.createdStaff?.role || o1.assignedRole || 'sales';
+    } else if (originalVerif) {
       firstOrder = {
-        staffName,
-        staffRole,
-        status: o1.status || 'DELIVERED',
-        orderId: o1.order_id || null,
-        awb: o1.awb_code || null,
-        subTotal: o1.sub_total || null,
-        date: o1.delivered_at || o1.createdAt,
-        link: o1.link,
-        source: 'order_records'
+        staffName: firstStaffName,
+        staffRole: firstStaffRole,
+        status: originalVerif.status || 'Verified',
+        date: originalVerif.createdAt,
+        link: originalVerif.link,
+        source: 'verification'
+      };
+    } else if (originalTask) {
+      firstOrder = {
+        staffName: firstStaffName,
+        staffRole: firstStaffRole,
+        status: originalTask.status || 'Active Task',
+        date: originalTask.createdAt,
+        link: originalTask.link,
+        source: 'task'
       };
     } else {
       const leadRec = history.find(r => r.type === 'lead');
@@ -676,36 +757,33 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     let repeatOrder = null;
     let hasReorder = false;
 
-    // Check active Verification / Task / RTS created for reorder
-    const activeVerifications = history.filter(r => 
-      ['verification', 'rts'].includes(r.type) || 
-      (r.type === 'task' && ['verification', 'ready_to_shipment', 'dispatch'].includes(r.status))
-    );
-
-    const hasPriorOrder = orderRecords.length > 0;
-    const activeReorderVerif = activeVerifications.find(v => {
-      if (hasPriorOrder) {
-        const firstOrderTime = new Date(orderRecords[0].createdAt).getTime();
-        return new Date(v.createdAt).getTime() >= (firstOrderTime - 60000);
-      }
-      return false;
+    // Check active or recent Re-Verification / Task / RTS created for reorder
+    const reorderVerif = history.find(r => {
+      const title = ((r.note || '') + ' ' + (r.title || '') + ' ' + (r.problem || '')).toLowerCase();
+      const isReorderText = title.includes('re-verification') || title.includes('reorder') || title.includes('kit') || (r.assignedRole === 'support' && r.type !== 'lead');
+      const isStage = ['verification', 'rts'].includes(r.type) || 
+                      (r.type === 'task' && ['verification', 'ready_to_shipment', 'dispatch'].includes(r.status));
+      return isReorderText && isStage;
     });
 
     const repeatChains = orderChain.filter(c => c.chain_seq > 1 || c.order_type === 'repeat')
       .sort((a, b) => b.chain_seq - a.chain_seq);
 
-    if (activeReorderVerif) {
+    const hasMultipleShipments = shipmentOrders.length > 1;
+    const latestRepeatShipment = hasMultipleShipments ? shipmentOrders[shipmentOrders.length - 1] : null;
+
+    if (reorderVerif) {
       hasReorder = true;
       repeatOrder = {
-        staffName: activeReorderVerif.assignedTo || 'Support Staff',
-        staffRole: activeReorderVerif.assignedRole || 'support',
-        stage: activeReorderVerif.module || 'Verification',
-        status: activeReorderVerif.status || 'In Verification',
-        date: activeReorderVerif.createdAt || activeReorderVerif.updatedAt,
-        link: activeReorderVerif.link,
+        staffName: reorderVerif.assignedTo || 'Support Staff',
+        staffRole: reorderVerif.assignedRole || 'support',
+        stage: reorderVerif.module || 'Ready to Shipment',
+        status: reorderVerif.status || 'dispatch',
+        date: reorderVerif.updatedAt || reorderVerif.createdAt,
+        link: reorderVerif.link,
         isReorder: true,
-        kitNumber: (orderRecords.length || 1) + 1,
-        note: activeReorderVerif.note || ''
+        kitNumber: Math.max(shipmentOrders.length + 1, 2),
+        note: reorderVerif.note || ''
       };
     } else if (repeatChains.length > 0) {
       hasReorder = true;
@@ -722,23 +800,22 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
         isReorder: true,
         kitNumber: latestRepeat.chain_seq
       };
-    } else if (orderRecords.length > 1) {
+    } else if (latestRepeatShipment) {
       hasReorder = true;
-      const latestRepeatOrder = orderRecords[orderRecords.length - 1];
-      const staffName = latestRepeatOrder.verificationStaff?.name || latestRepeatOrder.assignedTo || latestRepeatOrder.createdStaff?.name || 'Support Staff';
-      const staffRole = latestRepeatOrder.verificationStaff?.role || latestRepeatOrder.assignedRole || latestRepeatOrder.createdStaff?.role || 'support';
+      const supportStaff = latestRepeatShipment.supportStaff?.name || latestRepeatShipment.verificationStaff?.name || latestRepeatShipment.assignedTo || 'Support Staff';
+      const supportRole = latestRepeatShipment.supportStaff?.role || latestRepeatShipment.verificationStaff?.role || latestRepeatShipment.assignedRole || 'support';
       repeatOrder = {
-        staffName,
-        staffRole,
-        stage: latestRepeatOrder.module || 'Follow Up',
-        status: latestRepeatOrder.status || 'DELIVERED',
-        orderId: latestRepeatOrder.order_id || null,
-        awb: latestRepeatOrder.awb_code || null,
-        subTotal: latestRepeatOrder.sub_total || null,
-        date: latestRepeatOrder.delivered_at || latestRepeatOrder.createdAt,
-        link: latestRepeatOrder.link,
+        staffName: supportStaff,
+        staffRole: supportRole,
+        stage: latestRepeatShipment.module || 'ShipMaxx Follow Up',
+        status: latestRepeatShipment.status || 'DELIVERED',
+        orderId: latestRepeatShipment.order_id || null,
+        awb: latestRepeatShipment.awb_code || null,
+        subTotal: latestRepeatShipment.sub_total || null,
+        date: latestRepeatShipment.delivered_at || latestRepeatShipment.createdAt,
+        link: latestRepeatShipment.link,
         isReorder: true,
-        kitNumber: latestRepeatOrder.kit_number || orderRecords.length
+        kitNumber: shipmentOrders.length
       };
     }
 
@@ -756,15 +833,15 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
       });
     }
 
-    if (orderRecords.length > 1) {
-      for (let i = 1; i < orderRecords.length; i++) {
-        const ord = orderRecords[i];
+    if (shipmentOrders.length > 1) {
+      for (let i = 1; i < shipmentOrders.length; i++) {
+        const ord = shipmentOrders[i];
         if (repeatOrder && repeatOrder.orderId && repeatOrder.orderId === ord.order_id) continue;
         steps.push({
           stepNumber: i + 1,
           label: `Kit ${ord.kit_number || (i + 1)} (Reorder)`,
-          staffName: ord.verificationStaff?.name || ord.assignedTo || 'Support Staff',
-          staffRole: ord.verificationStaff?.role || ord.assignedRole || 'support',
+          staffName: ord.verificationStaff?.name || ord.supportStaff?.name || ord.assignedTo || 'Support Staff',
+          staffRole: ord.verificationStaff?.role || ord.supportStaff?.role || ord.assignedRole || 'support',
           status: ord.status,
           date: ord.delivered_at || ord.createdAt,
           orderId: ord.order_id
@@ -789,7 +866,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
       hasReorder,
       firstOrder,
       repeatOrder,
-      totalOrders: Math.max(orderRecords.length, orderChain.length, hasReorder ? 2 : (firstOrder && !firstOrder.isLeadOnly ? 1 : 0)),
+      totalOrders: Math.max(shipmentOrders.length, orderChain.length, hasReorder ? 2 : (firstOrder && !firstOrder.isLeadOnly ? 1 : 0)),
       steps
     };
   };
