@@ -131,7 +131,8 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
   }
 
   // Get matching lead IDs (including transitioned/archived leads) for linked collection lookups
-  const matchedLeadsForSubqueries = await Lead.find(leadMatch).select('_id').lean();
+  const subqueryMatch = leadMatch.$or ? { $or: leadMatch.$or } : leadMatch;
+  const matchedLeadsForSubqueries = await Lead.find(subqueryMatch).select('_id').lean();
   const matchedLeadIds = matchedLeadsForSubqueries.map(l => l._id);
   
   const [
@@ -156,34 +157,34 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     onHoldOrders,
     verifiedOrders
   ] = await Promise.all([
-    Lead.find(leadMatch).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    Task.find({ isDeleted: false, $or: [{ title: safeRegex }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('assignedTo', 'name').populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
-    Verification.find({ isDeleted: false, $or: [{ title: safeRegex }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('assignedTo', 'name').populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
-    ReadyToShipment.find({ isDeleted: false, $or: [{ title: safeRegex }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    CallAgain.find({ isDeleted: false, $or: [{ lead: { $in: matchedLeadIds } }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    Cnp.find({ isDeleted: false, $or: [{ lead: { $in: matchedLeadIds } }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    Appointment.find({ isDeleted: false, $or: [{ patientName: safeRegex }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('createdBy', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
+    Lead.find(leadMatch).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    Task.find({ isDeleted: false, $or: [{ title: safeRegex }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('assignedTo', 'name role').populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    Verification.find({ isDeleted: false, $or: [{ title: safeRegex }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('assignedTo', 'name role').populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    ReadyToShipment.find({ isDeleted: false, $or: [{ title: safeRegex }, { phone: safeRegex }, { lead: { $in: matchedLeadIds } }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    CallAgain.find({ isDeleted: false, $or: [{ lead: { $in: matchedLeadIds } }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    Cnp.find({ isDeleted: false, $or: [{ lead: { $in: matchedLeadIds } }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate({ path: 'lead', select: 'name phone problem department address cityVillage state pincode', strictPopulate: false }).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    Appointment.find({ isDeleted: false, $or: [{ patientName: safeRegex }, { phone: safeRegex }, ...(cleanPhone ? [{ phone: new RegExp(cleanPhone) }] : [])] }).populate('createdBy', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
     
-    ShiprocketOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).populate({ path: 'verification_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).populate({ path: 'verification_staff_id', select: 'name', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShiprocketInTransitOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShiprocketRtoOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    ShiprocketOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate({ path: 'verification_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate('created_by', 'name role').populate('task_created_by', 'name role').populate('verified_by', 'name role').populate('verification_staff_id', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShiprocketDeliveredOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate({ path: 'verification_staff_id', select: 'name role', strictPopulate: false }).populate('created_by', 'name role').populate('task_created_by', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShiprocketInTransitOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate('created_by', 'name role').populate('verification_staff_id', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShiprocketRtoOrder') || ShiprocketOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate('created_by', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
     
-    ShipmaxxOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).populate({ path: 'verified_by', select: 'name', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).populate({ path: 'verification_staff_id', select: 'name', strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShipmaxxInTransitOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
-    (getModel('ShipmaxxRtoOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name' }, strictPopulate: false }).sort({ updatedAt: -1 }).limit(limit).lean(),
+    ShipmaxxOrder.find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate({ path: 'verified_by', select: 'name role', strictPopulate: false }).populate('created_by', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShipmaxxDeliveredOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate({ path: 'verification_staff_id', select: 'name role', strictPopulate: false }).populate('created_by', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShipmaxxInTransitOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate('created_by', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    (getModel('ShipmaxxRtoOrder') || ShipmaxxOrder).find(orderMatch).populate({ path: 'lead_id', populate: { path: 'assignedTo', select: 'name role' }, strictPopulate: false }).populate('created_by', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
     
-    InterestedLead.find(leadMatch).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    NotInterestedLead.find(leadMatch).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    PendingOrder.find(leadMatch).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    OnHoldOrder.find(leadMatch).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
-    VerifiedOrder.find(leadMatch).populate('assignedTo', 'name').sort({ updatedAt: -1 }).limit(limit).lean(),
+    InterestedLead.find(leadMatch).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    NotInterestedLead.find(leadMatch).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    PendingOrder.find(leadMatch).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    OnHoldOrder.find(leadMatch).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
+    VerifiedOrder.find(leadMatch).populate('assignedTo', 'name role').sort({ updatedAt: -1 }).limit(limit).lean(),
   ]);
 
   const allResults = [];
   
-  const addResult = (record, type, module, phone, customerName, status, linkTemplate, assignedTo, note) => {
+  const addResult = (record, type, module, phone, customerName, status, linkTemplate, assignedTo, note, extra = {}) => {
     if (!record || !record._id) return;
     
     const finalPhone = phone || (record.lead ? record.lead.phone : '') || record.billing_phone || '';
@@ -201,6 +202,18 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
     let courier_name = record.courier_name || '';
     let payment_method = record.payment_method || '';
     let sub_total = record.sub_total || '';
+
+    let staffName = null;
+    let staffRole = null;
+    if (assignedTo) {
+      if (typeof assignedTo === 'object') {
+        staffName = assignedTo.name || null;
+        staffRole = assignedTo.role || null;
+      } else if (typeof assignedTo === 'string') {
+        staffName = assignedTo;
+        staffRole = extra.assignedRole || null;
+      }
+    }
     
     allResults.push({
       _id: record._id.toString(),
@@ -211,7 +224,8 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
       status: status || 'Unknown',
       createdAt: record.createdAt || new Date(),
       updatedAt: record.updatedAt || record.createdAt || new Date(),
-      assignedTo: assignedTo || null,
+      assignedTo: staffName,
+      assignedRole: staffRole,
       note: note || '',
       link: linkTemplate.replace(':id', record._id.toString()),
       problem,
@@ -224,7 +238,17 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
       courier_name,
       payment_method,
       sub_total,
-      kit_number: record.kit_number || 1
+      kit_number: record.kit_number || 1,
+      order_id: record.order_id || null,
+      delivered_at: record.delivered_at || null,
+      source_order_id: record.source_order_id || null,
+      lead_id: record.lead_id?._id || record.lead_id || record.lead?._id || record.lead || null,
+      leadAssignedStaff: record.lead_id?.assignedTo ? { name: record.lead_id.assignedTo.name, role: record.lead_id.assignedTo.role } : (record.lead?.assignedTo ? { name: record.lead.assignedTo.name, role: record.lead.assignedTo.role } : null),
+      createdStaff: record.created_by ? { name: record.created_by.name, role: record.created_by.role } : (record.task_created_by ? { name: record.task_created_by.name, role: record.task_created_by.role } : null),
+      verificationStaff: (record.verification_id?.assignedTo || record.verification_staff_id || record.verified_by) ? {
+        name: (record.verification_id?.assignedTo?.name || record.verification_staff_id?.name || record.verified_by?.name),
+        role: (record.verification_id?.assignedTo?.role || record.verification_staff_id?.role || record.verified_by?.role)
+      } : null
     });
   };
 
@@ -236,7 +260,7 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
       link = `/pipeline?openId=${l._id}`;
     }
     const latestNote = l.notes && l.notes.length > 0 ? l.notes[l.notes.length - 1].text : (l.note || '');
-    addResult(l, 'lead', module, l.phone, l.name, l.status, link, l.assignedTo?.name, latestNote);
+    addResult(l, 'lead', module, l.phone, l.name, l.status, link, l.assignedTo, latestNote);
   });
 
   tasks.forEach(t => {
@@ -255,57 +279,57 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
       link = `/pipeline?openId=${t.lead?._id || t._id}`;
     }
 
-    addResult(t, 'task', moduleName, t.phone, t.lead?.name || t.title, t.status, link, t.assignedTo?.name, latestNote);
+    addResult(t, 'task', moduleName, t.phone, t.lead?.name || t.title, t.status, link, t.assignedTo, latestNote);
   });
 
   verifications.forEach(v => {
     const latestNote = v.notes && v.notes.length > 0 ? v.notes[v.notes.length - 1].text : (v.description || '');
-    addResult(v, 'verification', 'Verification', v.lead?.phone, v.lead?.name || v.title, v.status, `/verification?openId=${v._id}`, v.assignedTo?.name, latestNote);
+    addResult(v, 'verification', 'Verification', v.lead?.phone, v.lead?.name || v.title, v.status, `/verification?openId=${v._id}`, v.assignedTo, latestNote);
   });
 
   rtsRecords.forEach(r => {
     const latestNote = r.notes && r.notes.length > 0 ? r.notes[r.notes.length - 1].text : (r.description || '');
-    addResult(r, 'rts', 'Ready to Shipment', r.lead?.phone, r.lead?.name || r.title, r.sentToShiprocket ? 'Sent to Shiprocket' : 'Pending', `/ready-to-shipment?openId=${r._id}`, r.assignedTo?.name, latestNote);
+    addResult(r, 'rts', 'Ready to Shipment', r.lead?.phone, r.lead?.name || r.title, r.sentToShiprocket ? 'Sent to Shiprocket' : 'Pending', `/ready-to-shipment?openId=${r._id}`, r.assignedTo, latestNote);
   });
 
   callAgains.forEach(c => {
     const latestNote = c.notes && c.notes.length > 0 ? c.notes[c.notes.length - 1].text : '';
-    addResult(c, 'callagain', 'Call Again', c.lead?.phone, c.lead?.name, 'CALL AGAIN', `/pipeline?openId=${c.lead?._id}&filter=call_again`, c.assignedTo?.name, latestNote);
+    addResult(c, 'callagain', 'Call Again', c.lead?.phone, c.lead?.name, 'CALL AGAIN', `/pipeline?openId=${c.lead?._id}&filter=call_again`, c.assignedTo, latestNote);
   });
 
   cnps.forEach(c => {
     const latestNote = c.notes && c.notes.length > 0 ? c.notes[c.notes.length - 1].text : '';
-    addResult(c, 'cnp', 'CNP', c.lead?.phone, c.lead?.name, 'CNP', `/pipeline?openId=${c.lead?._id}&filter=cnp`, c.assignedTo?.name, latestNote);
+    addResult(c, 'cnp', 'CNP', c.lead?.phone, c.lead?.name, 'CNP', `/pipeline?openId=${c.lead?._id}&filter=cnp`, c.assignedTo, latestNote);
   });
 
   appointments.forEach(a => {
     const latestNote = a.notes || '';
-    addResult(a, 'appointment', 'Appointments', a.phone, a.patientName, a.status, `/appointments?openId=${a._id}`, a.createdBy?.name, latestNote);
+    addResult(a, 'appointment', 'Appointments', a.phone, a.patientName, a.status, `/appointments?openId=${a._id}`, a.createdBy, latestNote);
   });
 
   interestedLeads.forEach(l => {
     const latestNote = l.notes && l.notes.length > 0 ? l.notes[l.notes.length - 1].text : (l.note || '');
-    addResult(l, 'lead', 'Interested Leads', l.phone, l.name, 'Interested', `/pipeline?openId=${l._id}`, l.assignedTo?.name, latestNote);
+    addResult(l, 'lead', 'Interested Leads', l.phone, l.name, 'Interested', `/pipeline?openId=${l._id}`, l.assignedTo, latestNote);
   });
 
   notInterestedLeads.forEach(l => {
     const latestNote = l.notes && l.notes.length > 0 ? l.notes[l.notes.length - 1].text : (l.rejectionReason || '');
-    addResult(l, 'lead', 'Not Interested', l.phone, l.name, 'Not Interested', `/pipeline?openId=${l._id}`, l.assignedTo?.name, latestNote);
+    addResult(l, 'lead', 'Not Interested', l.phone, l.name, 'Not Interested', `/pipeline?openId=${l._id}`, l.assignedTo, latestNote);
   });
 
   pendingOrders.forEach(o => {
     const latestNote = o.notes && o.notes.length > 0 ? o.notes[o.notes.length - 1].text : (o.pendingReason || '');
-    addResult(o, 'order', 'Pending Orders', o.phone, o.name, 'Pending', `/verification?openId=${o._id}`, o.assignedTo?.name, latestNote);
+    addResult(o, 'order', 'Pending Orders', o.phone, o.name, 'Pending', `/verification?openId=${o._id}`, o.assignedTo, latestNote);
   });
 
   onHoldOrders.forEach(o => {
     const latestNote = o.notes && o.notes.length > 0 ? o.notes[o.notes.length - 1].text : (o.onHoldReason || '');
-    addResult(o, 'order', 'On Hold', o.phone, o.name, 'On Hold', `/pipeline?openId=${o._id}&filter=on_hold`, o.assignedTo?.name, latestNote);
+    addResult(o, 'order', 'On Hold', o.phone, o.name, 'On Hold', `/pipeline?openId=${o._id}&filter=on_hold`, o.assignedTo, latestNote);
   });
 
   verifiedOrders.forEach(o => {
     const latestNote = o.notes && o.notes.length > 0 ? o.notes[o.notes.length - 1].text : (o.note || '');
-    addResult(o, 'order', 'Verified Orders', o.phone, o.name, 'Verified', `/ready-to-shipment?openId=${o._id}`, o.assignedTo?.name, latestNote);
+    addResult(o, 'order', 'Verified Orders', o.phone, o.name, 'Verified', `/ready-to-shipment?openId=${o._id}`, o.assignedTo, latestNote);
   });
 
   const processedOrders = new Set();
@@ -324,7 +348,8 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
          link = `/follow-up?openId=${o._id}`;
       }
       
-      addResult(o, 'order', moduleName, o.billing_phone, o.billing_customer_name, o.status, link, o.verification_id?.assignedTo?.name || o.verification_staff_id?.name || o.lead_id?.assignedTo?.name, latestNote);
+      const staffUser = o.verification_id?.assignedTo || o.verification_staff_id || o.verified_by || o.created_by || o.task_created_by || o.lead_id?.assignedTo;
+      addResult(o, 'order', moduleName, o.billing_phone, o.billing_customer_name, o.status, link, staffUser, latestNote);
     });
   };
   processShiprocket(shiprocketOrders);
@@ -348,7 +373,8 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
          link = `/shipmaxx/followup?openId=${o._id}`;
       }
       
-      addResult(o, 'shipmaxx', moduleName, o.billing_phone, o.billing_customer_name, o.status, link, o.verification_staff_id?.name || o.verified_by?.name || o.lead_id?.assignedTo?.name, latestNote);
+      const staffUser = o.verification_staff_id || o.verified_by || o.created_by || o.lead_id?.assignedTo;
+      addResult(o, 'shipmaxx', moduleName, o.billing_phone, o.billing_customer_name, o.status, link, staffUser, latestNote);
     });
   };
   processShipmaxx(shipmaxxOrders);
@@ -558,6 +584,189 @@ router.get('/', auth('admin', 'manager', 'sales', 'support', 'logistics'), catch
   } catch (chainErr) {
     // Commission chain enrichment must not block search results
     console.error('[Search] Commission chain enrichment failed:', chainErr.message);
+  }
+
+  // ── Compute Order Journey & Badges for each customer ──
+  const computeOrderJourney = (group) => {
+    const history = group.history || [];
+    const orderChain = group.order_chain || [];
+
+    // All real order records sorted by createdAt ascending
+    const orderRecords = history
+      .filter(r => ['order', 'shipmaxx'].includes(r.type))
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+    // 1. First Order details (Sales rep)
+    let firstOrder = null;
+    const chain1 = orderChain.find(c => c.chain_seq === 1 || c.order_type === 'first');
+    if (chain1) {
+      firstOrder = {
+        staffName: chain1.submitter_id?.name || 'Sales Staff',
+        staffRole: chain1.submitter_id?.role || 'sales',
+        status: chain1.order_id?.status || 'DELIVERED',
+        orderId: chain1.order_id?.order_id || null,
+        awb: chain1.order_id?.awb_code || null,
+        subTotal: chain1.order_id?.sub_total || null,
+        date: chain1.order_id?.delivered_at || chain1.createdAt,
+        source: 'order_chain'
+      };
+    } else if (orderRecords.length > 0) {
+      const o1 = orderRecords[0];
+      const staffName = o1.leadAssignedStaff?.name || o1.createdStaff?.name || o1.assignedTo || 'Sales Staff';
+      const staffRole = o1.leadAssignedStaff?.role || o1.createdStaff?.role || o1.assignedRole || 'sales';
+      firstOrder = {
+        staffName,
+        staffRole,
+        status: o1.status || 'DELIVERED',
+        orderId: o1.order_id || null,
+        awb: o1.awb_code || null,
+        subTotal: o1.sub_total || null,
+        date: o1.delivered_at || o1.createdAt,
+        link: o1.link,
+        source: 'order_records'
+      };
+    } else {
+      const leadRec = history.find(r => r.type === 'lead');
+      if (leadRec && leadRec.assignedTo) {
+        firstOrder = {
+          staffName: leadRec.assignedTo,
+          staffRole: leadRec.assignedRole || 'sales',
+          status: leadRec.status || 'Active Lead',
+          date: leadRec.createdAt,
+          link: leadRec.link,
+          isLeadOnly: true
+        };
+      }
+    }
+
+    // 2. Identify Reorder / Followup Order (Support rep)
+    let repeatOrder = null;
+    let hasReorder = false;
+
+    // Check active Verification / Task / RTS created for reorder
+    const activeVerifications = history.filter(r => 
+      ['verification', 'rts'].includes(r.type) || 
+      (r.type === 'task' && ['verification', 'ready_to_shipment', 'dispatch'].includes(r.status))
+    );
+
+    const hasPriorOrder = orderRecords.length > 0;
+    const activeReorderVerif = activeVerifications.find(v => {
+      if (hasPriorOrder) {
+        const firstOrderTime = new Date(orderRecords[0].createdAt).getTime();
+        return new Date(v.createdAt).getTime() >= (firstOrderTime - 60000);
+      }
+      return false;
+    });
+
+    const repeatChains = orderChain.filter(c => c.chain_seq > 1 || c.order_type === 'repeat')
+      .sort((a, b) => b.chain_seq - a.chain_seq);
+
+    if (activeReorderVerif) {
+      hasReorder = true;
+      repeatOrder = {
+        staffName: activeReorderVerif.assignedTo || 'Support Staff',
+        staffRole: activeReorderVerif.assignedRole || 'support',
+        stage: activeReorderVerif.module || 'Verification',
+        status: activeReorderVerif.status || 'In Verification',
+        date: activeReorderVerif.createdAt || activeReorderVerif.updatedAt,
+        link: activeReorderVerif.link,
+        isReorder: true,
+        kitNumber: (orderRecords.length || 1) + 1,
+        note: activeReorderVerif.note || ''
+      };
+    } else if (repeatChains.length > 0) {
+      hasReorder = true;
+      const latestRepeat = repeatChains[0];
+      repeatOrder = {
+        staffName: latestRepeat.submitter_id?.name || 'Support Staff',
+        staffRole: latestRepeat.submitter_id?.role || 'support',
+        stage: 'Delivered Reorder',
+        status: latestRepeat.order_id?.status || 'DELIVERED',
+        orderId: latestRepeat.order_id?.order_id || null,
+        awb: latestRepeat.order_id?.awb_code || null,
+        subTotal: latestRepeat.order_id?.sub_total || null,
+        date: latestRepeat.order_id?.delivered_at || latestRepeat.createdAt,
+        isReorder: true,
+        kitNumber: latestRepeat.chain_seq
+      };
+    } else if (orderRecords.length > 1) {
+      hasReorder = true;
+      const latestRepeatOrder = orderRecords[orderRecords.length - 1];
+      const staffName = latestRepeatOrder.verificationStaff?.name || latestRepeatOrder.assignedTo || latestRepeatOrder.createdStaff?.name || 'Support Staff';
+      const staffRole = latestRepeatOrder.verificationStaff?.role || latestRepeatOrder.assignedRole || latestRepeatOrder.createdStaff?.role || 'support';
+      repeatOrder = {
+        staffName,
+        staffRole,
+        stage: latestRepeatOrder.module || 'Follow Up',
+        status: latestRepeatOrder.status || 'DELIVERED',
+        orderId: latestRepeatOrder.order_id || null,
+        awb: latestRepeatOrder.awb_code || null,
+        subTotal: latestRepeatOrder.sub_total || null,
+        date: latestRepeatOrder.delivered_at || latestRepeatOrder.createdAt,
+        link: latestRepeatOrder.link,
+        isReorder: true,
+        kitNumber: latestRepeatOrder.kit_number || orderRecords.length
+      };
+    }
+
+    // Build timeline milestones
+    const steps = [];
+    if (firstOrder) {
+      steps.push({
+        stepNumber: 1,
+        label: firstOrder.isLeadOnly ? 'Lead (Sales)' : '1st Order (Sales)',
+        staffName: firstOrder.staffName,
+        staffRole: firstOrder.staffRole,
+        status: firstOrder.status,
+        date: firstOrder.date,
+        orderId: firstOrder.orderId
+      });
+    }
+
+    if (orderRecords.length > 1) {
+      for (let i = 1; i < orderRecords.length; i++) {
+        const ord = orderRecords[i];
+        if (repeatOrder && repeatOrder.orderId && repeatOrder.orderId === ord.order_id) continue;
+        steps.push({
+          stepNumber: i + 1,
+          label: `Kit ${ord.kit_number || (i + 1)} (Reorder)`,
+          staffName: ord.verificationStaff?.name || ord.assignedTo || 'Support Staff',
+          staffRole: ord.verificationStaff?.role || ord.assignedRole || 'support',
+          status: ord.status,
+          date: ord.delivered_at || ord.createdAt,
+          orderId: ord.order_id
+        });
+      }
+    }
+
+    if (repeatOrder && (!repeatOrder.orderId || !steps.some(s => s.orderId === repeatOrder.orderId))) {
+      steps.push({
+        stepNumber: steps.length + 1,
+        label: `Reorder #${repeatOrder.kitNumber || steps.length + 1} (Support)`,
+        staffName: repeatOrder.staffName,
+        staffRole: repeatOrder.staffRole,
+        status: repeatOrder.status,
+        stage: repeatOrder.stage,
+        date: repeatOrder.date,
+        orderId: repeatOrder.orderId
+      });
+    }
+
+    return {
+      hasReorder,
+      firstOrder,
+      repeatOrder,
+      totalOrders: Math.max(orderRecords.length, orderChain.length, hasReorder ? 2 : (firstOrder && !firstOrder.isLeadOnly ? 1 : 0)),
+      steps
+    };
+  };
+
+  for (const group of outputResults) {
+    try {
+      group.orderJourney = computeOrderJourney(group);
+    } catch (ojErr) {
+      console.error('[Search] computeOrderJourney error:', ojErr.message);
+    }
   }
 
   res.json(new ApiResponse(httpStatus.OK, outputResults.slice(0, 20), 'Search results'));
