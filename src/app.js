@@ -41,6 +41,7 @@ const allowedOrigins = [
   'https://trivenayurveda.vercel.app',
   'https://triven-website.vercel.app',
   'https://your-hostinger-domain.com',
+  "https://support.trivenayurveda.in"
 ];
 app.use(
   cors({
