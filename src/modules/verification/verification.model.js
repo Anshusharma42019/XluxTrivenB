@@ -7,6 +7,8 @@ const verificationSchema = new mongoose.Schema(
     assignedTo: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     verifiedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     lead: { type: mongoose.Schema.Types.ObjectId, ref: 'Lead' },
+    name: { type: String, trim: true },
+    phone: { type: String, trim: true },
     dueDate: { type: Date },
     cityVillageType: { type: String, enum: ['city', 'village'], default: 'city' },
     cityVillage: { type: String },

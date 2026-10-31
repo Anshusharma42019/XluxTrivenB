@@ -14,23 +14,23 @@ import { appendOrderChain } from '../commission/orderChain.service.js';
 
 const router = express.Router();
 
-router.get('/', auth('admin', 'manager', 'sales', 'support'), departmentFilter, async (req, res) => {
+router.get('/', auth('admin', 'manager', 'sales', 'support', 'staff'), departmentFilter, async (req, res) => {
   try {
     const query = { status: { $nin: ['verified', 'dispatch', 'dispatched', 'on_hold'] }, isDeleted: { $ne: true } };
     if (req.query.department) {
       query.department = req.query.department;
-      if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+      if (['sales', 'support', 'logistics', 'staff'].includes(req.user.role) && req.userDepartments?.length > 0) {
         if (!req.userDepartments.includes(req.query.department)) query.department = "NOT_ALLOWED";
       }
-    } else if (['sales', 'support', 'logistics'].includes(req.user.role)) {
+    } else if (['sales', 'support', 'logistics', 'staff'].includes(req.user.role)) {
       if (req.userDepartments && req.userDepartments.length > 0) {
         query.$or = [
           { department: { $in: req.userDepartments } },
           { department: null }
         ];
       }
-      // Staff only see their own verification records (support and sales see all)
-      if (!['support', 'sales'].includes(req.user.role)) {
+      // Staff, sales, support see all verification records to verify and edit
+      if (!['support', 'sales', 'staff'].includes(req.user.role)) {
         query.assignedTo = req.user._id;
       }
     }
@@ -227,7 +227,7 @@ router.get('/test-data', async (req, res) => {
 });
 
 // Sync tasks with status 'verification' into Verification collection
-router.post('/sync', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, async (req, res) => {
+router.post('/sync', auth('admin', 'manager', 'sales', 'support', 'staff'), departmentFilter, requireCheckedIn, async (req, res) => {
   // Respond immediately so client never waits
   res.json({ status: 200, message: 'Sync started' });
 
@@ -370,7 +370,7 @@ router.post('/sync', auth('admin', 'manager', 'sales', 'support'), departmentFil
 });
 
 // MUST be before /:id routes
-router.post('/repair', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, async (req, res) => {
+router.post('/repair', auth('admin', 'manager', 'sales', 'support', 'staff'), departmentFilter, requireCheckedIn, async (req, res) => {
   try {
     const Task = (await import('../task/task.model.js')).default;
     const ReadyToShipment = (await import('../readytoshipment/readytoshipment.model.js')).default;
@@ -451,7 +451,7 @@ router.post('/repair', auth('admin', 'manager', 'sales', 'support'), departmentF
   }
 });
 
-router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentFilter, async (req, res) => {
+router.get('/on-hold', auth('admin', 'manager', 'sales', 'support', 'staff'), departmentFilter, async (req, res) => {
   try {
     const Lead = (await import('../lead/lead.model.js')).default;
 
@@ -464,18 +464,18 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
     };
     if (req.query.department) {
       query.department = req.query.department;
-      if (['sales', 'support', 'logistics'].includes(req.user.role) && req.userDepartments?.length > 0) {
+      if (['sales', 'support', 'logistics', 'staff'].includes(req.user.role) && req.userDepartments?.length > 0) {
         if (!req.userDepartments.includes(req.query.department)) query.department = "NOT_ALLOWED";
       }
-    } else if (['sales', 'support', 'logistics'].includes(req.user.role)) {
+    } else if (['sales', 'support', 'logistics', 'staff'].includes(req.user.role)) {
       if (req.userDepartments && req.userDepartments.length > 0) {
         query.$or = [
           { department: { $in: req.userDepartments } },
           { department: null }
         ];
       }
-      // Staff only see their own verification records (support and sales see all)
-      if (!['support', 'sales'].includes(req.user.role)) {
+      // Staff, sales, support can view all on-hold verifications
+      if (!['support', 'sales', 'staff'].includes(req.user.role)) {
         query.assignedTo = req.user._id;
       }
     }
@@ -622,7 +622,7 @@ router.get('/on-hold', auth('admin', 'manager', 'sales', 'support'), departmentF
   }
 });
 
-router.get('/by-task/:taskId', auth('admin', 'manager', 'sales', 'support'), departmentFilter, async (req, res) => {
+router.get('/by-task/:taskId', auth('admin', 'manager', 'sales', 'support', 'staff'), departmentFilter, async (req, res) => {
   try {
     const record = await Verification.findOne({ task: req.params.taskId, isDeleted: { $ne: true } }).select('_id status').lean();
     if (!record) return res.status(404).json({ status: 404, message: 'Not found' });
@@ -632,13 +632,30 @@ router.get('/by-task/:taskId', auth('admin', 'manager', 'sales', 'support'), dep
   }
 });
 
-router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, async (req, res) => {
+router.patch('/:id', auth('admin', 'manager', 'sales', 'support', 'staff'), departmentFilter, requireCheckedIn, async (req, res) => {
   try {
-    const recordBefore = await Verification.findById(req.params.id);
-    if (!recordBefore) return res.status(404).json({ message: 'Not found' });
+    let recordBefore = await Verification.findById(req.params.id);
+    let isPipelineLead = false;
+    let pipelineLeadDoc = null;
 
-    const { status, onHoldUntil, onHoldReason, assignedTo: incomingAssignedTo, ...taskFields } = req.body;
+    if (!recordBefore) {
+      // Check if req.params.id is a Lead ID (pipeline on-hold record)
+      const Lead = (await import('../lead/lead.model.js')).default;
+      pipelineLeadDoc = await Lead.findById(req.params.id);
+      if (!pipelineLeadDoc) return res.status(404).json({ message: 'Record not found' });
+      isPipelineLead = true;
+    }
+
+    const { status, onHoldUntil, onHoldReason, assignedTo: incomingAssignedTo, name, phone, ...taskFields } = req.body;
     const update = { ...taskFields };
+
+    if (name !== undefined) {
+      update.name = name;
+      update.title = name;
+    }
+    if (phone !== undefined) {
+      update.phone = phone;
+    }
 
     // assignedTo: only admin can explicitly change it (via assign modal).
     // For all other updates (price, address, etc.) preserve the original owner.
@@ -650,18 +667,18 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
       update.status = status;
       if (status === 'verified' || status === 'dispatch' || status === 'dispatched') {
         // Jo bhi verification me laya tha (assignedTo / changedBy) — usi ko 100% credit.
-        let targetCloser = recordBefore.assignedTo || req.user._id;
+        let targetCloser = recordBefore?.assignedTo || req.user._id;
         let closerUser = await User.findById(targetCloser).select('role').lean();
         
         if (!closerUser || ['admin', 'manager', 'logistic'].includes(closerUser?.role)) {
-          if (recordBefore.changedBy) {
+          if (recordBefore?.changedBy) {
             const cbUser = await User.findById(recordBefore.changedBy).select('role').lean();
             if (cbUser && ['sales', 'support'].includes(cbUser.role)) {
               targetCloser = recordBefore.changedBy;
               closerUser = cbUser;
             }
           }
-          if ((!closerUser || ['admin', 'manager', 'logistic'].includes(closerUser?.role)) && recordBefore.lead) {
+          if ((!closerUser || ['admin', 'manager', 'logistic'].includes(closerUser?.role)) && recordBefore?.lead) {
             const leadDoc = await mongoose.model('Lead').findById(recordBefore.lead).select('assignedTo').lean();
             if (leadDoc && leadDoc.assignedTo) {
               const leadUser = await User.findById(leadDoc.assignedTo).select('role').lean();
@@ -676,17 +693,161 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
           }
         }
         update.verifiedBy = targetCloser;
-        if (!recordBefore.assignedTo || (targetCloser && String(targetCloser) !== String(recordBefore.assignedTo))) {
+        if (!recordBefore?.assignedTo || (targetCloser && String(targetCloser) !== String(recordBefore.assignedTo))) {
           update.assignedTo = targetCloser;
         }
-      } else if (!update.assignedTo && !recordBefore.assignedTo) {
-        // Pehli baar koi action le raha hai aur koi owner nahi — use hi assign karo
+      } else if (!update.assignedTo && !recordBefore?.assignedTo) {
         update.assignedTo = req.user._id;
       }
     }
     if (onHoldUntil) update.onHoldUntil = onHoldUntil;
     if (onHoldReason) update.onHoldReason = onHoldReason;
     if (status === 'on_hold') update.onHoldAt = new Date();
+
+    const targetLeadId = isPipelineLead ? pipelineLeadDoc._id : (recordBefore?.lead?._id || recordBefore?.lead);
+
+    // Propagate phone, name, and address to ALL associated collections
+    if (targetLeadId) {
+      const Lead = (await import('../lead/lead.model.js')).default;
+      const leadUpdates = {
+        ...(name !== undefined && { name }),
+        ...(phone !== undefined && { phone }),
+        ...(update.houseNo !== undefined && { houseNo: update.houseNo }),
+        ...(update.cityVillage !== undefined && { cityVillage: update.cityVillage }),
+        ...(update.cityVillageType !== undefined && { cityVillageType: update.cityVillageType }),
+        ...(update.postOffice !== undefined && { postOffice: update.postOffice }),
+        ...(update.district !== undefined && { district: update.district }),
+        ...(update.state !== undefined && { state: update.state }),
+        ...(update.pincode !== undefined && { pincode: update.pincode }),
+        ...(update.landmark !== undefined && { landmark: update.landmark }),
+        ...(update.problem !== undefined && { problem: update.problem }),
+        ...(update.age !== undefined && { age: update.age }),
+        ...(update.weight !== undefined && { weight: update.weight }),
+        ...(update.height !== undefined && { height: update.height }),
+        ...(update.otherProblems !== undefined && { otherProblems: update.otherProblems }),
+        ...(update.problemDuration !== undefined && { problemDuration: update.problemDuration }),
+        ...(update.department !== undefined && { department: update.department }),
+        ...(update.price !== undefined && { revenue: update.price }),
+      };
+      await Lead.findByIdAndUpdate(targetLeadId, { $set: leadUpdates }).catch(() => {});
+
+      // Sync PilesLead
+      try {
+        const PilesLead = (await import('../lead/pilesLead.model.js')).default;
+        await PilesLead.updateMany(
+          { $or: [{ lead: targetLeadId }, ...(recordBefore?.phone ? [{ phone: recordBefore.phone }] : [])] },
+          { $set: { ...(name !== undefined && { name }), ...(phone !== undefined && { phone }) } }
+        ).catch(() => {});
+      } catch (_) {}
+
+      // Sync Status Collections (Interested, OnHold, Pending, Verified)
+      try {
+        const { InterestedLead, NotInterestedLead, PendingOrder, OnHoldOrder, VerifiedOrder } = await import('../transition/statusModels.js');
+        const statusModels = [InterestedLead, NotInterestedLead, PendingOrder, OnHoldOrder, VerifiedOrder];
+        const statusUpdates = {
+          ...(name !== undefined && { name, title: name }),
+          ...(phone !== undefined && { phone }),
+          ...(update.houseNo !== undefined && { houseNo: update.houseNo }),
+          ...(update.cityVillage !== undefined && { cityVillage: update.cityVillage }),
+          ...(update.cityVillageType !== undefined && { cityVillageType: update.cityVillageType }),
+          ...(update.postOffice !== undefined && { postOffice: update.postOffice }),
+          ...(update.district !== undefined && { district: update.district }),
+          ...(update.state !== undefined && { state: update.state }),
+          ...(update.pincode !== undefined && { pincode: update.pincode }),
+          ...(update.landmark !== undefined && { landmark: update.landmark }),
+          ...(update.problem !== undefined && { problem: update.problem }),
+        };
+        for (const SM of statusModels) {
+          await SM.updateMany(
+            { $or: [{ _id: targetLeadId }, ...(recordBefore?.phone ? [{ phone: recordBefore.phone }] : [])] },
+            { $set: statusUpdates }
+          ).catch(() => {});
+        }
+      } catch (_) {}
+
+      // Sync Task
+      try {
+        const Task = (await import('../task/task.model.js')).default;
+        const taskUpdates = {
+          ...(name !== undefined && { title: name }),
+          ...(update.problem !== undefined && { problem: update.problem }),
+          ...(update.price !== undefined && { price: update.price }),
+          ...(update.houseNo !== undefined && { houseNo: update.houseNo }),
+          ...(update.cityVillage !== undefined && { cityVillage: update.cityVillage }),
+          ...(update.cityVillageType !== undefined && { cityVillageType: update.cityVillageType }),
+          ...(update.postOffice !== undefined && { postOffice: update.postOffice }),
+          ...(update.district !== undefined && { district: update.district }),
+          ...(update.state !== undefined && { state: update.state }),
+          ...(update.pincode !== undefined && { pincode: update.pincode }),
+          ...(update.landmark !== undefined && { landmark: update.landmark }),
+        };
+        await Task.updateMany({ lead: targetLeadId }, { $set: taskUpdates }).catch(() => {});
+      } catch (_) {}
+
+      // Sync ReadyToShipment
+      try {
+        const ReadyToShipment = (await import('../readytoshipment/readytoshipment.model.js')).default;
+        await ReadyToShipment.updateMany(
+          { lead: targetLeadId },
+          {
+            $set: {
+              ...(name !== undefined && { title: name }),
+              ...(update.houseNo !== undefined && { houseNo: update.houseNo }),
+              ...(update.cityVillage !== undefined && { cityVillage: update.cityVillage }),
+              ...(update.cityVillageType !== undefined && { cityVillageType: update.cityVillageType }),
+              ...(update.postOffice !== undefined && { postOffice: update.postOffice }),
+              ...(update.district !== undefined && { district: update.district }),
+              ...(update.state !== undefined && { state: update.state }),
+              ...(update.pincode !== undefined && { pincode: update.pincode }),
+              ...(update.landmark !== undefined && { landmark: update.landmark }),
+              ...(update.price !== undefined && { price: update.price }),
+            }
+          }
+        ).catch(() => {});
+      } catch (_) {}
+
+      // Sync Orders
+      try {
+        const { Order } = await import('../shiprocket/models/order.model.js');
+        const { ShipmaxxOrder } = await import('../shipmaxx/models/shipmaxxOrder.model.js');
+        const orderUpdates = {
+          ...(phone !== undefined && { billing_phone: phone }),
+          ...(name !== undefined && { billing_customer_name: name }),
+        };
+        if (Object.keys(orderUpdates).length > 0) {
+          await Promise.all([
+            Order.updateMany({ lead_id: targetLeadId }, { $set: orderUpdates }),
+            ShipmaxxOrder.updateMany({ lead_id: targetLeadId }, { $set: orderUpdates })
+          ]).catch(() => {});
+        }
+      } catch (_) {}
+    }
+
+    if (isPipelineLead) {
+      const Lead = (await import('../lead/lead.model.js')).default;
+      if (status) {
+        await Lead.findByIdAndUpdate(pipelineLeadDoc._id, {
+          status,
+          ...(onHoldReason && { onHoldReason }),
+          ...(onHoldUntil && { onHoldUntil }),
+          ...(status === 'on_hold' && { onHoldAt: new Date() }),
+        });
+      }
+      const updatedLead = await Lead.findById(pipelineLeadDoc._id).populate('assignedTo', 'name email').lean();
+      return res.json({
+        status: 200,
+        data: {
+          _id: updatedLead._id,
+          title: updatedLead.name,
+          status: updatedLead.status,
+          onHoldReason: updatedLead.onHoldReason,
+          onHoldUntil: updatedLead.onHoldUntil,
+          assignedTo: updatedLead.assignedTo,
+          lead: updatedLead,
+          _isPipelineOnly: true,
+        }
+      });
+    }
 
     const record = await Verification.findByIdAndUpdate(
       req.params.id,
@@ -697,30 +858,6 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
       .populate('verifiedBy', 'name email')
       .populate('lead', 'name phone status address houseNo cityVillage cityVillageType postOffice landmark district state pincode problem createdBy assignedTo pending_reorder_source');
     if (!record) return res.status(404).json({ message: 'Not found' });
-
-    if (record.lead) {
-      const Lead = (await import('../lead/lead.model.js')).default;
-      const leadId = record.lead._id || record.lead;
-      const profileFields = {
-        houseNo: record.houseNo,
-        cityVillage: record.cityVillage,
-        cityVillageType: record.cityVillageType,
-        postOffice: record.postOffice,
-        district: record.district,
-        state: record.state,
-        pincode: record.pincode,
-        landmark: record.landmark,
-        problem: record.problem,
-        age: record.age,
-        weight: record.weight,
-        height: record.height,
-        otherProblems: record.otherProblems,
-        problemDuration: record.problemDuration,
-        department: record.department
-      };
-      Object.keys(profileFields).forEach(key => profileFields[key] === undefined && delete profileFields[key]);
-      await Lead.findByIdAndUpdate(leadId, { $set: profileFields }).catch(() => {});
-    }
 
     const Task = (await import('../task/task.model.js')).default;
     const ReadyToShipment = (await import('../readytoshipment/readytoshipment.model.js')).default;
@@ -924,7 +1061,7 @@ router.patch('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFil
   }
 });
 
-router.delete('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, async (req, res) => {
+router.delete('/:id', auth('admin', 'manager', 'sales', 'support', 'staff'), departmentFilter, requireCheckedIn, async (req, res) => {
   try {
     const Lead = (await import('../lead/lead.model.js')).default;
     const Task = (await import('../task/task.model.js')).default;
@@ -953,7 +1090,7 @@ router.delete('/:id', auth('admin', 'manager', 'sales', 'support'), departmentFi
   }
 });
 
-router.post('/:id/notes', auth('admin', 'manager', 'sales', 'support'), departmentFilter, requireCheckedIn, async (req, res) => {
+router.post('/:id/notes', auth('admin', 'manager', 'sales', 'support', 'staff'), departmentFilter, requireCheckedIn, async (req, res) => {
   try {
     const { text } = req.body;
     if (!text || !text.trim()) {

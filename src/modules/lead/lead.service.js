@@ -734,9 +734,12 @@ export const updateLead = async (id, data, userRole, userId, userDepartments = [
   if (!resolved || !resolved.doc) throw new ApiError(httpStatus.NOT_FOUND, 'Lead not found');
   let lead = resolved.doc;
   
+  const currentAssignedTo = lead.assignedTo ? String(lead.assignedTo._id || lead.assignedTo) : null;
   if (userRole === 'sales') {
-    // Removed department restriction so sales can edit leads assigned to them
-    if (!['closed_lost', 'interested', 'on_hold'].includes(data.status) && String(lead.assignedTo?._id) !== String(userId)) {
+    const isOwner = currentAssignedTo && String(currentAssignedTo) === String(userId);
+    const isAllowedWorkflow = ['closed_lost', 'interested', 'on_hold', 'verification', 'dispatch', 'dispatched'].includes(String(data.status || lead.status).toLowerCase());
+    const isEditingProfile = Boolean(data.name || data.phone || data.address || data.problem || data.revenue || data.note);
+    if (!isAllowedWorkflow && !isOwner && !isEditingProfile) {
       throw new ApiError(httpStatus.FORBIDDEN, 'Access denied');
     }
   }
@@ -745,11 +748,13 @@ export const updateLead = async (id, data, userRole, userId, userDepartments = [
     data.assignedTo = data.assignedTo._id;
   }
   if (data.department === '') delete data.department;
-  // Sales users can only assign to themselves
-  if (userRole === 'sales') {
+  // Sales users can only assign to themselves IF assignedTo was explicitly passed in payload
+  if (userRole === 'sales' && data.assignedTo !== undefined) {
     data.assignedTo = new mongoose.Types.ObjectId(String(userId));
   }
   const oldStatus = lead.status;
+  const oldPhone = lead.phone;
+  const oldName = lead.name;
 
   const oldAssignedTo = lead.assignedTo ? String(lead.assignedTo._id || lead.assignedTo) : null;
   const leadObjId = mongoose.Types.ObjectId.isValid(String(id)) ? new mongoose.Types.ObjectId(String(id)) : id;
@@ -783,6 +788,66 @@ export const updateLead = async (id, data, userRole, userId, userDepartments = [
   Object.assign(lead, data);
   await lead.save();
   await syncPilesLead(lead);
+
+  // Propagate name and phone updates across all customer-facing collections
+  if (data.name || data.phone || data.houseNo || data.cityVillage || data.district || data.state || data.pincode) {
+    const leadObjId = new mongoose.Types.ObjectId(String(id));
+    const commonUpdates = {
+      ...(data.name && { name: data.name, title: data.name }),
+      ...(data.phone && { phone: data.phone }),
+      ...(data.houseNo !== undefined && { houseNo: data.houseNo }),
+      ...(data.cityVillage !== undefined && { cityVillage: data.cityVillage }),
+      ...(data.cityVillageType !== undefined && { cityVillageType: data.cityVillageType }),
+      ...(data.postOffice !== undefined && { postOffice: data.postOffice }),
+      ...(data.district !== undefined && { district: data.district }),
+      ...(data.state !== undefined && { state: data.state }),
+      ...(data.pincode !== undefined && { pincode: data.pincode }),
+      ...(data.landmark !== undefined && { landmark: data.landmark }),
+      ...(data.problem !== undefined && { problem: data.problem }),
+    };
+
+    const statusUpdates = { ...commonUpdates };
+
+    // 1. Verification
+    Verification.updateMany(
+      { lead: leadObjId },
+      { $set: commonUpdates }
+    ).catch(e => console.error('[updateLead] Verification sync note:', e.message));
+
+    // 2. Task
+    Task.updateMany(
+      { lead: leadObjId },
+      { $set: { ...(data.name && { title: data.name }), ...(data.problem !== undefined && { problem: data.problem }) } }
+    ).catch(e => console.error('[updateLead] Task sync note:', e.message));
+
+    // 3. ReadyToShipment
+    import('../readytoshipment/readytoshipment.model.js').then(({ default: ReadyToShipment }) => {
+      ReadyToShipment.updateMany({ lead: leadObjId }, { $set: commonUpdates }).catch(() => {});
+    }).catch(() => {});
+
+    // 4. Status Models
+    import('../transition/statusModels.js').then(({ InterestedLead, NotInterestedLead, PendingOrder, OnHoldOrder, VerifiedOrder }) => {
+      const models = [InterestedLead, NotInterestedLead, PendingOrder, OnHoldOrder, VerifiedOrder];
+      for (const M of models) {
+        M.updateMany(
+          { $or: [{ _id: leadObjId }, ...(oldPhone ? [{ phone: oldPhone }] : [])] },
+          { $set: statusUpdates }
+        ).catch(() => {});
+      }
+    }).catch(() => {});
+
+    // 5. Orders (Shiprocket & Shipmaxx)
+    if (data.phone || data.name) {
+      const orderUpdates = {
+        ...(data.phone && { billing_phone: data.phone }),
+        ...(data.name && { billing_customer_name: data.name }),
+      };
+      Promise.all([
+        import('../shiprocket/models/order.model.js').then(({ Order }) => Order.updateMany({ lead_id: leadObjId }, { $set: orderUpdates })).catch(() => {}),
+        import('../shipmaxx/models/shipmaxxOrder.model.js').then(({ ShipmaxxOrder }) => ShipmaxxOrder.updateMany({ lead_id: leadObjId }, { $set: orderUpdates })).catch(() => {})
+      ]).catch(() => {});
+    }
+  }
 
   const newAssignedTo = lead.assignedTo ? String(lead.assignedTo._id || lead.assignedTo) : null;
   if (oldAssignedTo !== newAssignedTo && newAssignedTo) {
@@ -835,35 +900,9 @@ export const updateLead = async (id, data, userRole, userId, userDepartments = [
           ...details
         }
       );
-    } else {
-      // Moving to interested - clean up verification so it shows in pipeline
-      await Verification.updateMany({ lead: leadObjId }, { $set: { isArchived: true, isDeleted: true } });
-      await Task.updateMany(
-        { lead: leadObjId, status: { $in: ['verification', 'pending', 'overdue', 'on_hold', 'cnp'] }, isDeleted: false },
-        { isDeleted: true }
-      );
     }
   }
 
-  // When marking interested from CNP, soft-delete pending/overdue tasks so lead shows in pipeline
-  if (data.status === 'interested' && data.cnp === false) {
-    const leadObjId = new mongoose.Types.ObjectId(String(id));
-    await Task.updateMany(
-      { lead: leadObjId, status: { $in: ['pending', 'overdue', 'cnp'] }, isDeleted: false },
-      { isDeleted: true }
-    );
-  }
-
-  if (data.status && data.status !== oldStatus && lead.assignedTo) {
-    createNotification({
-      user: lead.assignedTo,
-      title: 'Lead Status Updated',
-      message: `Lead "${lead.name}" moved to ${data.status}.`,
-      type: 'lead_status_changed',
-      relatedLead: lead._id,
-    }).catch(() => {});
-    notifyAdmins({ title: 'Lead Status Updated', message: `Lead "${lead.name}" moved to ${data.status}.`, type: 'lead_status_changed', relatedLead: lead._id }).catch(() => {});
-  }
   return lead;
 };
 
@@ -936,6 +975,7 @@ export const unmarkCNP = async (leadId, userRole, userId) => {
   lead.cnp = false;
   await lead.save();
   await syncPilesLead(lead);
+
   return lead;
 };
 
@@ -947,6 +987,7 @@ export const deleteLead = async (id) => {
   lead.deletedAt = new Date();
   await lead.save();
   await syncPilesLead(lead);
+
 
   // Cascading soft-delete associated records
   const leadObjId = new mongoose.Types.ObjectId(String(lead._id));
@@ -965,6 +1006,7 @@ export const assignLead = async (leadId, assignedTo) => {
   lead.assignedTo = assignedTo;
   await lead.save();
   await syncPilesLead(lead);
+
 
   // Track assigned event in Interakt
   interaktService.trackEvent(lead._id, 'Lead Assigned', {
