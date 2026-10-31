@@ -537,9 +537,9 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
   const { OnHoldOrder } = await import('../transition/statusModels.js');
 
   const userQuery = { role: { $in: ['sales', 'manager', 'doctor', 'support', 'logistics'] }, isDeleted: false };
-  if (requestingUser && ['sales', 'support', 'logistics'].includes(requestingUser.role)) {
-    userQuery._id = requestingUser._id;
-  }
+  // Keep all users in userQuery so company-wide attribution and phone-to-sales maps
+  // evaluate accurately without misattributing other agents' orders.
+  // staffStats will be filtered to requestingUser at the end if requestingUser is staff.
   const allUsers = await User.find(userQuery).select('_id name phone role').lean();
   
   const statsMap = {};
@@ -1263,9 +1263,12 @@ export const getAllStaffStats = async (targetDate, fromDate, toDate, preset, req
     delete statsMap[k]._caSet;
   }
 
-  const staffStats = Object.values(statsMap);
+  let staffStats = Object.values(statsMap);
   
   const isStaff = requestingUser && ['sales', 'support', 'logistics'].includes(requestingUser.role);
+  if (isStaff) {
+    staffStats = staffStats.filter(s => String(s.user._id) === String(requestingUser._id));
+  }
 
   return {
     staffStats, // The array of stats per staff
