@@ -18,6 +18,7 @@ import interaktRoute from '../modules/interakt/interakt.routes.js';
 import shipmaxxRoute from '../modules/shipmaxx/shipmaxx.routes.js';
 import integrationsRoute from '../modules/integrations/integrations.routes.js';
 import opsDashboardRoute from '../modules/ops-dashboard/opsDashboard.routes.js';
+import callLogRoute from '../modules/call-log/callLog.routes.js';
 
 const router = express.Router();
 // Define all the routes for the application
@@ -42,6 +43,7 @@ const defaultRoutes = [
   { path: '/shipmaxx', route: shipmaxxRoute },
   { path: '/integrations', route: integrationsRoute },
   { path: '/ops-dashboard', route: opsDashboardRoute },
+  { path: '/call-logs', route: callLogRoute },
 ];
  
 defaultRoutes.forEach((route) => {
