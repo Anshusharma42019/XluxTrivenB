@@ -15,7 +15,10 @@ const register = catchAsync(async (req, res) => {
  * Handle user login.
  */
 const login = catchAsync(async (req, res) => {
-  const { role, email, phone, password } = req.body;
+  let { role, email, phone, password } = req.body;
+  if (!phone && email && /^\+?[\d\s-]{7,15}$/.test(String(email).trim())) {
+    phone = String(email).trim();
+  }
   const user = await authService.loginUser({ role, email, phone, password });
   const tokens = await authService.generateAuthTokens(user);
   res.send(new ApiResponse(200, { user, tokens }, 'Logged in successfully'));
