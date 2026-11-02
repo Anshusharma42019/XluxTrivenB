@@ -219,7 +219,19 @@ export const syncCallLogs = async (staffId, logs = []) => {
 
     syncedCount++;
 
-    // 6. Automated Lead Side-Effects (Zero Data Loss)
+    // 6. Auto-Resolve Missed Calls: If staff dialed this customer or answered incoming, resolve all prior pending missed calls
+    try {
+      if (callType === 'outgoing' || (callType === 'incoming' && duration > 0)) {
+        await CallLog.updateMany(
+          { phoneNumber: cleanNumber, status: 'missed_pending' },
+          { $set: { status: 'missed_resolved', resolvedAt: timestamp, resolvedBy: staffId } }
+        );
+      }
+    } catch (resolveErr) {
+      console.warn(`[CallLog] Auto-resolve error for ${cleanNumber}:`, resolveErr.message);
+    }
+
+    // 7. Automated Lead Side-Effects (Zero Data Loss)
     try {
       if (leadId && leadModel === 'Lead') {
         const leadDoc = await Lead.findById(leadId);
@@ -245,11 +257,6 @@ export const syncCallLogs = async (staffId, logs = []) => {
                 createdAt: timestamp,
                 direction: 'outbound',
               });
-              // Auto-resolve any pending missed calls on this number
-              await CallLog.updateMany(
-                { phoneNumber: cleanNumber, status: 'missed_pending' },
-                { $set: { status: 'missed_resolved', resolvedAt: timestamp, resolvedBy: staffId } }
-              );
             }
           } else if (callType === 'missed') {
             leadDoc.notes.push({
@@ -336,6 +343,12 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
         missedCalls: {
           $sum: { $cond: [{ $eq: ['$callType', 'missed'] }, 1, 0] },
         },
+        pendingMissedCalls: {
+          $sum: { $cond: [{ $and: [{ $eq: ['$callType', 'missed'] }, { $eq: ['$status', 'missed_pending'] }] }, 1, 0] },
+        },
+        resolvedMissedCalls: {
+          $sum: { $cond: [{ $and: [{ $eq: ['$callType', 'missed'] }, { $eq: ['$status', 'missed_resolved'] }] }, 1, 0] },
+        },
         incomingConnected: {
           $sum: {
             $cond: [{ $and: [{ $eq: ['$callType', 'incoming'] }, { $gt: ['$duration', 0] }] }, 1, 0],
@@ -354,6 +367,8 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
     connectedCalls: 0,
     cnpCalls: 0,
     missedCalls: 0,
+    pendingMissedCalls: 0,
+    resolvedMissedCalls: 0,
     incomingConnected: 0,
     duplicateCalls: 0,
   };
@@ -382,6 +397,12 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
         missedCalls: {
           $sum: { $cond: [{ $eq: ['$callType', 'missed'] }, 1, 0] },
         },
+        pendingMissedCalls: {
+          $sum: { $cond: [{ $and: [{ $eq: ['$callType', 'missed'] }, { $eq: ['$status', 'missed_pending'] }] }, 1, 0] },
+        },
+        resolvedMissedCalls: {
+          $sum: { $cond: [{ $and: [{ $eq: ['$callType', 'missed'] }, { $eq: ['$status', 'missed_resolved'] }] }, 1, 0] },
+        },
         lastCallAt: { $max: '$timestamp' },
       },
     },
@@ -406,6 +427,8 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
         connectedCalls: row.connectedCalls,
         cnpCalls: row.cnpCalls,
         missedCalls: row.missedCalls,
+        pendingMissedCalls: row.pendingMissedCalls || 0,
+        resolvedMissedCalls: row.resolvedMissedCalls || 0,
         avgDuration, // in seconds
         lastCallAt: row.lastCallAt,
       };
@@ -418,12 +441,13 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
 /**
  * Paginated Call Logs List
  */
-export const getCallLogs = async ({ page = 1, limit = 50, staffId, department, callType, search, isDuplicate, startDate, endDate }) => {
+export const getCallLogs = async ({ page = 1, limit = 50, staffId, department, callType, status, search, isDuplicate, startDate, endDate }) => {
   const query = {};
 
   if (staffId) query.staffId = staffId;
   if (department && department !== 'all') query.department = department;
   if (callType && callType !== 'all') query.callType = callType;
+  if (status && status !== 'all') query.status = status;
   if (isDuplicate !== undefined) query.isDuplicate = isDuplicate === 'true' || isDuplicate === true;
 
   if (startDate || endDate) {

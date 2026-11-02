@@ -36,13 +36,14 @@ export const getStats = catchAsync(async (req, res) => {
 });
 
 export const getLogs = catchAsync(async (req, res) => {
-  const { page, limit, staffId, department, callType, search, isDuplicate, startDate, endDate } = req.query;
+  const { page, limit, staffId, department, callType, status, search, isDuplicate, startDate, endDate } = req.query;
   const result = await callLogService.getCallLogs({
     page,
     limit,
     staffId,
     department,
     callType,
+    status,
     search,
     isDuplicate,
     startDate,
