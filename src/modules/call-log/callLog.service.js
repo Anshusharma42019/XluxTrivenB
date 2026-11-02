@@ -418,13 +418,19 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
 /**
  * Paginated Call Logs List
  */
-export const getCallLogs = async ({ page = 1, limit = 50, staffId, department, callType, search, isDuplicate }) => {
+export const getCallLogs = async ({ page = 1, limit = 50, staffId, department, callType, search, isDuplicate, startDate, endDate }) => {
   const query = {};
 
   if (staffId) query.staffId = staffId;
   if (department && department !== 'all') query.department = department;
   if (callType && callType !== 'all') query.callType = callType;
   if (isDuplicate !== undefined) query.isDuplicate = isDuplicate === 'true' || isDuplicate === true;
+
+  if (startDate || endDate) {
+    query.timestamp = {};
+    if (startDate) query.timestamp.$gte = new Date(startDate);
+    if (endDate) query.timestamp.$lte = new Date(endDate);
+  }
 
   if (search && search.trim()) {
     const clean = cleanPhone(search.trim());

@@ -36,7 +36,7 @@ export const getStats = catchAsync(async (req, res) => {
 });
 
 export const getLogs = catchAsync(async (req, res) => {
-  const { page, limit, staffId, department, callType, search, isDuplicate } = req.query;
+  const { page, limit, staffId, department, callType, search, isDuplicate, startDate, endDate } = req.query;
   const result = await callLogService.getCallLogs({
     page,
     limit,
@@ -45,6 +45,8 @@ export const getLogs = catchAsync(async (req, res) => {
     callType,
     search,
     isDuplicate,
+    startDate,
+    endDate,
   });
   res.status(httpStatus.OK).json(new ApiResponse(httpStatus.OK, result, 'Call logs fetched successfully'));
 });
