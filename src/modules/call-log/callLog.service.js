@@ -350,7 +350,6 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
 
   const summary = summaryAgg[0] || {
     totalCalls: 0,
-    dialedCalls: 0,
     totalTalkTime: 0,
     connectedCalls: 0,
     cnpCalls: 0,
