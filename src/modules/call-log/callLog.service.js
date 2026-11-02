@@ -319,6 +319,9 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
       $group: {
         _id: null,
         totalCalls: { $sum: 1 },
+        dialedCalls: {
+          $sum: { $cond: [{ $eq: ['$callType', 'outgoing'] }, 1, 0] },
+        },
         totalTalkTime: { $sum: '$duration' },
         connectedCalls: {
           $sum: {
@@ -347,6 +350,7 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
 
   const summary = summaryAgg[0] || {
     totalCalls: 0,
+    dialedCalls: 0,
     totalTalkTime: 0,
     connectedCalls: 0,
     cnpCalls: 0,
@@ -362,6 +366,9 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
       $group: {
         _id: '$staffId',
         totalCalls: { $sum: 1 },
+        dialedCalls: {
+          $sum: { $cond: [{ $eq: ['$callType', 'outgoing'] }, 1, 0] },
+        },
         totalTalkTime: { $sum: '$duration' },
         connectedCalls: {
           $sum: {
@@ -386,6 +393,7 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
   const populatedLeaderboard = await Promise.all(
     staffLeaderboard.map(async (row) => {
       const user = await User.findById(row._id).select('name employeeId departments avatar role').lean();
+      const dialedCalls = row.dialedCalls !== undefined ? row.dialedCalls : (row.connectedCalls + row.cnpCalls);
       const avgDuration = row.connectedCalls > 0 ? Math.round(row.totalTalkTime / row.connectedCalls) : 0;
       return {
         staffId: row._id,
@@ -394,6 +402,7 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
         departments: user?.departments || [],
         avatar: user?.avatar || null,
         totalCalls: row.totalCalls,
+        dialedCalls,
         totalTalkTime: row.totalTalkTime, // in seconds
         connectedCalls: row.connectedCalls,
         cnpCalls: row.cnpCalls,
