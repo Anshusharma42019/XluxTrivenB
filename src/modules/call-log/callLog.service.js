@@ -326,16 +326,34 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
       $group: {
         _id: null,
         totalCalls: { $sum: 1 },
-        dialedCalls: {
+        totalDialAttempts: {
           $sum: { $cond: [{ $eq: ['$callType', 'outgoing'] }, 1, 0] },
         },
         totalTalkTime: { $sum: '$duration' },
+        connectedNumbers: {
+          $addToSet: {
+            $cond: [
+              { $and: [{ $eq: ['$callType', 'outgoing'] }, { $gt: ['$duration', 0] }] },
+              '$phoneNumber',
+              '$$REMOVE',
+            ],
+          },
+        },
         connectedCalls: {
           $sum: {
             $cond: [{ $and: [{ $eq: ['$callType', 'outgoing'] }, { $gt: ['$duration', 0] }] }, 1, 0],
           },
         },
-        cnpCalls: {
+        cnpNumbers: {
+          $addToSet: {
+            $cond: [
+              { $and: [{ $eq: ['$callType', 'outgoing'] }, { $eq: ['$duration', 0] }] },
+              '$phoneNumber',
+              '$$REMOVE',
+            ],
+          },
+        },
+        totalCnpAttempts: {
           $sum: {
             $cond: [{ $and: [{ $eq: ['$callType', 'outgoing'] }, { $eq: ['$duration', 0] }] }, 1, 0],
           },
@@ -359,18 +377,58 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
         },
       },
     },
+    {
+      $project: {
+        _id: 0,
+        totalCalls: 1,
+        totalTalkTime: 1,
+        connectedCalls: 1,
+        totalDialAttempts: 1,
+        totalCnpAttempts: 1,
+        uniqueConnectedLeads: { $size: '$connectedNumbers' },
+        cnpNumbersOnly: { $setDifference: ['$cnpNumbers', '$connectedNumbers'] },
+        missedCalls: 1,
+        pendingMissedCalls: 1,
+        resolvedMissedCalls: 1,
+        incomingConnected: 1,
+        duplicateCalls: 1,
+      },
+    },
+    {
+      $project: {
+        totalCalls: 1,
+        totalTalkTime: 1,
+        connectedCalls: 1,
+        totalDialAttempts: 1,
+        totalCnpAttempts: 1,
+        uniqueConnectedLeads: 1,
+        cnpCalls: { $size: '$cnpNumbersOnly' },
+        missedCalls: 1,
+        pendingMissedCalls: 1,
+        resolvedMissedCalls: 1,
+        incomingConnected: 1,
+        duplicateCalls: 1,
+      },
+    },
   ]);
 
-  const summary = summaryAgg[0] || {
+  const rawSummary = summaryAgg[0] || {
     totalCalls: 0,
     totalTalkTime: 0,
     connectedCalls: 0,
     cnpCalls: 0,
+    totalCnpAttempts: 0,
+    totalDialAttempts: 0,
     missedCalls: 0,
     pendingMissedCalls: 0,
     resolvedMissedCalls: 0,
     incomingConnected: 0,
     duplicateCalls: 0,
+  };
+
+  const summary = {
+    ...rawSummary,
+    dialedCalls: (rawSummary.connectedCalls || 0) + (rawSummary.cnpCalls || 0),
   };
 
   // 2. Staff Leaderboard Breakdown
@@ -380,16 +438,34 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
       $group: {
         _id: '$staffId',
         totalCalls: { $sum: 1 },
-        dialedCalls: {
+        totalDialAttempts: {
           $sum: { $cond: [{ $eq: ['$callType', 'outgoing'] }, 1, 0] },
         },
         totalTalkTime: { $sum: '$duration' },
+        connectedNumbers: {
+          $addToSet: {
+            $cond: [
+              { $and: [{ $eq: ['$callType', 'outgoing'] }, { $gt: ['$duration', 0] }] },
+              '$phoneNumber',
+              '$$REMOVE',
+            ],
+          },
+        },
         connectedCalls: {
           $sum: {
             $cond: [{ $and: [{ $eq: ['$callType', 'outgoing'] }, { $gt: ['$duration', 0] }] }, 1, 0],
           },
         },
-        cnpCalls: {
+        cnpNumbers: {
+          $addToSet: {
+            $cond: [
+              { $and: [{ $eq: ['$callType', 'outgoing'] }, { $eq: ['$duration', 0] }] },
+              '$phoneNumber',
+              '$$REMOVE',
+            ],
+          },
+        },
+        totalCnpAttempts: {
           $sum: {
             $cond: [{ $and: [{ $eq: ['$callType', 'outgoing'] }, { $eq: ['$duration', 0] }] }, 1, 0],
           },
@@ -406,6 +482,36 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
         lastCallAt: { $max: '$timestamp' },
       },
     },
+    {
+      $project: {
+        _id: 1,
+        totalCalls: 1,
+        totalTalkTime: 1,
+        connectedCalls: 1,
+        totalDialAttempts: 1,
+        totalCnpAttempts: 1,
+        cnpNumbersOnly: { $setDifference: ['$cnpNumbers', '$connectedNumbers'] },
+        missedCalls: 1,
+        pendingMissedCalls: 1,
+        resolvedMissedCalls: 1,
+        lastCallAt: 1,
+      },
+    },
+    {
+      $project: {
+        _id: 1,
+        totalCalls: 1,
+        totalTalkTime: 1,
+        connectedCalls: 1,
+        totalDialAttempts: 1,
+        totalCnpAttempts: 1,
+        cnpCalls: { $size: '$cnpNumbersOnly' },
+        missedCalls: 1,
+        pendingMissedCalls: 1,
+        resolvedMissedCalls: 1,
+        lastCallAt: 1,
+      },
+    },
     { $sort: { totalTalkTime: -1, totalCalls: -1 } },
   ]);
 
@@ -413,7 +519,7 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
   const populatedLeaderboard = await Promise.all(
     staffLeaderboard.map(async (row) => {
       const user = await User.findById(row._id).select('name employeeId departments avatar role').lean();
-      const dialedCalls = row.dialedCalls !== undefined ? row.dialedCalls : (row.connectedCalls + row.cnpCalls);
+      const dialedCalls = (row.connectedCalls || 0) + (row.cnpCalls || 0);
       const avgDuration = row.connectedCalls > 0 ? Math.round(row.totalTalkTime / row.connectedCalls) : 0;
       return {
         staffId: row._id,
@@ -423,9 +529,11 @@ export const getCallingStats = async ({ startDate, endDate, department, staffId 
         avatar: user?.avatar || null,
         totalCalls: row.totalCalls,
         dialedCalls,
+        totalDialAttempts: row.totalDialAttempts || dialedCalls,
         totalTalkTime: row.totalTalkTime, // in seconds
         connectedCalls: row.connectedCalls,
         cnpCalls: row.cnpCalls,
+        totalCnpAttempts: row.totalCnpAttempts || row.cnpCalls,
         missedCalls: row.missedCalls,
         pendingMissedCalls: row.pendingMissedCalls || 0,
         resolvedMissedCalls: row.resolvedMissedCalls || 0,
