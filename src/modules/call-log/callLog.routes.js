@@ -14,21 +14,21 @@ router.post(
 // 2. Telecalling Desk Stats & Leaderboard
 router.get(
   '/stats',
-  auth('admin', 'manager', 'sales', 'support'),
+  auth('admin', 'manager', 'sales', 'support', 'doctor', 'staff', 'logistics'),
   callLogController.getStats
 );
 
 // 3. Paginated Call Logs List
 router.get(
   '/',
-  auth('admin', 'manager', 'sales', 'support'),
+  auth('admin', 'manager', 'sales', 'support', 'doctor', 'staff', 'logistics'),
   callLogController.getLogs
 );
 
 // 4. Inbound Missed Calls Desk
 router.get(
   '/missed',
-  auth('admin', 'manager', 'sales', 'support'),
+  auth('admin', 'manager', 'sales', 'support', 'doctor', 'staff', 'logistics'),
   callLogController.getMissedCalls
 );
 
